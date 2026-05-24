@@ -1,0 +1,251 @@
+import { userFacingErrorMessage } from "./domain/userFacingErrors";
+
+type BatchSummary = {
+  batch_id: string;
+  pair_id: string;
+  epoch_id: number;
+  close_time_unix_ms: number;
+  status: string;
+};
+
+type IngressResponse = {
+  coordinator_submission: unknown;
+  receipt: unknown;
+};
+
+type CoordinatorAccepted = {
+  order_commitment: string;
+  batch_id: string;
+  accepted_at_unix_ms: number;
+};
+
+// Browser-side relay for exact-slot offline renewal packages produced by the
+// embedded wallet. This is intentionally separate from normal strategy
+// execution: it lets a delegated operator submit prebuilt child orders for
+// authorized epochs without receiving wallet spend or withdrawal keys.
+export type OfflineRenewalPackage = {
+  version: 1;
+  package_id: string;
+  package_commitment: string;
+  created_at_unix_ms: number;
+  pair: string;
+  start_epoch: number;
+  end_epoch: number;
+  slot_count: number;
+  ingress_key_registry_fingerprint?: string;
+  relay_policy: {
+    prover_url: string;
+    coordinator_url: string;
+    submission_safety_buffer_ms: number;
+    max_submission_delay_ms: number;
+  };
+  slots: OfflineRenewalSlot[];
+};
+
+export type OfflineRenewalSlot = {
+  slot_id: string;
+  pair: string;
+  batch_id: string;
+  epoch_id: number;
+  parent_child_index: number;
+  order_commitment: string;
+  ingress_request: unknown;
+};
+
+export type OfflineRenewalOperatorOptions = {
+  coordinatorUrl?: string;
+  proverUrl?: string;
+  submittedOrderCommitments?: Iterable<string>;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+};
+
+export type OfflineRenewalRelayResult = {
+  slot_id: string;
+  pair: string;
+  parent_child_index: number;
+  order_commitment: string;
+  batch_id: string;
+  epoch_id: number;
+  status:
+    | "submitted"
+    | "already_submitted"
+    | "not_due"
+    | "batch_not_open"
+    | "safety_buffer"
+    | "failed";
+  detail?: string;
+  accepted?: CoordinatorAccepted;
+};
+
+declare global {
+  interface Window {
+    zylithOfflineRenewalOperator?: {
+      relayPackage: typeof relayOfflineRenewalPackage;
+    };
+  }
+}
+
+export const OFFLINE_RENEWAL_RELAY_RESULTS_EVENT = "zylith:offline-renewal-relay-results";
+
+export function installOfflineRenewalOperatorRuntime() {
+  if (typeof window === "undefined") return;
+  window.zylithOfflineRenewalOperator = {
+    relayPackage: relayOfflineRenewalPackage,
+  };
+}
+
+export async function relayOfflineRenewalPackage(
+  renewalPackage: OfflineRenewalPackage,
+  options: OfflineRenewalOperatorOptions = {},
+): Promise<OfflineRenewalRelayResult[]> {
+  validateOfflineRenewalPackage(renewalPackage);
+  const fetcher = options.fetchImpl ?? fetch;
+  const coordinatorUrl = normalizeUrl(options.coordinatorUrl || renewalPackage.relay_policy.coordinator_url);
+  const proverUrl = normalizeUrl(options.proverUrl || renewalPackage.relay_policy.prover_url);
+  if (!coordinatorUrl || !proverUrl) {
+    throw new Error("Offline renewal operator requires coordinator and private ingress URLs");
+  }
+  const alreadySubmitted = new Set(options.submittedOrderCommitments ?? []);
+  const results: OfflineRenewalRelayResult[] = [];
+  for (const slot of renewalPackage.slots) {
+    if (alreadySubmitted.has(slot.order_commitment)) {
+      results.push(slotResult(slot, "already_submitted"));
+      continue;
+    }
+    try {
+      const currentBatch = await fetchCurrentPairBatch(fetcher, coordinatorUrl, slot.pair);
+      if (!currentBatch || currentBatch.batch_id !== slot.batch_id || currentBatch.epoch_id !== slot.epoch_id) {
+        results.push(slotResult(slot, "not_due"));
+        continue;
+      }
+      if (currentBatch.status !== "Open") {
+        results.push(slotResult(slot, "batch_not_open", currentBatch.status));
+        continue;
+      }
+      const now = options.now?.() ?? Date.now();
+      if (currentBatch.close_time_unix_ms - now <= renewalPackage.relay_policy.submission_safety_buffer_ms) {
+        results.push(slotResult(slot, "safety_buffer"));
+        continue;
+      }
+      await delay(relayDelayMs(currentBatch, renewalPackage, now));
+      const afterDelay = options.now?.() ?? Date.now();
+      if (currentBatch.close_time_unix_ms - afterDelay <= renewalPackage.relay_policy.submission_safety_buffer_ms) {
+        results.push(slotResult(slot, "safety_buffer"));
+        continue;
+      }
+      const ingress = await postJson<IngressResponse>(fetcher, proverUrl, "/api/private/orders", slot.ingress_request);
+      const accepted = await postJson<CoordinatorAccepted>(
+        fetcher,
+        coordinatorUrl,
+        "/api/orders",
+        ingress.coordinator_submission,
+      );
+      alreadySubmitted.add(slot.order_commitment);
+      results.push({
+        ...slotResult(slot, "submitted"),
+        accepted,
+      });
+    } catch (error) {
+      results.push(slotResult(slot, "failed", userFacingErrorMessage(error, "Relay failed.")));
+    }
+  }
+  dispatchRelayResults(renewalPackage, results);
+  return results;
+}
+
+function validateOfflineRenewalPackage(renewalPackage: OfflineRenewalPackage) {
+  if (renewalPackage.version !== 1) throw new Error("Unsupported offline renewal package version");
+  if (renewalPackage.slot_count !== renewalPackage.slots.length) {
+    throw new Error("Offline renewal package slot_count does not match slots length");
+  }
+  const seen = new Set<string>();
+  for (const slot of renewalPackage.slots) {
+    if (slot.pair !== renewalPackage.pair) throw new Error("Offline renewal slot pair mismatch");
+    if (slot.epoch_id < renewalPackage.start_epoch || slot.epoch_id > renewalPackage.end_epoch) {
+      throw new Error("Offline renewal slot epoch outside package range");
+    }
+    if (seen.has(slot.order_commitment)) throw new Error("Duplicate offline renewal order commitment");
+    seen.add(slot.order_commitment);
+    if (!slot.order_commitment.startsWith("0x")) throw new Error("Offline renewal slot commitment must be felt-like");
+  }
+}
+
+function slotResult(
+  slot: OfflineRenewalSlot,
+  status: OfflineRenewalRelayResult["status"],
+  detail?: string,
+): OfflineRenewalRelayResult {
+  return {
+    slot_id: slot.slot_id,
+    pair: slot.pair,
+    parent_child_index: slot.parent_child_index,
+    order_commitment: slot.order_commitment,
+    batch_id: slot.batch_id,
+    epoch_id: slot.epoch_id,
+    status,
+    detail,
+  };
+}
+
+function dispatchRelayResults(
+  renewalPackage: OfflineRenewalPackage,
+  results: OfflineRenewalRelayResult[],
+) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(OFFLINE_RENEWAL_RELAY_RESULTS_EVENT, {
+    detail: {
+      package_id: renewalPackage.package_id,
+      package_commitment: renewalPackage.package_commitment,
+      results,
+    },
+  }));
+}
+
+async function fetchCurrentPairBatch(fetcher: typeof fetch, coordinatorUrl: string, pair: string) {
+  const [base, quote] = pair.split("/");
+  return fetchJson<BatchSummary>(fetcher, coordinatorUrl, `/api/pairs/${base}/${quote}/batches/current`);
+}
+
+async function fetchJson<T>(fetcher: typeof fetch, baseUrl: string, path: string): Promise<T | null> {
+  const response = await fetcher(`${baseUrl}${path}`, {
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) return null;
+  return (await response.json()) as T;
+}
+
+async function postJson<T>(fetcher: typeof fetch, baseUrl: string, path: string, body: unknown): Promise<T> {
+  const response = await fetcher(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(detail || `Request failed with HTTP ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
+function relayDelayMs(batch: BatchSummary, renewalPackage: OfflineRenewalPackage, now: number) {
+  const maxDelay = Math.min(
+    renewalPackage.relay_policy.max_submission_delay_ms,
+    batch.close_time_unix_ms - now - renewalPackage.relay_policy.submission_safety_buffer_ms,
+  );
+  if (maxDelay <= 0) return 0;
+  const bytes = new Uint32Array(1);
+  crypto.getRandomValues(bytes);
+  return Math.floor((bytes[0] / 0x1_0000_0000) * maxDelay);
+}
+
+function delay(ms: number) {
+  return ms > 0 ? new Promise((resolve) => globalThis.setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+function normalizeUrl(value: string) {
+  return value.replace(/\/+$/, "");
+}
