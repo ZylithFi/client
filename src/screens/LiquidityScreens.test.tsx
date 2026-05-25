@@ -52,13 +52,21 @@ describe("LiquidityCurvesScreen", () => {
     const inputs = screen.getAllByRole("textbox");
     fireEvent.change(inputs[0], { target: { value: "2500" } });
     fireEvent.change(inputs[1], { target: { value: "3" } });
+    fireEvent.change(inputs[2], { target: { value: "2505" } });
+    fireEvent.change(inputs[3], { target: { value: "3" } });
+    fireEvent.change(inputs[4], { target: { value: "2510" } });
+    fireEvent.change(inputs[5], { target: { value: "3" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Activate hidden bid curve" }));
     });
 
     expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
       pairId: "ETH/USDC",
-      curvePoints: [{ price: "2500", baseAmount: "3" }],
+      curvePoints: [
+        { price: "2500", baseAmount: "3" },
+        { price: "2505", baseAmount: "3" },
+        { price: "2510", baseAmount: "3" },
+      ],
     }));
     expect(setActivePairId).not.toHaveBeenCalled();
   });

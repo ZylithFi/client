@@ -16,6 +16,7 @@ import { userFacingErrorMessage } from "../domain/userFacingErrors";
 type CurveSide = "bid" | "ask" | "two-sided";
 type Period = "7d" | "30d" | "90d" | "all";
 type LiquidityPageTab = "curves" | "orders" | "inventory" | "analytics";
+const MIN_CURVE_BANDS = 3;
 
 type LiquidityCurveRecord = {
   id: string;
@@ -363,7 +364,7 @@ function CurveBandEditor({
                 />
               </td>
               <td className="curve-band-cell">
-                {bands.length > 2 && (
+                {bands.length > MIN_CURVE_BANDS && (
                   <button
                     className="curve-band-remove"
                     type="button"
@@ -418,7 +419,7 @@ function CurvePreview({
   const prices = filledBands.map(band => parseHuman(band.price)).filter(value => value > 0);
   const threshold = fromAtomicStr(pair.min_order_amount, pair.base_asset_id);
   const thresholdNumber = parseHuman(threshold);
-  const eligible = totalDepth >= thresholdNumber && filledBands.length > 0;
+  const eligible = totalDepth >= thresholdNumber && filledBands.length >= MIN_CURVE_BANDS;
   let preview: FundingPreview | null = null;
   let previewError: string | null = null;
   if (filledBands.length > 0 && side !== "two-sided" && onPreviewFunding) {
@@ -528,8 +529,8 @@ export function LiquidityCurvesScreen({
 }) {
   const selectedPair = pairs.find(pair => pair.pair_id === activePairId) ?? pairs[0] ?? null;
   const [side, setSide] = useState<CurveSide>("bid");
-  const [bidBands, setBidBands] = useState<CurvePoint[]>(() => defaultCurveBands().slice(0, 2));
-  const [askBands, setAskBands] = useState<CurvePoint[]>(() => defaultCurveBands().slice(0, 2));
+  const [bidBands, setBidBands] = useState<CurvePoint[]>(() => defaultCurveBands());
+  const [askBands, setAskBands] = useState<CurvePoint[]>(() => defaultCurveBands());
   const [advanced, setAdvanced] = useState(false);
   const [inventoryCap, setInventoryCap] = useState("");
   const [renewing, setRenewing] = useState(false);
@@ -538,7 +539,7 @@ export function LiquidityCurvesScreen({
   function prefillBuilder(record: LiquidityCurveRecord) {
     setActivePairId(record.pair);
     setSide(record.side === "Buy" ? "bid" : "ask");
-    const nextBands = record.points.length > 0 ? record.points : defaultCurveBands().slice(0, 2);
+    const nextBands = record.points.length > 0 ? record.points : defaultCurveBands();
     if (record.side === "Buy") setBidBands(nextBands);
     else setAskBands(nextBands);
     setRenewing(Boolean(record.strategy));
@@ -586,7 +587,7 @@ export function LiquidityCurvesScreen({
         ["ask", askBands],
       ]
     : [[side, side === "bid" ? bidBands : askBands] as [Exclude<CurveSide, "two-sided">, CurvePoint[]]];
-  const canSubmit = walletReady && !submitting && sideBandSets.every(([, bands]) => bandRowsFilled(bands).length > 0);
+  const canSubmit = walletReady && !submitting && sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
 
   async function submit() {
     for (const [curveSide, bands] of sideBandSets) {
