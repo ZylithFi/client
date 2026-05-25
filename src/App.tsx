@@ -278,6 +278,7 @@ export default function App() {
 
   // Trade state
   const [activePairId, setActivePairId] = useState("STRK/USDC");
+  const [liquidityPairId, setLiquidityPairId] = useState("STRK/USDC");
   const activePair = pairs.find(p => p.pair_id === activePairId) ?? pairs[0] ?? null;
   const activeBatch = activePair ? batchByPair[activePair.pair_id] ?? null : null;
 
@@ -533,17 +534,24 @@ export default function App() {
   }, [walletReady, strategies, pairs, orders, saveAndSet]);
 
   // Submit order
+  function pairForIntent(intent: TicketSubmitIntent) {
+    if (intent.pairId) return pairs.find(pair => pair.pair_id === intent.pairId) ?? null;
+    return activePair;
+  }
+
   async function handleSubmit(intent: TicketSubmitIntent): Promise<boolean> {
     const w = walletRuntime();
     if (!w || !w.isReady()) { setSubmitError("Unlock your Zylith wallet first"); return false; }
-    if (!activePair) { setSubmitError("No active pair selected"); return false; }
-    if (!activeBatch) { setSubmitError("No active batch for this pair"); return false; }
+    const submitPair = pairForIntent(intent);
+    if (!submitPair) { setSubmitError("No active pair selected"); return false; }
+    const expectedBatch = batchByPair[submitPair.pair_id] ?? null;
+    if (!expectedBatch) { setSubmitError("No active batch for this pair"); return false; }
 
     setSubmitting(true); setSubmitError(null);
     try {
       const currentBatch = await apiCurrentPairBatch(
-        activePair.base_asset_id,
-        activePair.quote_asset_id,
+        submitPair.base_asset_id,
+        submitPair.quote_asset_id,
       );
       if (currentBatch.status !== "Open") {
         setSubmitError("Batch is no longer open");
@@ -559,8 +567,8 @@ export default function App() {
         ? intent.curvePoints
             .filter(pt => pt.price.trim() && pt.baseAmount.trim())
             .map(pt => ({
-              price: toPriceAtomicStr(pt.price, activePair.quote_asset_id),
-              baseAmount: toAtomicStr(pt.baseAmount, activePair.base_asset_id),
+              price: toPriceAtomicStr(pt.price, submitPair.quote_asset_id),
+              baseAmount: toAtomicStr(pt.baseAmount, submitPair.base_asset_id),
             }))
         : undefined;
       const sortedCurvePoints = [...(atomicCurvePoints ?? [])]
@@ -570,20 +578,20 @@ export default function App() {
         ? (intent.side === "Buy" ? sortedCurvePoints[sortedCurvePoints.length - 1].price : sortedCurvePoints[0].price)
         : "0";
       const atomicAmount = intent.shape === "curve"
-        ? (intent.inventoryCap.trim() ? toAtomicStr(intent.inventoryCap, activePair.base_asset_id) : curveBaseTotal.toString())
-        : toAtomicStr(intent.amount, activePair.base_asset_id);
+        ? (intent.inventoryCap.trim() ? toAtomicStr(intent.inventoryCap, submitPair.base_asset_id) : curveBaseTotal.toString())
+        : toAtomicStr(intent.amount, submitPair.base_asset_id);
       const atomicPrice = intent.shape === "curve"
         ? curveEnvelopePrice
-        : toPriceAtomicStr(intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0", activePair.quote_asset_id);
-      const atomicMinFill = toAtomicStr(intent.minFill || "0", activePair.base_asset_id);
-      const priceBaseScale = activePair.price_base_scale ?? assetScale(activePair.base_asset_id).toString();
-      const fundingAsset = intent.side === "Buy" ? activePair.quote_asset_id : activePair.base_asset_id;
+        : toPriceAtomicStr(intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0", submitPair.quote_asset_id);
+      const atomicMinFill = toAtomicStr(intent.minFill || "0", submitPair.base_asset_id);
+      const priceBaseScale = submitPair.price_base_scale ?? assetScale(submitPair.base_asset_id).toString();
+      const fundingAsset = intent.side === "Buy" ? submitPair.quote_asset_id : submitPair.base_asset_id;
       const fundingAmountAtomic = intent.side === "Buy"
         ? ((BigInt(atomicAmount) * BigInt(atomicPrice || "0")) / BigInt(priceBaseScale)).toString()
         : atomicAmount;
 
       const draft = {
-        pair: activePair.pair_id,
+        pair: submitPair.pair_id,
         side: intent.side,
         mode: wm,
         amount: atomicAmount,
@@ -593,7 +601,7 @@ export default function App() {
         batchId: currentBatch.batch_id,
         makerCurvePoints: atomicCurvePoints,
         makerInventoryCap: intent.shape === "curve" && intent.inventoryCap.trim()
-          ? toAtomicStr(intent.inventoryCap, activePair.base_asset_id)
+          ? toAtomicStr(intent.inventoryCap, submitPair.base_asset_id)
           : undefined,
         priceBaseScale,
         submissionTimingPreference: userPreferences.submissionTiming,
@@ -604,16 +612,16 @@ export default function App() {
         )
           ? Math.ceil((Number(intent.durationHours) * 3_600_000) / coordinatorStatus.batch_window_ms)
           : undefined,
-        childAmount: intent.childSize ? toAtomicStr(intent.childSize, activePair.base_asset_id) : undefined,
+        childAmount: intent.childSize ? toAtomicStr(intent.childSize, submitPair.base_asset_id) : undefined,
         randomizedSlicing: intent.jitter > 0,
         randomizedSlicingBps: intent.jitter * 100,
       };
 
       const result = await w.submitPrivateOrder(draft);
       const submittedAt = Date.now();
-      const arrivalReference = lastClearingPrices[activePair.pair_id] ?? null;
+      const arrivalReference = lastClearingPrices[submitPair.pair_id] ?? null;
       const arrivalReferencePrice = arrivalReference
-        ? formatClearingPrice(arrivalReference, activePair)
+        ? formatClearingPrice(arrivalReference, submitPair)
         : undefined;
 
       const newOrder: LocalOrder = {
@@ -624,10 +632,10 @@ export default function App() {
         strategyId: result.strategy_id,
         batchId: result.batch_id ?? result.first_child_batch_id ?? currentBatch.batch_id,
         epochId: currentBatch.epoch_id,
-        pair: activePair.pair_id,
+        pair: submitPair.pair_id,
         side: intent.side,
         wireMode: wm,
-        amount: intent.shape === "curve" ? intent.inventoryCap || fromAtomicStr(curveBaseTotal.toString(), activePair.base_asset_id) : intent.amount,
+        amount: intent.shape === "curve" ? intent.inventoryCap || fromAtomicStr(curveBaseTotal.toString(), submitPair.base_asset_id) : intent.amount,
         fundingAsset,
         fundingAmount: fromAtomicStr(fundingAmountAtomic, fundingAsset),
         limitPrice: intent.shape === "limit" ? intent.limitPrice : intent.shape === "strategy" ? intent.priceLimit || "" : "",
@@ -655,12 +663,14 @@ export default function App() {
 
   function handleFundingPreview(intent: TicketSubmitIntent): FundingPreview | null {
     const w = walletRuntime();
-    if (!w || !w.isReady() || !activePair || !activeBatch) return null;
+    const previewPair = pairForIntent(intent);
+    const previewBatch = previewPair ? batchByPair[previewPair.pair_id] ?? null : null;
+    if (!w || !w.isReady() || !previewPair || !previewBatch) return null;
 
     const wm = wireMode(intent.shape, intent.resting, intent.stratKind);
-    const priceBaseScale = activePair.price_base_scale ?? assetScale(activePair.base_asset_id).toString();
-    const base = activePair.base_asset_id;
-    const quote = activePair.quote_asset_id;
+    const priceBaseScale = previewPair.price_base_scale ?? assetScale(previewPair.base_asset_id).toString();
+    const base = previewPair.base_asset_id;
+    const quote = previewPair.quote_asset_id;
     const atomicCurvePoints = intent.shape === "curve"
       ? intent.curvePoints
           .filter(pt => pt.price.trim() && pt.baseAmount.trim())
@@ -694,14 +704,14 @@ export default function App() {
     }
 
     return w.previewFundingNotes({
-      pair: activePair.pair_id,
+      pair: previewPair.pair_id,
       side: intent.side,
       mode,
       amount: atomicAmount,
       limitPrice: atomicPrice,
       minFill: toAtomicStr(intent.minFill || "0", base),
       fillOrKill: intent.fillOrKill,
-      batchId: activeBatch.batch_id,
+      batchId: previewBatch.batch_id,
       makerCurvePoints: atomicCurvePoints,
       makerInventoryCap: intent.shape === "curve" && intent.inventoryCap.trim()
         ? toAtomicStr(intent.inventoryCap, base)
@@ -941,8 +951,8 @@ export default function App() {
           <LiquidityWorkspace
             tab={liquidityTab}
             pairs={pairs}
-            activePairId={activePair?.pair_id ?? activePairId}
-            setActivePairId={setActivePairId}
+            activePairId={liquidityPairId}
+            setActivePairId={setLiquidityPairId}
             orders={orders}
             strategies={strategies}
             batches={batches}

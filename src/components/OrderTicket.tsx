@@ -19,6 +19,7 @@ export type PairConfig = {
 };
 
 export type TicketSubmitIntent = {
+  pairId?: string;
   side: "Buy" | "Sell";
   shape: TicketShape;
   stratKind: StratKind;

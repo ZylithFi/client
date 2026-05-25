@@ -424,6 +424,7 @@ function CurvePreview({
   if (filledBands.length > 0 && side !== "two-sided" && onPreviewFunding) {
     try {
       preview = onPreviewFunding({
+        pairId: pair.pair_id,
         side: sideFromCurveSide(side),
         shape: "curve",
         stratKind: "TWAP",
@@ -590,6 +591,7 @@ export function LiquidityCurvesScreen({
   async function submit() {
     for (const [curveSide, bands] of sideBandSets) {
       const ok = await onSubmitCurve({
+        pairId: selectedPair.pair_id,
         side: sideFromCurveSide(curveSide),
         shape: "curve",
         stratKind: "TWAP",
