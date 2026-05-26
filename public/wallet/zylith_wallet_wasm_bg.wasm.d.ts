@@ -8,6 +8,7 @@ export const zylith_wallet_build_settlement_output_withdrawal_submission_plan: (
 export const zylith_wallet_build_strategy_parent: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_withdrawal_submission_plan: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_create_recovery_snapshot: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_decrypt_maker_attribution_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const zylith_wallet_decrypt_recovery_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const zylith_wallet_derive_public_config: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_generate_mnemonic: () => [number, number, number, number];

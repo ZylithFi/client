@@ -1,11 +1,8 @@
 import { useState } from "react";
 import {
   formatHeadroomBps,
-  formatImplementationShortfallBps,
   fromAtomicStr,
   headroomBpsValue,
-  implementationShortfallBpsValue,
-  realizedSpreadBpsValue,
 } from "../domain/assets";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 
@@ -24,10 +21,8 @@ type MakerBandRow = {
   renewalSubmitted: number;
   renewalFilled: number;
   headroom: number[];
-  realizedSpread: number[];
-  referenceSamples: number;
   inventoryDelta: number;
-  estimatedPnl: number;
+  clearingPrices: string[];
 };
 
 function fmtTime(ts: number): string {
@@ -68,12 +63,6 @@ function formatSignedNumber(value: number, suffix = ""): string {
     ? abs.toLocaleString("en-US", { maximumFractionDigits: 2 })
     : abs.toLocaleString("en-US", { maximumFractionDigits: 6 });
   return `${value > 0 ? "+" : value < 0 ? "-" : ""}${formatted}${suffix}`;
-}
-
-function formatMaybeBps(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "—";
-  const formatted = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1);
-  return `${value > 0 ? "+" : ""}${formatted} bps`;
 }
 
 function formatPricePath(values: string[]): string {
@@ -183,10 +172,8 @@ function makerBandRows(orders: LocalOrder[]): MakerBandRow[] {
         renewalSubmitted: 0,
         renewalFilled: 0,
         headroom: [],
-        realizedSpread: [],
-        referenceSamples: 0,
         inventoryDelta: 0,
-        estimatedPnl: 0,
+        clearingPrices: [],
       };
       const depth = parseHuman(point.baseAmount);
       const filledDepth = fillAllocation[index] ?? 0;
@@ -200,16 +187,7 @@ function makerBandRows(orders: LocalOrder[]): MakerBandRow[] {
       }
       if (headroom !== null && filledDepth > 0) row.headroom.push(headroom);
       if (filledDepth > 0) {
-        const spread = realizedSpreadBpsValue(order.side, order.arrivalReferencePrice, order.clearingPrice);
-        const reference = parseHuman(order.arrivalReferencePrice);
-        const clearing = parseHuman(order.clearingPrice);
-        if (spread !== null && reference > 0 && clearing > 0) {
-          row.realizedSpread.push(spread);
-          row.referenceSamples += 1;
-          row.estimatedPnl += order.side === "Sell"
-            ? (clearing - reference) * filledDepth
-            : (reference - clearing) * filledDepth;
-        }
+        if (order.clearingPrice) row.clearingPrices.push(order.clearingPrice);
         row.inventoryDelta += order.side === "Buy" ? filledDepth : -filledDepth;
       }
       const epoch = row.epochs.get(order.epochId) ?? { depth: 0, filledDepth: 0 };
@@ -241,23 +219,6 @@ function weightedAverageClearing(orders: LocalOrder[]): string {
   let denominator = 0;
   for (const order of orders) {
     const price = parseHuman(order.clearingPrice);
-    const size = parseHuman(order.filledAmount ?? order.amount);
-    if (price <= 0 || size <= 0) continue;
-    numerator += price * size;
-    denominator += size;
-  }
-  if (denominator <= 0) return "—";
-  return (numerator / denominator).toLocaleString("en-US", { maximumFractionDigits: 8 });
-}
-
-function weightedAveragePrice(
-  orders: LocalOrder[],
-  priceSelector: (order: LocalOrder) => string | undefined,
-): string {
-  let numerator = 0;
-  let denominator = 0;
-  for (const order of orders) {
-    const price = parseHuman(priceSelector(order));
     const size = parseHuman(order.filledAmount ?? order.amount);
     if (price <= 0 || size <= 0) continue;
     numerator += price * size;
@@ -308,17 +269,8 @@ export function ReportsScreen({
   const avgHeadroom = headroomValues.length > 0
     ? formatBps(mean(headroomValues))
     : "—";
-  const shortfallValues = filled
-    .map(order => implementationShortfallBpsValue(order.side, order.arrivalReferencePrice, order.clearingPrice))
-    .filter((value): value is number => value !== null);
-  const avgShortfall = shortfallValues.length > 0
-    ? formatBps(mean(shortfallValues))
-    : "—";
-  const realizedSpreadValues = filled
-    .map(order => realizedSpreadBpsValue(order.side, order.arrivalReferencePrice, order.clearingPrice))
-    .filter((value): value is number => value !== null);
-  const bestFill = realizedSpreadValues.length > 0
-    ? formatBps(Math.max(...realizedSpreadValues))
+  const bestFill = headroomValues.length > 0
+    ? formatBps(Math.max(...headroomValues))
     : "—";
   const fillRate = periodOrders.length > 0
     ? formatPct((filled.length / periodOrders.length) * 100)
@@ -345,12 +297,7 @@ export function ReportsScreen({
     const displayMode = related.find(order => order.wireMode !== "Limit" && order.wireMode !== "Maker Curve")?.wireMode ?? strategy.mode;
     const displayPair = related.find(order => order.pair)?.pair ?? strategy.pair;
     const vwap = weightedAverageClearing(fills);
-    const referenceVwap = weightedAveragePrice(fills, order => order.arrivalReferencePrice);
-    const benchmarkShortfall = formatImplementationShortfallBps(
-      strategy.side ?? related[0]?.side ?? "Buy",
-      referenceVwap === "—" ? undefined : referenceVwap,
-      vwap === "—" ? undefined : vwap,
-    );
+    const fillRate = related.length > 0 ? (fills.length / related.length) * 100 : 0;
     return {
       strategy,
       displayMode,
@@ -366,8 +313,7 @@ export function ReportsScreen({
       target,
       clearingPath: formatPricePath(fills.map(order => order.clearingPrice ?? "").filter(Boolean)),
       vwap,
-      referenceVwap,
-      benchmarkShortfall,
+      fillRate,
       targetPrice,
       nextChild: formatNextChild(strategy, activeEpochId ?? null, batchWindowMs ?? null),
     };
@@ -381,26 +327,23 @@ export function ReportsScreen({
         "side",
         "mode",
         "amount",
-        "reference_price",
-        "reference_source",
+        "limit_price",
+        "arrival_clearing_price",
         "clearing_price",
         "headroom_bps",
-        "implementation_shortfall_bps",
         "submitted_at",
         "band",
         "total_depth",
         "filled_depth",
         "utilization_pct",
-        "realized_spread_bps",
         "inventory_delta",
-        "estimated_pnl_quote",
+        "clearing_path",
         "strategy_id",
         "children",
         "schedule_pct",
         "schedule_adherence_pct",
         "vwap",
-        "reference_vwap",
-        "benchmark_shortfall_bps",
+        "fill_rate_pct",
         "next_child",
       ],
       ...filled.map(order => [
@@ -409,13 +352,12 @@ export function ReportsScreen({
         order.side,
         order.wireMode,
         order.filledAmount ?? order.amount,
+        order.limitPrice,
         order.arrivalReferencePrice ?? "",
-        order.arrivalReferenceSource ?? "",
         order.clearingPrice ?? "",
         formatHeadroomBps(order.side, order.limitPrice, order.clearingPrice ?? ""),
-        formatImplementationShortfallBps(order.side, order.arrivalReferencePrice, order.clearingPrice),
         new Date(order.submittedAt).toISOString(),
-        "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+        "", "", "", "", "", "", "", "", "", "", "", "", "",
       ]),
       ...makerRows.map(row => {
         const utilization = row.depth > 0 ? (row.filledDepth / row.depth) * 100 : 0;
@@ -426,7 +368,6 @@ export function ReportsScreen({
           "Maker Curve",
           "",
           "",
-          "last_clearing",
           "",
           row.headroom.length > 0 ? formatBps(mean(row.headroom)) : "",
           "",
@@ -435,10 +376,9 @@ export function ReportsScreen({
           formatHuman(row.depth),
           formatHuman(row.filledDepth),
           utilization.toFixed(1),
-          row.realizedSpread.length > 0 ? formatBps(mean(row.realizedSpread)) : "",
           formatSignedNumber(row.inventoryDelta),
-          formatSignedNumber(row.estimatedPnl),
-          "", "", "", "", "", "", "", "",
+          formatPricePath(row.clearingPrices),
+          "", "", "", "", "", "", "",
         ];
       }),
       ...strategyRows.map(row => [
@@ -448,19 +388,17 @@ export function ReportsScreen({
         row.displayMode,
         formatHuman(row.filledAmount),
         "",
-        "last_clearing",
         "",
         "",
         "",
-        "",
-        "", "", "", "", "", "", "",
+        "", "", "", "", "", "",
+        row.clearingPath,
         row.strategy.id,
         `${row.submittedChildren}/${row.strategy.max_children}`,
         row.schedule.toFixed(1),
         row.scheduleAdherence.toFixed(1),
         row.vwap,
-        row.referenceVwap,
-        row.benchmarkShortfall,
+        row.fillRate.toFixed(1),
         row.nextChild,
       ]),
     ];
@@ -520,10 +458,6 @@ export function ReportsScreen({
                 <div className="kpi-val z-amt">{avgHeadroom}</div>
               </div>
               <div className="tca-stat-cell">
-                <div className="kpi-lbl">Avg shortfall</div>
-                <div className="kpi-val z-amt">{avgShortfall}</div>
-              </div>
-              <div className="tca-stat-cell">
                 <div className="kpi-lbl">Best fill</div>
                 <div className="kpi-val z-amt">{bestFill}</div>
               </div>
@@ -563,10 +497,9 @@ export function ReportsScreen({
                     <th>Side</th>
                     <th>Mode</th>
                     <th>Amount</th>
-                    <th>Reference</th>
+                    <th>Limit</th>
                     <th>Clearing</th>
                     <th>Headroom</th>
-                    <th>Shortfall</th>
                     <th>Time</th>
                   </tr>
                 </thead>
@@ -581,15 +514,9 @@ export function ReportsScreen({
                       </td>
                       <td>{order.wireMode}</td>
                       <td className="num">{order.filledAmount ?? order.amount}</td>
-                      <td className="num">
-                        {order.arrivalReferencePrice ?? "—"}
-                        {order.arrivalReferenceSource && (
-                          <span className="tca-cell-note">{order.arrivalReferenceSource === "last_clearing" ? "last clear" : "mark"}</span>
-                        )}
-                      </td>
+                      <td className="num">{order.limitPrice || "—"}</td>
                       <td className="num">{order.clearingPrice ?? "—"}</td>
                       <td className="num">{formatHeadroomBps(order.side, order.limitPrice, order.clearingPrice ?? "")}</td>
-                      <td className="num">{formatImplementationShortfallBps(order.side, order.arrivalReferencePrice, order.clearingPrice)}</td>
                       <td>{fmtTime(order.submittedAt)}</td>
                     </tr>
                   ))}
@@ -602,7 +529,7 @@ export function ReportsScreen({
             <div className="tca-section">
               <div className="tca-section-hd">
                 <span>Maker analytics</span>
-                <em>Estimated per-band depth, utilization, and renewal effectiveness from local filled orders.</em>
+                <em>Per-band depth, utilization, clearing path, and renewal effectiveness from locally recognized fills.</em>
               </div>
               <div className="table-zone compact-table">
                 <table className="data-table">
@@ -616,9 +543,8 @@ export function ReportsScreen({
                       <th>Utilization</th>
                       <th>Epochs</th>
                       <th>Renewal</th>
-                      <th>Realized spread</th>
+                      <th>Clearing path</th>
                       <th>Inventory Δ</th>
-                      <th>Est. PnL</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -626,9 +552,6 @@ export function ReportsScreen({
                       const utilization = row.depth > 0 ? (row.filledDepth / row.depth) * 100 : 0;
                       const renewal = row.renewalSubmitted > 0
                         ? `${row.renewalFilled}/${row.renewalSubmitted}`
-                        : "—";
-                      const realizedSpread = row.realizedSpread.length > 0
-                        ? formatBps(mean(row.realizedSpread))
                         : "—";
                       return (
                         <tr key={row.key}>
@@ -645,9 +568,8 @@ export function ReportsScreen({
                           <td className="num">{formatPct(utilization)}</td>
                           <td className="num tca-muted-cell">{epochUtilization(row)}</td>
                           <td className="num">{renewal}</td>
-                          <td className="num">{realizedSpread}</td>
+                          <td className="num tca-muted-cell">{formatPricePath(row.clearingPrices)}</td>
                           <td className="num">{formatSignedNumber(row.inventoryDelta)}</td>
-                          <td className="num">{formatSignedNumber(row.estimatedPnl)}</td>
                         </tr>
                       );
                     })}
@@ -675,7 +597,7 @@ export function ReportsScreen({
                       <th>Schedule</th>
                       <th>Clearing path</th>
                       <th>VWAP / target</th>
-                      <th>Benchmark</th>
+                      <th>Fill rate</th>
                       <th>Next child</th>
                     </tr>
                   </thead>
@@ -696,10 +618,7 @@ export function ReportsScreen({
                         </td>
                         <td className="num tca-muted-cell">{row.clearingPath}</td>
                         <td className="num">{row.vwap} / {row.targetPrice}</td>
-                        <td className="num">
-                          <span className="tca-child-primary">{row.benchmarkShortfall}</span>
-                          <span className="tca-child-secondary">ref VWAP {row.referenceVwap}</span>
-                        </td>
+                        <td className="num">{formatPct(row.fillRate)}</td>
                         <td className="num tca-muted-cell">{row.nextChild}</td>
                       </tr>
                     ))}

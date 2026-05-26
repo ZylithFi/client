@@ -1,22 +1,22 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use zylith_core::{
-    AssetId, BatchId, DepositIntent, DepositSubmissionPlan, MakerBandAttribution, Note,
-    OrderCommitment, OrderIntent, OrderSubmission, OutputCiphertextBundle, OutputNoteMerkleProof,
-    OutputNoteRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload, RecoveryArtifact,
-    RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
+    AssetId, BatchId, DepositIntent, DepositSubmissionPlan, EncryptedMakerAttributionArtifact,
+    Note, OrderCommitment, OrderIntent, OrderSubmission, OutputCiphertextBundle,
+    OutputNoteMerkleProof, OutputNoteRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload,
+    RecoveryArtifact, RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
     RenewalParentCancelSubmissionPlan, SettlementOutputWithdrawalPlanRequest,
     SettlementOutputWithdrawalSubmissionPlan, SpendAuthorization, TrustedOrderIngressRequest,
     WithdrawalSubmissionPlan, build_deposit_submission_plan, build_order_submission,
     build_renewal_parent_cancel_submission_plan,
     build_settlement_output_withdrawal_submission_plan, build_withdrawal_submission_plan,
-    create_recovery_artifact, decrypt_output_note_for_owner, decrypt_output_recovery_record,
-    decrypt_recovery_artifact_payload, derive_account_id, derive_order_cancellation_secret,
-    derive_recovery_auth_tag, derive_user_keys, funding_input_set_commitment,
-    funding_nullifier_set_commitment, note_recognition_public_key_from_raw_key_hex,
-    nullifier_from_note_secret, renewal_cancel_auth_key_felt_from_raw_key_hex,
-    renewal_cancel_authority_from_raw_key_hex, renewal_parent_commitment,
-    renewal_parent_secret_commitment, sign_order_authorization,
+    create_recovery_artifact, decrypt_maker_attribution_artifact, decrypt_output_note_for_owner,
+    decrypt_output_recovery_record, decrypt_recovery_artifact_payload, derive_account_id,
+    derive_order_cancellation_secret, derive_recovery_auth_tag, derive_user_keys,
+    funding_input_set_commitment, funding_nullifier_set_commitment,
+    note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
+    renewal_cancel_auth_key_felt_from_raw_key_hex, renewal_cancel_authority_from_raw_key_hex,
+    renewal_parent_commitment, renewal_parent_secret_commitment, sign_order_authorization,
     spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
     verify_output_note_membership, withdraw_auth_key_felt_from_raw_key_hex,
     withdraw_authority_from_raw_key_hex,
@@ -272,7 +272,6 @@ fn scan_output_bundle(
                 note: payload.note,
                 output_note: payload.output_note,
                 output_proof: payload.output_proof,
-                maker_attribution: payload.maker_attribution,
             });
         }
     }
@@ -305,6 +304,21 @@ pub fn zylith_wallet_decrypt_recovery_artifact(
     let artifact: RecoveryArtifact = from_json(artifact_json)?;
     let payload = decrypt_recovery_artifact_payload(&seed, &artifact).map_err(js_error)?;
     serde_json::to_string(&payload).map_err(js_error)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_decrypt_maker_attribution_artifact(
+    seed_hex: &str,
+    artifact_json: &str,
+) -> Result<String, JsValue> {
+    let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let note_recognition_key_hex = hex::encode(keys.note_recognition_key);
+    let artifact: EncryptedMakerAttributionArtifact = from_json(artifact_json)?;
+    let payload = decrypt_maker_attribution_artifact(&note_recognition_key_hex, &artifact)
+        .map_err(js_error)?
+        .ok_or_else(|| js_error("maker attribution artifact does not belong to this wallet"))?;
+    to_json(&payload)
 }
 
 #[wasm_bindgen]
@@ -518,8 +532,6 @@ pub struct ScannedNote {
     pub note: Note,
     pub output_note: OutputNoteRecord,
     pub output_proof: OutputNoteMerkleProof,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub maker_attribution: Option<MakerBandAttribution>,
 }
 
 #[derive(Clone, Debug, Serialize)]

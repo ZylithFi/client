@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { formatClearingPrice, fromAtomicStr, realizedSpreadBpsValue } from "../domain/assets";
+import { formatClearingPrice, fromAtomicStr } from "../domain/assets";
 import type { BatchSummary, PublicSettlementTranscript } from "../domain/auctionEpoch";
 import type { CurvePoint } from "../domain/makerCurves";
 import { defaultCurveBands } from "../domain/makerCurves";
@@ -150,16 +150,22 @@ function averageCurveFillRate(records: LiquidityCurveRecord[]): string {
   return formatPct(mean(recordsWithOrders.map(record => curveFillRate(record.relatedOrders))));
 }
 
-function averageRealizedSpread(orders: LocalOrder[]): string {
-  const spreads = orders
-    .map(order => realizedSpreadBpsValue(order.side, order.arrivalReferencePrice, order.clearingPrice))
-    .filter((value): value is number => value !== null);
-  if (spreads.length === 0) return "—";
-  return formatBps(mean(spreads));
-}
-
 function depthFilled(orders: LocalOrder[]): number {
   return orders.reduce((sum, order) => sum + orderFilled(order), 0);
+}
+
+function weightedAverageClearing(orders: LocalOrder[]): string {
+  let numerator = 0;
+  let denominator = 0;
+  for (const order of orders) {
+    const price = parseHuman(order.clearingPrice);
+    const size = orderFilled(order);
+    if (price <= 0 || size <= 0) continue;
+    numerator += price * size;
+    denominator += size;
+  }
+  if (denominator <= 0) return "—";
+  return (numerator / denominator).toLocaleString("en-US", { maximumFractionDigits: 8 });
 }
 
 function committedDepth(points: CurvePoint[], fallbackOrders: LocalOrder[]): number {
@@ -186,6 +192,30 @@ function curveLockedCapital(record: LiquidityCurveRecord): number {
   }
   if (record.side === "Sell") return committedDepth(record.points, record.relatedOrders);
   return record.points.reduce((sum, point) => sum + parseHuman(point.price) * parseHuman(point.baseAmount), 0);
+}
+
+function attributedBandFill(record: LiquidityCurveRecord, bandIndex: number): number | null {
+  let sawAttribution = false;
+  let filled = 0;
+  const baseAsset = curveBaseAsset(record);
+  for (const order of record.relatedOrders) {
+    const attribution = order.makerBandAttribution;
+    if (!attribution?.bands?.length) continue;
+    sawAttribution = true;
+    for (const band of attribution.bands) {
+      if (band.band_index === bandIndex) {
+        filled += parseHuman(fromAtomicStr(band.filled_base_amount, baseAsset));
+      }
+    }
+  }
+  return sawAttribution ? filled : null;
+}
+
+function displayedBandFill(record: LiquidityCurveRecord, bandIndex: number, fallbackRemaining: number): number {
+  const exact = attributedBandFill(record, bandIndex);
+  if (exact !== null) return exact;
+  const depth = parseHuman(record.points[bandIndex]?.baseAmount);
+  return Math.min(depth, fallbackRemaining);
 }
 
 function orderFundingExposure(order: LocalOrder, asset: string): number {
@@ -838,22 +868,26 @@ export function LiquidityCurvesScreen({
                     </tr>
                   </thead>
                   <tbody>
-                    {record.points.map((point, index) => {
-                      const depth = parseHuman(point.baseAmount);
-                      const filled = Math.min(depth, depthFilled(record.relatedOrders));
-                      return (
-                        <tr key={`${record.id}:${index}`}>
-                          <td className="num">{point.price}</td>
-                          <td className="num">{point.baseAmount}</td>
-                          <td className="num">{formatHuman(filled)}</td>
-                          <td>
-                            <div className="liq-mini-bar">
-                              <span style={{ width: `${Math.min(100, depth > 0 ? (filled / depth) * 100 : 0)}%` }} />
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {(() => {
+                      let fallbackRemaining = depthFilled(record.relatedOrders);
+                      return record.points.map((point, index) => {
+                        const depth = parseHuman(point.baseAmount);
+                        const filled = displayedBandFill(record, index, fallbackRemaining);
+                        fallbackRemaining = Math.max(0, fallbackRemaining - filled);
+                        return (
+                          <tr key={`${record.id}:${index}`}>
+                            <td className="num">{point.price}</td>
+                            <td className="num">{point.baseAmount}</td>
+                            <td className="num">{formatHuman(filled)}</td>
+                            <td>
+                              <div className="liq-mini-bar">
+                                <span style={{ width: `${Math.min(100, depth > 0 ? (filled / depth) * 100 : 0)}%` }} />
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
                   </tbody>
                 </table>
                 <div className="liq-card-actions">
@@ -1205,12 +1239,16 @@ export function LiquidityAnalyticsScreen({
                 <div><span>Total depth</span><strong>{formatHuman(total)}</strong></div>
                 <div><span>Volume matched</span><strong>{formatHuman(filled)}</strong></div>
                 <div><span>Fill rate</span><strong>{formatPct(curveFillRate(record.relatedOrders))}</strong></div>
-                <div><span>Realized spread</span><strong>{averageRealizedSpread(record.relatedOrders)}</strong></div>
+                <div><span>Avg clearing</span><strong>{weightedAverageClearing(record.relatedOrders)}</strong></div>
               </div>
               <div className="liq-band-utilization">
-                {record.points.map((point, index) => {
+                {(() => {
+                  let fallbackRemaining = filled;
+                  return record.points.map((point, index) => {
                   const depth = parseHuman(point.baseAmount);
-                  const utilization = depth > 0 ? Math.min(100, (filled / depth) * 100) : 0;
+                  const bandFilled = displayedBandFill(record, index, fallbackRemaining);
+                  fallbackRemaining = Math.max(0, fallbackRemaining - bandFilled);
+                  const utilization = depth > 0 ? Math.min(100, (bandFilled / depth) * 100) : 0;
                   return (
                     <div key={index}>
                       <span>{point.price}</span>
@@ -1218,7 +1256,8 @@ export function LiquidityAnalyticsScreen({
                       <em>{formatPct(utilization)}</em>
                     </div>
                   );
-                })}
+                  });
+                })()}
               </div>
             </section>
           );

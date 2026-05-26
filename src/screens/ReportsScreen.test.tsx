@@ -49,12 +49,12 @@ describe("ReportsScreen", () => {
     expect(screen.getByText("Fills")).toBeInTheDocument();
     expect(screen.getByText("Fill rate")).toBeInTheDocument();
     expect(screen.getByText("Avg headroom")).toBeInTheDocument();
-    expect(screen.getByText("Avg shortfall")).toBeInTheDocument();
+    expect(screen.getByText("Best fill")).toBeInTheDocument();
     expect(screen.queryByText("Active orders")).not.toBeInTheDocument();
     expect(screen.queryByText("Stored orders")).not.toBeInTheDocument();
     expect(screen.getAllByText("+1000 bps").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("Reference")).toBeInTheDocument();
-    expect(screen.getByText("Shortfall")).toBeInTheDocument();
+    expect(screen.getAllByText("Limit").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Shortfall")).not.toBeInTheDocument();
   });
 
   it("filters reports by period", () => {

@@ -153,6 +153,10 @@ type WalletWasmModule = {
   zylith_wallet_recovery_auth_tag: (seedHex: string) => string;
   zylith_wallet_create_recovery_snapshot: (inputJson: string) => string;
   zylith_wallet_decrypt_recovery_artifact: (seedHex: string, artifactJson: string) => string;
+  zylith_wallet_decrypt_maker_attribution_artifact: (
+    seedHex: string,
+    artifactJson: string,
+  ) => string;
   zylith_wallet_build_withdrawal_submission_plan: (inputJson: string) => string;
   zylith_wallet_build_settlement_output_withdrawal_submission_plan: (inputJson: string) => string;
 };
@@ -204,6 +208,23 @@ type WithdrawableNote = {
   pending_withdrawal_tx?: string;
   metadata_commitment: string;
   maker_attribution?: MakerBandAttribution;
+};
+
+type MakerAttributionArtifactList = {
+  batch_id: string;
+  maker_public_key: string;
+  artifacts: unknown[];
+};
+
+type MakerAttributionPlaintext = {
+  version: number;
+  batch_id: string;
+  pair_id: string;
+  epoch_id: number;
+  maker_public_key: string;
+  curve_commitment: string;
+  output_note_commitment: string;
+  attribution: MakerBandAttribution;
 };
 
 type PrivateStrategySummary = {
@@ -775,9 +796,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           note: LocalNoteRecord["note"];
           output_note?: unknown;
           output_proof?: unknown;
-          maker_attribution?: MakerBandAttribution;
         }>;
       };
+      const attributionByOutput = await fetchMakerAttributionForScannedNotes(
+        unlockedSeed,
+        artifact.batch_id,
+        scanned.notes,
+      );
       for (const scannedNote of scanned.notes) {
         if (notes.some((record) => record.note_commitment === scannedNote.note_commitment)) {
           continue;
@@ -790,7 +815,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           note: scannedNote.note,
           output_note: scannedNote.output_note,
           output_proof: scannedNote.output_proof,
-          maker_attribution: scannedNote.maker_attribution,
+          maker_attribution: attributionByOutput.get(scannedNote.note_commitment),
         });
       }
     }
@@ -2116,6 +2141,39 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   async function fetchOutputBundle(batchId: string) {
     return fetchJson<unknown>(indexerUrl, `/api/batches/${batchId}/output-bundle`);
+  }
+
+  async function fetchMakerAttributionForScannedNotes(
+    unlockedSeed: string,
+    batchId: string,
+    scannedNotes: Array<{ note_commitment: string; note: LocalNoteRecord["note"] }>,
+  ) {
+    const attributionByOutput = new Map<string, MakerBandAttribution>();
+    if (!indexerUrl || !scannedNotes.length) return attributionByOutput;
+    const makerPublicKeys = [...new Set(scannedNotes.map((note) => note.note.owner_public_key))];
+    for (const makerPublicKey of makerPublicKeys) {
+      const list = await fetchJson<MakerAttributionArtifactList>(
+        indexerUrl,
+        `/api/attribution/${encodeURIComponent(batchId)}/${encodeURIComponent(makerPublicKey)}`,
+      ).catch(() => null);
+      if (!list?.artifacts?.length) continue;
+      for (const artifact of list.artifacts) {
+        try {
+          const decrypted = JSON.parse(
+            core.zylith_wallet_decrypt_maker_attribution_artifact(
+              unlockedSeed,
+              JSON.stringify(artifact),
+            ),
+          ) as MakerAttributionPlaintext;
+          if (decrypted?.output_note_commitment && decrypted?.attribution) {
+            attributionByOutput.set(decrypted.output_note_commitment, decrypted.attribution);
+          }
+        } catch {
+          // Attribution artifacts are analytics-only. Ignore non-matching or malformed artifacts.
+        }
+      }
+    }
+    return attributionByOutput;
   }
 
   async function pullRecoverySnapshots() {

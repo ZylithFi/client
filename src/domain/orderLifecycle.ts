@@ -27,7 +27,7 @@ export type LocalOrder = {
   filledAmount?: string;
   clearingPrice?: string;
   arrivalReferencePrice?: string;
-  arrivalReferenceSource?: "last_clearing" | "external_mark";
+  arrivalReferenceSource?: "last_clearing";
   arrivalReferenceAt?: number;
   cancelTransactionHash?: string;
   makerCurvePoints?: Array<{ price: string; baseAmount: string }>;

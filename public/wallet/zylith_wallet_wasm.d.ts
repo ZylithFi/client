@@ -17,6 +17,8 @@ export function zylith_wallet_build_withdrawal_submission_plan(input_json: strin
 
 export function zylith_wallet_create_recovery_snapshot(input_json: string): string;
 
+export function zylith_wallet_decrypt_maker_attribution_artifact(seed_hex: string, artifact_json: string): string;
+
 export function zylith_wallet_decrypt_recovery_artifact(seed_hex: string, artifact_json: string): string;
 
 export function zylith_wallet_derive_public_config(seed_hex: string): string;
@@ -46,6 +48,7 @@ export interface InitOutput {
     readonly zylith_wallet_build_strategy_parent: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_withdrawal_submission_plan: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_create_recovery_snapshot: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_decrypt_maker_attribution_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly zylith_wallet_decrypt_recovery_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly zylith_wallet_derive_public_config: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_generate_mnemonic: () => [number, number, number, number];

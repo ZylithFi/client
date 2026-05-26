@@ -105,36 +105,9 @@ const LAST_LIQUIDITY_ROUTE_KEY = "zylith.nav.last_liquidity_route";
 
 type ArrivalReferenceSnapshot = {
   price?: string;
-  source?: "external_mark" | "last_clearing";
+  source?: "last_clearing";
   observedAt?: number;
 };
-
-type ReferencePriceResponse = {
-  pair_id?: string;
-  price?: string | number;
-  reference_price?: string | number;
-  mark_price?: string | number;
-  clearing_price?: string | number;
-  price_base_scale?: string | number;
-  timestamp_unix_ms?: number;
-  timestamp_unix_seconds?: number;
-  timestamp_ms?: number;
-};
-
-function referenceObservedAt(mark: ReferencePriceResponse): number {
-  const timestampMs = finiteNumber(mark.timestamp_ms);
-  if (timestampMs !== null) return timestampMs;
-  const timestampUnixMs = finiteNumber(mark.timestamp_unix_ms);
-  if (timestampUnixMs !== null) return timestampUnixMs;
-  const timestampUnixSeconds = finiteNumber(mark.timestamp_unix_seconds);
-  if (timestampUnixSeconds !== null) return timestampUnixSeconds * 1000;
-  return Date.now();
-}
-
-function finiteNumber(value: unknown): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 function lastClearingReference(
   pair: PairConfig,
@@ -148,64 +121,10 @@ function lastClearingReference(
   };
 }
 
-async function arrivalReferenceSnapshot(
-  deployment: DeploymentConfig | null,
+function arrivalReferenceSnapshot(
   pair: PairConfig,
   lastClearingPrice: { batchId: string; epochId: number; clearingPrice: string; priceBaseScale?: string } | null,
-): Promise<ArrivalReferenceSnapshot> {
-  const referenceUrl = (
-    deployment?.market_data?.reference_price_url ||
-    (import.meta.env.VITE_ZYLITH_REFERENCE_PRICE_URL as string | undefined) ||
-    ""
-  ).trim();
-  if (!referenceUrl) return lastClearingReference(pair, lastClearingPrice);
-
-  const configuredTimeoutMs = finiteNumber(
-    deployment?.market_data?.reference_price_timeout_ms ??
-    import.meta.env.VITE_ZYLITH_REFERENCE_PRICE_TIMEOUT_MS,
-  ) ?? 1_500;
-  const timeoutMs = Math.max(
-    250,
-    Math.min(configuredTimeoutMs, 5_000),
-  );
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const url = new URL(referenceUrl, window.location.origin);
-    url.searchParams.set("pair", pair.pair_id);
-    url.searchParams.set("base", pair.base_asset_id);
-    url.searchParams.set("quote", pair.quote_asset_id);
-    const response = await fetch(url, {
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) return lastClearingReference(pair, lastClearingPrice);
-    const mark = await response.json() as ReferencePriceResponse;
-    const humanPrice = mark.price ?? mark.reference_price ?? mark.mark_price;
-    if (humanPrice !== undefined && String(humanPrice).trim()) {
-      return {
-        price: String(humanPrice),
-        source: "external_mark",
-        observedAt: referenceObservedAt(mark),
-      };
-    }
-    if (mark.clearing_price !== undefined) {
-      return {
-        price: formatClearingPrice({
-          batchId: "external-mark",
-          epochId: 0,
-          clearingPrice: String(mark.clearing_price),
-          priceBaseScale: mark.price_base_scale === undefined ? pair.price_base_scale : String(mark.price_base_scale),
-        }, pair),
-        source: "external_mark",
-        observedAt: referenceObservedAt(mark),
-      };
-    }
-  } catch {
-    // Reference marks improve TCA when available; order submission must not depend on this service.
-  } finally {
-    window.clearTimeout(timeout);
-  }
+): ArrivalReferenceSnapshot {
   return lastClearingReference(pair, lastClearingPrice);
 }
 
@@ -761,8 +680,7 @@ export default function App() {
         relayMode: intent.relayMode ?? "SelfRelay",
       };
 
-      const arrivalReference = await arrivalReferenceSnapshot(
-        deployment,
+      const arrivalReference = arrivalReferenceSnapshot(
         submitPair,
         lastClearingPrices[submitPair.pair_id] ?? null,
       );
