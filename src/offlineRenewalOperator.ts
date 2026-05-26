@@ -74,6 +74,7 @@ export type OfflineRenewalRelayResult = {
     | "not_due"
     | "batch_not_open"
     | "safety_buffer"
+    | "missed"
     | "failed";
   detail?: string;
   accepted?: CoordinatorAccepted;

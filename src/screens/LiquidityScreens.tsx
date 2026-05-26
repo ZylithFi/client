@@ -535,6 +535,7 @@ export function LiquidityCurvesScreen({
   const [inventoryCap, setInventoryCap] = useState("");
   const [renewing, setRenewing] = useState(false);
   const [renewalWindowHours, setRenewalWindowHours] = useState("4");
+  const [relayMode, setRelayMode] = useState<"SelfRelay" | "ZylithRelay">("ZylithRelay");
 
   function prefillBuilder(record: LiquidityCurveRecord) {
     setActivePairId(record.pair);
@@ -549,6 +550,7 @@ export function LiquidityCurvesScreen({
     } else {
       setInventoryCap("");
     }
+    setRelayMode(record.strategy?.offline_package?.relay_mode ?? "ZylithRelay");
   }
 
   useEffect(() => {
@@ -607,6 +609,7 @@ export function LiquidityCurvesScreen({
         childSize: "",
         priceLimit: "",
         jitter: 0,
+        relayMode: renewing ? relayMode : "SelfRelay",
       });
       if (ok === false) return;
     }
@@ -676,6 +679,13 @@ export function LiquidityCurvesScreen({
                   <option value="4">4h</option>
                   <option value="12">12h</option>
                   <option value="24">24h</option>
+                </select>
+              </div>
+              <div className="curve-risk-field">
+                <label className="f-label">Renewal operator</label>
+                <select className="liq-select compact" value={relayMode} onChange={event => setRelayMode(event.target.value as "SelfRelay" | "ZylithRelay")} disabled={!renewing}>
+                  <option value="ZylithRelay">Zylith relay</option>
+                  <option value="SelfRelay">Local browser</option>
                 </select>
               </div>
               <label className="f-check liq-renew-check">

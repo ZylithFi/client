@@ -35,6 +35,7 @@ export type TicketSubmitIntent = {
   childSize: string;
   priceLimit: string;
   jitter: number;
+  relayMode?: "SelfRelay" | "ZylithRelay";
 };
 
 export type FundingPreview = {

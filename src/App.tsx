@@ -60,6 +60,10 @@ import {
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import { claimableOutputs } from "./domain/noteLifecycle";
 import { OFFLINE_RENEWAL_RELAY_RESULTS_EVENT } from "./offlineRenewalOperator";
+import {
+  fetchManagedRenewalPackageResults,
+  submitManagedRenewalPackage,
+} from "./domain/managedRenewalRelay";
 
 function genRef(): string {
   return `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -454,6 +458,38 @@ export default function App() {
     return () => window.removeEventListener(OFFLINE_RENEWAL_RELAY_RESULTS_EVENT, onRelayResults);
   }, [walletReady]);
 
+  useEffect(() => {
+    if (!walletReady) return;
+    const packageIds = Array.from(new Set(
+      strategies
+        .map(strategy => strategy.offline_package)
+        .filter((pkg): pkg is NonNullable<typeof pkg> => pkg?.relay_mode === "ZylithRelay")
+        .map(pkg => pkg.package_id),
+    ));
+    if (packageIds.length === 0) return;
+    let cancelled = false;
+    async function syncManagedRelayResults() {
+      const w = walletRuntime();
+      if (!w?.isReady()) return;
+      let changed = false;
+      for (const packageId of packageIds) {
+        const response = await fetchManagedRenewalPackageResults(packageId).catch((error: unknown) => {
+          setSubmitError(userFacingErrorMessage(error));
+          return null;
+        });
+        if (!response?.results?.length || cancelled) continue;
+        changed = await w.recordOfflineRenewalRelayResults(packageId, response.results).catch(() => false) || changed;
+      }
+      if (!cancelled && changed) setBalanceTick(value => value + 1);
+    }
+    void syncManagedRelayResults();
+    const timer = window.setInterval(() => { void syncManagedRelayResults(); }, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [walletReady, strategies]);
+
   const activeOrders = orders.filter(o =>
     ["queued", "in_batch", "proving", "settling"].includes(o.status),
   );
@@ -615,9 +651,14 @@ export default function App() {
         childAmount: intent.childSize ? toAtomicStr(intent.childSize, submitPair.base_asset_id) : undefined,
         randomizedSlicing: intent.jitter > 0,
         randomizedSlicingBps: intent.jitter * 100,
+        offlineDelegation: intent.shape === "curve" && intent.resting && intent.relayMode === "ZylithRelay",
+        relayMode: intent.relayMode ?? "SelfRelay",
       };
 
       const result = await w.submitPrivateOrder(draft);
+      if (result.offline_package?.relay_mode === "ZylithRelay") {
+        await submitManagedRenewalPackage(result.offline_package);
+      }
       const submittedAt = Date.now();
       const arrivalReference = lastClearingPrices[submitPair.pair_id] ?? null;
       const arrivalReferencePrice = arrivalReference
@@ -792,7 +833,10 @@ export default function App() {
       return;
     }
     try {
-      await w.refreshPrivateStrategyPackage(strategyId);
+      const renewalPackage = await w.refreshPrivateStrategyPackage(strategyId);
+      if (renewalPackage.relay_mode === "ZylithRelay") {
+        await submitManagedRenewalPackage(renewalPackage);
+      }
       setBalanceTick(v => v + 1);
     } catch (error) {
       setSubmitError(userFacingErrorMessage(error));

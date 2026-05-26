@@ -96,6 +96,7 @@ type WalletRuntime = {
     first_child_batch_id?: string;
     first_child_cancellation_secret?: string;
     expected_output_metadata_commitment?: string;
+    offline_package?: OfflineRenewalPackage;
     status?: string;
   }>;
   cancelPrivateOrder: (request: {
@@ -970,6 +971,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         const offlinePackage = await createOfflineRenewalPackage(draft);
         return {
           order_id: offlinePackage.package_id,
+          offline_package: offlinePackage,
           status: `offline renewal package prepared with ${offlinePackage.slot_count} exact child slots`,
         };
       }
