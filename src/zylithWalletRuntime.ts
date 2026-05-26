@@ -1,6 +1,7 @@
 import { denominationTableForAsset, splitDepositAmount } from "./domain/depositSplitting";
 import { selectedStarknetProvider } from "./domain/browserWallet";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
+import type { MakerBandAttribution } from "./domain/shieldedBalances";
 
 type Side = "Buy" | "Sell";
 type OrderMode = "Limit" | "Maker Curve" | "TWAP" | "VWAP" | "Repeat" | "Resting";
@@ -180,6 +181,7 @@ type LocalNoteRecord = {
   };
   output_note?: unknown;
   output_proof?: unknown;
+  maker_attribution?: MakerBandAttribution;
   locked_by_order?: string;
   pending_deposit_tx?: string;
   deposit_confirmed?: boolean;
@@ -201,6 +203,7 @@ type WithdrawableNote = {
   spent: boolean;
   pending_withdrawal_tx?: string;
   metadata_commitment: string;
+  maker_attribution?: MakerBandAttribution;
 };
 
 type PrivateStrategySummary = {
@@ -772,6 +775,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           note: LocalNoteRecord["note"];
           output_note?: unknown;
           output_proof?: unknown;
+          maker_attribution?: MakerBandAttribution;
         }>;
       };
       for (const scannedNote of scanned.notes) {
@@ -786,6 +790,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           note: scannedNote.note,
           output_note: scannedNote.output_note,
           output_proof: scannedNote.output_proof,
+          maker_attribution: scannedNote.maker_attribution,
         });
       }
     }
@@ -1922,6 +1927,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       spent: Boolean(record.spent),
       pending_withdrawal_tx: record.pending_withdrawal_tx,
       metadata_commitment: record.note.metadata_commitment,
+      maker_attribution: record.maker_attribution,
     }));
   }
 

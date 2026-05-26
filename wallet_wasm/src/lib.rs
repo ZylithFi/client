@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use zylith_core::{
-    AssetId, BatchId, DepositIntent, DepositSubmissionPlan, Note, OrderCommitment, OrderIntent,
-    OrderSubmission, OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord,
-    PrivateExecutionKeyRegistry, PrivateOrderPayload, RecoveryArtifact, RecoveryArtifactKind,
-    RecoverySeed, RenewalParentCancelPlanRequest, RenewalParentCancelSubmissionPlan,
-    SettlementOutputWithdrawalPlanRequest, SettlementOutputWithdrawalSubmissionPlan,
-    SpendAuthorization, TrustedOrderIngressRequest, WithdrawalSubmissionPlan,
-    build_deposit_submission_plan, build_order_submission,
+    AssetId, BatchId, DepositIntent, DepositSubmissionPlan, MakerBandAttribution, Note,
+    OrderCommitment, OrderIntent, OrderSubmission, OutputCiphertextBundle, OutputNoteMerkleProof,
+    OutputNoteRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload, RecoveryArtifact,
+    RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
+    RenewalParentCancelSubmissionPlan, SettlementOutputWithdrawalPlanRequest,
+    SettlementOutputWithdrawalSubmissionPlan, SpendAuthorization, TrustedOrderIngressRequest,
+    WithdrawalSubmissionPlan, build_deposit_submission_plan, build_order_submission,
     build_renewal_parent_cancel_submission_plan,
     build_settlement_output_withdrawal_submission_plan, build_withdrawal_submission_plan,
     create_recovery_artifact, decrypt_output_note_for_owner, decrypt_output_recovery_record,
@@ -272,6 +272,7 @@ fn scan_output_bundle(
                 note: payload.note,
                 output_note: payload.output_note,
                 output_proof: payload.output_proof,
+                maker_attribution: payload.maker_attribution,
             });
         }
     }
@@ -517,6 +518,8 @@ pub struct ScannedNote {
     pub note: Note,
     pub output_note: OutputNoteRecord,
     pub output_proof: OutputNoteMerkleProof,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maker_attribution: Option<MakerBandAttribution>,
 }
 
 #[derive(Clone, Debug, Serialize)]

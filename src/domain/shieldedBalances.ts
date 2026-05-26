@@ -14,6 +14,23 @@ export type WithdrawableNote = {
   spent: boolean;
   pending_withdrawal_tx?: string;
   metadata_commitment: string;
+  maker_attribution?: MakerBandAttribution;
+};
+
+export type MakerBandAttribution = {
+  version: number;
+  pair_id: string;
+  order_commitment: string;
+  funding_note_ref: string;
+  side: "Buy" | "Sell";
+  clearing_price: string;
+  filled_base_amount: string;
+  bands: Array<{
+    band_index: number;
+    band_price: string;
+    band_base_amount: string;
+    filled_base_amount: string;
+  }>;
 };
 
 export type PendingDeposit = {

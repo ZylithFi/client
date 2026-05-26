@@ -120,7 +120,16 @@ function allocateMakerFill(order: LocalOrder, points: Array<{ price: string; bas
   return allocation;
 }
 
-function fallbackMakerPoints(order: LocalOrder): Array<{ price: string; baseAmount: string }> {
+function fromAtomicOrRaw(value: string, asset?: string): string {
+  if (!asset) return value;
+  try {
+    return fromAtomicStr(value, asset);
+  } catch {
+    return value;
+  }
+}
+
+function fallbackMakerPoints(order: LocalOrder): Array<{ price: string; baseAmount: string; bandIndex?: number }> {
   if (order.makerCurvePoints && order.makerCurvePoints.length > 0) return order.makerCurvePoints;
   return [{
     price: order.limitPrice || order.clearingPrice || "Curve",
@@ -128,17 +137,39 @@ function fallbackMakerPoints(order: LocalOrder): Array<{ price: string; baseAmou
   }];
 }
 
+function makerPointsWithFill(
+  order: LocalOrder,
+): {
+  points: Array<{ price: string; baseAmount: string; bandIndex?: number }>;
+  fillAllocation: number[];
+} {
+  const attribution = order.makerBandAttribution;
+  if (attribution?.bands?.length) {
+    const [baseAsset, quoteAsset] = order.pair.split("/");
+    const sortedBands = [...attribution.bands].sort((a, b) => a.band_index - b.band_index);
+    return {
+      points: sortedBands.map(band => ({
+        price: fromAtomicOrRaw(band.band_price, quoteAsset),
+        baseAmount: fromAtomicOrRaw(band.band_base_amount, baseAsset),
+        bandIndex: band.band_index,
+      })),
+      fillAllocation: sortedBands.map(band => parseHuman(fromAtomicOrRaw(band.filled_base_amount, baseAsset))),
+    };
+  }
+  const points = fallbackMakerPoints(order);
+  return { points, fillAllocation: allocateMakerFill(order, points) };
+}
+
 function makerBandRows(orders: LocalOrder[]): MakerBandRow[] {
   const rows = new Map<string, MakerBandRow>();
   for (const order of orders) {
-    const points = fallbackMakerPoints(order);
-    const fillAllocation = allocateMakerFill(order, points);
+    const { points, fillAllocation } = makerPointsWithFill(order);
     const orderFilled = order.status === "filled" || order.status === "partial";
     const headroom = headroomBpsValue(order.side, order.limitPrice, order.clearingPrice ?? "");
 
     points.forEach((point, index) => {
       const band = point.price || "Curve";
-      const key = `${order.pair}:${order.side}:${band}`;
+      const key = `${order.pair}:${order.side}:${point.bandIndex ?? band}`;
       const row = rows.get(key) ?? {
         key,
         pair: order.pair,

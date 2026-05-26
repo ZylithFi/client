@@ -1,3 +1,5 @@
+import type { MakerBandAttribution } from "./shieldedBalances";
+
 export type LocalOrderStatus =
   | "queued" | "in_batch" | "proving" | "settling"
   | "filled" | "partial" | "no_fill" | "rolled" | "cancelled" | "failed"
@@ -29,6 +31,7 @@ export type LocalOrder = {
   arrivalReferenceAt?: number;
   cancelTransactionHash?: string;
   makerCurvePoints?: Array<{ price: string; baseAmount: string }>;
+  makerBandAttribution?: MakerBandAttribution;
 };
 
 export type PrivateStrategyChildSummary = {
@@ -105,6 +108,7 @@ export type OrderLifecycleOutputNote = {
   asset: string;
   amount: string;
   metadata_commitment: string;
+  maker_attribution?: MakerBandAttribution;
 };
 
 const LEGACY_SESSION_ORDERS_KEY = "zylith.session.orders";
@@ -172,7 +176,8 @@ export function ordersChanged(before: LocalOrder[], after: LocalOrder[]): boolea
       order.filledAmount !== previous.filledAmount ||
       order.fundingAsset !== previous.fundingAsset ||
       order.fundingAmount !== previous.fundingAmount ||
-      order.cancelTransactionHash !== previous.cancelTransactionHash
+      order.cancelTransactionHash !== previous.cancelTransactionHash ||
+      order.makerBandAttribution !== previous.makerBandAttribution
     );
   });
 }
@@ -289,9 +294,17 @@ export function reconcileOrderLifecycle({
           status: (isPartial ? "partial" : "filled") as LocalOrderStatus,
           clearingPrice,
           filledAmount,
+          makerBandAttribution: exactOutput.maker_attribution ?? order.makerBandAttribution,
         };
       }
-      if (exactOutput) return { ...order, status: "filled" as LocalOrderStatus, clearingPrice };
+      if (exactOutput) {
+        return {
+          ...order,
+          status: "filled" as LocalOrderStatus,
+          clearingPrice,
+          makerBandAttribution: exactOutput.maker_attribution ?? order.makerBandAttribution,
+        };
+      }
       const transcriptEpoch = Number(transcript.batch_epoch);
       if (
         Number.isFinite(transcriptEpoch) &&
