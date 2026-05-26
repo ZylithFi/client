@@ -59,6 +59,7 @@ type PrivateOrderDraft = {
   makerCurveRotationBps?: number;
   makerInventoryCap?: string;
   submissionTimingPreference?: SubmissionTimingPreference;
+  relayMode?: "SelfRelay" | "ZylithRelay";
 };
 
 type WalletRuntime = {
@@ -444,6 +445,7 @@ type OfflineRenewalPackage = {
   start_epoch: number;
   end_epoch: number;
   slot_count: number;
+  relay_mode?: "SelfRelay" | "ZylithRelay";
   ingress_key_registry_fingerprint?: string;
   relay_policy: {
     prover_url: string;
@@ -1462,6 +1464,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         makerCurveRotationBps: strategy.mode === "Resting" ? strategy.maker_curve_rotation_bps : undefined,
         makerInventoryCap: strategy.mode === "Resting" ? strategy.maker_inventory_cap : undefined,
         submissionTimingPreference: strategy.submission_timing_preference,
+        relayMode: draft.relayMode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
       const fundingNotes = selectFundingNotes(materializedChildDraft, reservedNotes);
@@ -1510,6 +1513,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       start_epoch: slots[0]?.epoch_id ?? firstEpoch,
       end_epoch: slots[slots.length - 1]?.epoch_id ?? firstEpoch,
       slot_count: slots.length,
+      relay_mode: draft.relayMode ?? "SelfRelay",
       ingress_key_registry_fingerprint: ingressKeyPin || undefined,
       relay_policy: {
         prover_url: proverUrl,
@@ -1599,6 +1603,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         makerCurveRotationBps: strategy.mode === "Resting" ? strategy.maker_curve_rotation_bps : undefined,
         makerInventoryCap: strategy.mode === "Resting" ? strategy.maker_inventory_cap : undefined,
         submissionTimingPreference: strategy.submission_timing_preference,
+        relayMode: strategy.offline_package?.relay_mode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
       const fundingNotes = selectFundingNotes(materializedChildDraft, reservedNotes);
@@ -1647,6 +1652,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       start_epoch: slots[0]?.epoch_id ?? firstEpoch,
       end_epoch: slots[slots.length - 1]?.epoch_id ?? firstEpoch,
       slot_count: slots.length,
+      relay_mode: strategy.offline_package?.relay_mode ?? "SelfRelay",
       ingress_key_registry_fingerprint: ingressKeyPin || undefined,
       relay_policy: {
         prover_url: proverUrl,
@@ -1937,6 +1943,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         start_epoch: strategy.offline_package.start_epoch,
         end_epoch: strategy.offline_package.end_epoch,
         slot_count: strategy.offline_package.slot_count,
+        relay_mode: strategy.offline_package.relay_mode,
       } : undefined,
       parent_cancel_transaction_hash: strategy.parent_cancel_transaction_hash,
       last_error: strategy.last_error,
@@ -2340,6 +2347,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       batch_id: batch.batch_id,
       side: draft.side,
       order_type: orderType,
+      relay_mode: draft.relayMode ?? "SelfRelay",
       maker_curve: makerCurve,
       limit_price: limitPrice.toString(),
       amount: amount.toString(),

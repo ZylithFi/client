@@ -32,6 +32,7 @@ export type OfflineRenewalPackage = {
   start_epoch: number;
   end_epoch: number;
   slot_count: number;
+  relay_mode?: "SelfRelay" | "ZylithRelay";
   ingress_key_registry_fingerprint?: string;
   relay_policy: {
     prover_url: string;
@@ -158,6 +159,12 @@ function validateOfflineRenewalPackage(renewalPackage: OfflineRenewalPackage) {
   if (renewalPackage.version !== 1) throw new Error("Unsupported offline renewal package version");
   if (renewalPackage.slot_count !== renewalPackage.slots.length) {
     throw new Error("Offline renewal package slot_count does not match slots length");
+  }
+  if (renewalPackage.relay_mode && !["SelfRelay", "ZylithRelay"].includes(renewalPackage.relay_mode)) {
+    throw new Error("Offline renewal package relay mode is unsupported");
+  }
+  if (renewalPackage.relay_mode === "ZylithRelay") {
+    throw new Error("Zylith relay packages must be submitted to the managed renewal relay");
   }
   const seen = new Set<string>();
   for (const slot of renewalPackage.slots) {

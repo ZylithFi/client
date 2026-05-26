@@ -69,6 +69,7 @@ export type PrivateStrategySummary = {
     start_epoch: number;
     end_epoch: number;
     slot_count: number;
+    relay_mode?: "SelfRelay" | "ZylithRelay";
   };
   parent_cancel_transaction_hash?: string;
   last_error?: string;
@@ -88,6 +89,7 @@ export type OrderLifecyclePair = {
   price_base_scale?: string;
   taker_fee_bps?: number;
   maker_fee_bps?: number;
+  relay_fee_bps?: number;
 };
 
 export type OrderLifecycleTranscript = {

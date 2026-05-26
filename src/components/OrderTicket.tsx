@@ -15,6 +15,7 @@ export type PairConfig = {
   price_base_scale?: string;
   taker_fee_bps?: number;
   maker_fee_bps?: number;
+  relay_fee_bps?: number;
   enabled: boolean;
 };
 

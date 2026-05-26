@@ -569,7 +569,7 @@ mod tests {
     use zylith_core::{
         AssetId, BatchId, Note, NoteCommitment, Nullifier, OrderIntent, OrderSide, OrderType,
         OutputCiphertextBundle, PairId, PrivateExecutionKeyPublicConfig,
-        PrivateExecutionKeyRegistry, RecoverySeed, TimeInForce, derive_user_keys,
+        PrivateExecutionKeyRegistry, RecoverySeed, RelayMode, TimeInForce, derive_user_keys,
         encrypt_note_for_owner, note_recognition_public_key_from_raw_key_hex,
         spend_authority_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
     };
@@ -700,6 +700,7 @@ mod tests {
                 batch_id: BatchId("STRK-USDC-7".into()),
                 side: OrderSide::Buy,
                 order_type: OrderType::LimitBatch,
+                relay_mode: RelayMode::SelfRelay,
                 maker_curve: None,
                 limit_price: 2,
                 amount: 10,
