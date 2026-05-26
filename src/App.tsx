@@ -103,6 +103,112 @@ const RELEASED_LOCK_STATUSES = new Set<LocalOrderStatus>([
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const LAST_LIQUIDITY_ROUTE_KEY = "zylith.nav.last_liquidity_route";
 
+type ArrivalReferenceSnapshot = {
+  price?: string;
+  source?: "external_mark" | "last_clearing";
+  observedAt?: number;
+};
+
+type ReferencePriceResponse = {
+  pair_id?: string;
+  price?: string | number;
+  reference_price?: string | number;
+  mark_price?: string | number;
+  clearing_price?: string | number;
+  price_base_scale?: string | number;
+  timestamp_unix_ms?: number;
+  timestamp_unix_seconds?: number;
+  timestamp_ms?: number;
+};
+
+function referenceObservedAt(mark: ReferencePriceResponse): number {
+  const timestampMs = finiteNumber(mark.timestamp_ms);
+  if (timestampMs !== null) return timestampMs;
+  const timestampUnixMs = finiteNumber(mark.timestamp_unix_ms);
+  if (timestampUnixMs !== null) return timestampUnixMs;
+  const timestampUnixSeconds = finiteNumber(mark.timestamp_unix_seconds);
+  if (timestampUnixSeconds !== null) return timestampUnixSeconds * 1000;
+  return Date.now();
+}
+
+function finiteNumber(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function lastClearingReference(
+  pair: PairConfig,
+  lastClearingPrice: { batchId: string; epochId: number; clearingPrice: string; priceBaseScale?: string } | null,
+): ArrivalReferenceSnapshot {
+  if (!lastClearingPrice) return {};
+  return {
+    price: formatClearingPrice(lastClearingPrice, pair),
+    source: "last_clearing",
+    observedAt: Date.now(),
+  };
+}
+
+async function arrivalReferenceSnapshot(
+  deployment: DeploymentConfig | null,
+  pair: PairConfig,
+  lastClearingPrice: { batchId: string; epochId: number; clearingPrice: string; priceBaseScale?: string } | null,
+): Promise<ArrivalReferenceSnapshot> {
+  const referenceUrl = (
+    deployment?.market_data?.reference_price_url ||
+    (import.meta.env.VITE_ZYLITH_REFERENCE_PRICE_URL as string | undefined) ||
+    ""
+  ).trim();
+  if (!referenceUrl) return lastClearingReference(pair, lastClearingPrice);
+
+  const configuredTimeoutMs = finiteNumber(
+    deployment?.market_data?.reference_price_timeout_ms ??
+    import.meta.env.VITE_ZYLITH_REFERENCE_PRICE_TIMEOUT_MS,
+  ) ?? 1_500;
+  const timeoutMs = Math.max(
+    250,
+    Math.min(configuredTimeoutMs, 5_000),
+  );
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const url = new URL(referenceUrl, window.location.origin);
+    url.searchParams.set("pair", pair.pair_id);
+    url.searchParams.set("base", pair.base_asset_id);
+    url.searchParams.set("quote", pair.quote_asset_id);
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return lastClearingReference(pair, lastClearingPrice);
+    const mark = await response.json() as ReferencePriceResponse;
+    const humanPrice = mark.price ?? mark.reference_price ?? mark.mark_price;
+    if (humanPrice !== undefined && String(humanPrice).trim()) {
+      return {
+        price: String(humanPrice),
+        source: "external_mark",
+        observedAt: referenceObservedAt(mark),
+      };
+    }
+    if (mark.clearing_price !== undefined) {
+      return {
+        price: formatClearingPrice({
+          batchId: "external-mark",
+          epochId: 0,
+          clearingPrice: String(mark.clearing_price),
+          priceBaseScale: mark.price_base_scale === undefined ? pair.price_base_scale : String(mark.price_base_scale),
+        }, pair),
+        source: "external_mark",
+        observedAt: referenceObservedAt(mark),
+      };
+    }
+  } catch {
+    // Reference marks improve TCA when available; order submission must not depend on this service.
+  } finally {
+    window.clearTimeout(timeout);
+  }
+  return lastClearingReference(pair, lastClearingPrice);
+}
+
 function takerTabFromPath(path: string): AppTab {
   if (path === "/orders") return "orders";
   if (path === "/assets") return "assets";
@@ -655,15 +761,16 @@ export default function App() {
         relayMode: intent.relayMode ?? "SelfRelay",
       };
 
+      const arrivalReference = await arrivalReferenceSnapshot(
+        deployment,
+        submitPair,
+        lastClearingPrices[submitPair.pair_id] ?? null,
+      );
       const result = await w.submitPrivateOrder(draft);
       if (result.offline_package?.relay_mode === "ZylithRelay") {
         await submitManagedRenewalPackage(result.offline_package);
       }
       const submittedAt = Date.now();
-      const arrivalReference = lastClearingPrices[submitPair.pair_id] ?? null;
-      const arrivalReferencePrice = arrivalReference
-        ? formatClearingPrice(arrivalReference, submitPair)
-        : undefined;
 
       const newOrder: LocalOrder = {
         ordRef: genRef(),
@@ -684,9 +791,9 @@ export default function App() {
         fillOrKill: intent.fillOrKill,
         status: result.first_child_order_commitment || result.order_commitment ? "in_batch" : "queued",
         submittedAt,
-        arrivalReferencePrice,
-        arrivalReferenceSource: arrivalReference ? "last_clearing" : undefined,
-        arrivalReferenceAt: arrivalReference ? submittedAt : undefined,
+        arrivalReferencePrice: arrivalReference.price,
+        arrivalReferenceSource: arrivalReference.source,
+        arrivalReferenceAt: arrivalReference.observedAt,
         makerCurvePoints: intent.shape === "curve"
           ? intent.curvePoints.filter(pt => pt.price.trim() && pt.baseAmount.trim())
           : undefined,

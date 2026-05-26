@@ -312,8 +312,8 @@ export function AssetsScreen({
       {consolidationPlans.length > 0 && (
         <section className="asset-lifecycle">
           <div className="asset-section-hd">
-            <h2>Note Consolidation</h2>
-            <span>{consolidationPlans.length} asset {consolidationPlans.length === 1 ? "plan" : "plans"}</span>
+            <h2>Note consolidation</h2>
+            <span>{consolidationPlans.length} merge {consolidationPlans.length === 1 ? "plan" : "plans"}</span>
           </div>
 
           <div className="table-zone compact assets-table-zone">
@@ -324,7 +324,7 @@ export function AssetsScreen({
                   <th>Source notes</th>
                   <th>Source amount</th>
                   <th>Target notes</th>
-                  <th>Plan</th>
+                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -335,7 +335,7 @@ export function AssetsScreen({
                     <td className="num">{plan.sourceAmountDisplay}</td>
                     <td className="num">{plan.targetNoteCount}</td>
                     <td className="tca-muted-cell">
-                      {plan.reason} Protocol merge execution is not enabled in this deployment.
+                      Eligible for proved consolidation once the consolidation proving endpoint is enabled.
                     </td>
                   </tr>
                 ))}

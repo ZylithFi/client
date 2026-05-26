@@ -283,6 +283,12 @@ export function ReportsScreen({
   const avgShortfall = shortfallValues.length > 0
     ? formatBps(mean(shortfallValues))
     : "—";
+  const realizedSpreadValues = filled
+    .map(order => realizedSpreadBpsValue(order.side, order.arrivalReferencePrice, order.clearingPrice))
+    .filter((value): value is number => value !== null);
+  const bestFill = realizedSpreadValues.length > 0
+    ? formatBps(Math.max(...realizedSpreadValues))
+    : "—";
   const fillRate = periodOrders.length > 0
     ? formatPct((filled.length / periodOrders.length) * 100)
     : "—";
@@ -486,6 +492,10 @@ export function ReportsScreen({
                 <div className="kpi-lbl">Avg shortfall</div>
                 <div className="kpi-val z-amt">{avgShortfall}</div>
               </div>
+              <div className="tca-stat-cell">
+                <div className="kpi-lbl">Best fill</div>
+                <div className="kpi-val z-amt">{bestFill}</div>
+              </div>
             </div>
             <div className="tca-filter">
               {([
@@ -561,7 +571,7 @@ export function ReportsScreen({
             <div className="tca-section">
               <div className="tca-section-hd">
                 <span>Maker analytics</span>
-                <em>Curve depth, band utilization, and renewal effectiveness from local filled orders.</em>
+                <em>Estimated per-band depth, utilization, and renewal effectiveness from local filled orders.</em>
               </div>
               <div className="table-zone compact-table">
                 <table className="data-table">

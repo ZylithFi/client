@@ -16,7 +16,22 @@ import { userFacingErrorMessage } from "../domain/userFacingErrors";
 type CurveSide = "bid" | "ask" | "two-sided";
 type Period = "7d" | "30d" | "90d" | "all";
 type LiquidityPageTab = "curves" | "orders" | "inventory" | "analytics";
+type RenewalDurationPreset = "1" | "4" | "12" | "24" | "720" | "2160" | "continuous" | "custom";
 const MIN_CURVE_BANDS = 3;
+const LOCAL_BROWSER_MAX_RENEWAL_HOURS = 1;
+const MAX_RELAY_RENEWAL_DAYS = 90;
+const CONTINUOUS_ROLLING_WINDOW_HOURS = MAX_RELAY_RENEWAL_DAYS * 24;
+
+const RENEWAL_DURATION_OPTIONS: Array<{ value: RenewalDurationPreset; label: string; relayOnly?: boolean }> = [
+  { value: "1", label: "1h" },
+  { value: "4", label: "4h", relayOnly: true },
+  { value: "12", label: "12h", relayOnly: true },
+  { value: "24", label: "24h", relayOnly: true },
+  { value: "720", label: "30d", relayOnly: true },
+  { value: "2160", label: "90d", relayOnly: true },
+  { value: "continuous", label: "Continuous", relayOnly: true },
+  { value: "custom", label: "Custom", relayOnly: true },
+];
 
 type LiquidityCurveRecord = {
   id: string;
@@ -52,6 +67,25 @@ function formatHuman(value: number, suffix = ""): string {
     maximumFractionDigits: value >= 100 ? 2 : 6,
   });
   return suffix ? `${formatted} ${suffix}` : formatted;
+}
+
+function renewalHoursForPreset(preset: RenewalDurationPreset, customDays: string): number {
+  if (preset === "continuous") return CONTINUOUS_ROLLING_WINDOW_HOURS;
+  if (preset === "custom") {
+    const parsed = Number(customDays);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 24;
+    return Math.max(1, Math.min(MAX_RELAY_RENEWAL_DAYS, parsed)) * 24;
+  }
+  return Number(preset);
+}
+
+function renewalWindowLabel(preset: RenewalDurationPreset, hours: number): string {
+  if (preset === "continuous") return "Continuous · 90d rolling package";
+  if (hours >= 24) {
+    const days = hours / 24;
+    return `${days.toLocaleString("en-US", { maximumFractionDigits: 1 })}d package`;
+  }
+  return `${hours}h window`;
 }
 
 function formatPct(value: number): string {
@@ -400,6 +434,7 @@ function CurvePreview({
   inventoryCap,
   renewing,
   renewalWindowHours,
+  renewalWindowLabelText,
   onPreviewFunding,
 }: {
   pair: PairConfig;
@@ -409,6 +444,7 @@ function CurvePreview({
   inventoryCap: string;
   renewing: boolean;
   renewalWindowHours: string;
+  renewalWindowLabelText: string;
   onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
 }) {
   const activeBandSets = side === "two-sided"
@@ -462,7 +498,7 @@ function CurvePreview({
       </div>
       <div className="curve-preview-row">
         <span className="curve-preview-lbl">Renewal</span>
-        <span className="curve-preview-val">{renewing ? `${renewalWindowHours}h window` : "Current epoch only"}</span>
+        <span className="curve-preview-val">{renewing ? renewalWindowLabelText : "Current epoch only"}</span>
       </div>
       <div className="curve-preview-row">
         <span className="curve-preview-lbl">Eligibility</span>
@@ -534,7 +570,8 @@ export function LiquidityCurvesScreen({
   const [advanced, setAdvanced] = useState(false);
   const [inventoryCap, setInventoryCap] = useState("");
   const [renewing, setRenewing] = useState(false);
-  const [renewalWindowHours, setRenewalWindowHours] = useState("4");
+  const [renewalDuration, setRenewalDuration] = useState<RenewalDurationPreset>("24");
+  const [customRenewalDays, setCustomRenewalDays] = useState("30");
   const [relayMode, setRelayMode] = useState<"SelfRelay" | "ZylithRelay">("ZylithRelay");
 
   function prefillBuilder(record: LiquidityCurveRecord) {
@@ -544,6 +581,12 @@ export function LiquidityCurvesScreen({
     if (record.side === "Buy") setBidBands(nextBands);
     else setAskBands(nextBands);
     setRenewing(Boolean(record.strategy));
+    if (record.strategy?.offline_package?.slot_count && record.strategy.offline_package.slot_count > 960) {
+      const epochs = Math.max(1, record.strategy.offline_package.slot_count);
+      if (epochs >= 86_400) setRenewalDuration("2160");
+      else if (epochs >= 28_800) setRenewalDuration("720");
+      else setRenewalDuration("24");
+    }
     if (record.strategy?.maker_inventory_cap) {
       const pair = pairs.find(candidate => candidate.pair_id === record.pair);
       setInventoryCap(pair ? fromAtomicStr(record.strategy.maker_inventory_cap, pair.base_asset_id) : "");
@@ -589,7 +632,13 @@ export function LiquidityCurvesScreen({
         ["ask", askBands],
       ]
     : [[side, side === "bid" ? bidBands : askBands] as [Exclude<CurveSide, "two-sided">, CurvePoint[]]];
-  const canSubmit = walletReady && !submitting && sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
+  const renewalHours = renewalHoursForPreset(renewalDuration, customRenewalDays);
+  const renewalLabel = renewalWindowLabel(renewalDuration, renewalHours);
+  const localRelayTooLong = renewing && relayMode === "SelfRelay" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS;
+  const canSubmit = walletReady &&
+    !submitting &&
+    !localRelayTooLong &&
+    sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
 
   async function submit() {
     for (const [curveSide, bands] of sideBandSets) {
@@ -605,7 +654,7 @@ export function LiquidityCurvesScreen({
         fillOrKill: false,
         curvePoints: bandRowsFilled(bands),
         inventoryCap,
-        durationHours: renewalWindowHours,
+        durationHours: renewalHours.toString(),
         childSize: "",
         priceLimit: "",
         jitter: 0,
@@ -674,16 +723,53 @@ export function LiquidityCurvesScreen({
               </div>
               <div className="curve-risk-field">
                 <label className="f-label">Renewal window</label>
-                <select className="liq-select compact" value={renewalWindowHours} onChange={event => setRenewalWindowHours(event.target.value)} disabled={!renewing}>
-                  <option value="1">1h</option>
-                  <option value="4">4h</option>
-                  <option value="12">12h</option>
-                  <option value="24">24h</option>
+                <select
+                  className="liq-select compact"
+                  value={renewalDuration}
+                  onChange={event => setRenewalDuration(event.target.value as RenewalDurationPreset)}
+                  disabled={!renewing}
+                >
+                  {RENEWAL_DURATION_OPTIONS.map(option => (
+                    <option
+                      key={option.value}
+                      value={option.value}
+                      disabled={relayMode === "SelfRelay" && option.relayOnly}
+                    >
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </div>
+              {renewalDuration === "custom" && (
+                <div className="curve-risk-field">
+                  <label className="f-label">Custom days</label>
+                  <div className="f-input-box" style={{ height: 34 }}>
+                    <input
+                      className="f-input"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="30"
+                      value={customRenewalDays}
+                      onChange={event => setCustomRenewalDays(event.target.value)}
+                    />
+                    <span className="f-unit">days</span>
+                  </div>
+                </div>
+              )}
               <div className="curve-risk-field">
                 <label className="f-label">Renewal operator</label>
-                <select className="liq-select compact" value={relayMode} onChange={event => setRelayMode(event.target.value as "SelfRelay" | "ZylithRelay")} disabled={!renewing}>
+                <select
+                  className="liq-select compact"
+                  value={relayMode}
+                  onChange={event => {
+                    const next = event.target.value as "SelfRelay" | "ZylithRelay";
+                    setRelayMode(next);
+                    if (next === "SelfRelay" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS) {
+                      setRenewalDuration("1");
+                    }
+                  }}
+                  disabled={!renewing}
+                >
                   <option value="ZylithRelay">Zylith relay</option>
                   <option value="SelfRelay">Local browser</option>
                 </select>
@@ -702,9 +788,19 @@ export function LiquidityCurvesScreen({
             askBands={askBands}
             inventoryCap={inventoryCap}
             renewing={renewing}
-            renewalWindowHours={renewalWindowHours}
+            renewalWindowHours={renewalHours.toString()}
+            renewalWindowLabelText={renewalLabel}
             onPreviewFunding={onPreviewFunding}
           />
+          {renewing && (
+            <div className={`wc-note ${localRelayTooLong ? "warn" : ""}`}>
+              {relayMode === "SelfRelay"
+                ? "Local browser renewal is capped at 1h and stops if this tab closes or the machine sleeps."
+                : renewalDuration === "continuous"
+                  ? "Continuous uses rolling 90d relay packages. Refresh before expiry to extend the curve."
+                  : "Zylith relay submits pre-authorized child slots for the selected window. Cancel invalidates unused slots on-chain."}
+            </div>
+          )}
           {submitError && <div className="wc-note warn">{submitError}</div>}
           <button className="submit-btn curve-cta" disabled={!canSubmit} onClick={() => { void submit(); }}>
             {submitting ? "Submitting..." : curveCtaLabel(side)}

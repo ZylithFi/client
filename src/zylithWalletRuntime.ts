@@ -1,4 +1,5 @@
 import { denominationTableForAsset, splitDepositAmount } from "./domain/depositSplitting";
+import { selectedStarknetProvider } from "./domain/browserWallet";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 
 type Side = "Buy" | "Sell";
@@ -229,6 +230,7 @@ type PrivateStrategySummary = {
     start_epoch: number;
     end_epoch: number;
     slot_count: number;
+    relay_mode?: "SelfRelay" | "ZylithRelay";
   };
   parent_cancel_transaction_hash?: string;
   last_error?: string;
@@ -528,7 +530,12 @@ const STRATEGIES_PREFIX = "zylith.wallet.strategies.v1:";
 const STRATEGY_WORKER_INTERVAL_MS = 12_000;
 const PRIVATE_SUBMISSION_MAX_DELAY_MS = 7_000;
 const BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
-const MAX_STRATEGY_CHILDREN = 2_880; // 24h at the production 30s epoch cadence.
+const MAX_STRATEGY_CHILDREN = boundedInteger(
+  import.meta.env.VITE_ZYLITH_MAX_STRATEGY_CHILDREN,
+  86_400,
+  1,
+  100_000,
+); // 90d at the production 90s epoch cadence.
 const PENDING_DEPOSIT_FAILURE_GRACE_MS = 10 * 60 * 1000;
 const DEFAULT_MAKER_CURVE_ROTATION_BPS = boundedInteger(
   import.meta.env.VITE_ZYLITH_MAKER_CURVE_ROTATION_BPS,
@@ -818,15 +825,15 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const rawAmount = parseRawAmount(amount, "deposit amount");
     const deployment = await loadDeploymentConfig();
     const fundingRail = selectedDepositFundingRail(deployment);
-    const depositRouterAddress = requiredString(
+    const depositRouterAddress = requiredNonZeroFelt(
       fundingRail.depositRouter,
       "deposit_router_address",
     );
-    const tokenAddress = requiredString(
+    const tokenAddress = requiredNonZeroFelt(
       deployment.token_addresses?.[normalizedAsset],
       `${normalizedAsset} token address`,
     );
-    const shieldedAssetAdapterAddress = requiredString(
+    const shieldedAssetAdapterAddress = requiredNonZeroFelt(
       fundingRail.shieldedAssetAdapter || configuredShieldedAssetAdapterAddress,
       "shielded_asset_adapter_address",
     );
@@ -1039,7 +1046,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const { seedHex: unlockedSeed } = requireUnlocked();
     const deployment = await loadDeploymentConfig();
     const chainId = requiredString(configuredChainId || deployment.chain_id, "chain_id");
-    const auctionVerifierAddress = requiredString(
+    const auctionVerifierAddress = requiredNonZeroFelt(
       configuredAuctionVerifierAddress || deployment.contracts?.auction_verifier,
       "auction_verifier_address",
     );
@@ -1437,6 +1444,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       maker_curve_points: isResting ? serializeMakerCurvePoints(makerCurvePoints) : undefined,
       maker_curve_rotation_bps: isResting ? makerCurveRotationBps(draft) : 0,
       maker_inventory_cap: isResting ? totalAmount.toString() : undefined,
+      renewal_window_children: maxChildren,
       parent,
       submitted_children: [],
       status: "delegated",
@@ -1797,13 +1805,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       request.chain_id || configuredChainId || deployment.chain_id,
       "chain_id",
     );
-    const paymasterAddress = requiredString(
+    const paymasterAddress = requiredNonZeroFelt(
       request.paymaster_address ||
         configuredPaymasterAddress ||
         deployment.funding?.starknet_privacy?.paymaster_address,
       "paymaster_address",
     );
-    const shieldedAssetAdapterAddress = requiredString(
+    const shieldedAssetAdapterAddress = requiredNonZeroFelt(
       request.shielded_asset_adapter_address ||
         fundingRail.shieldedAssetAdapter ||
         configuredShieldedAssetAdapterAddress,
@@ -1824,7 +1832,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
               output_note: outputNote,
               output_proof: outputProof,
               recipient: request.recipient,
-              auction_verifier_address: requiredString(
+              auction_verifier_address: requiredNonZeroFelt(
                 auctionVerifierAddress,
                 "auction_verifier_address",
               ),
@@ -2973,7 +2981,15 @@ function discoverRuntimeStarknetProviders() {
 }
 
 async function selectInjectedStarknetProvider() {
-  for (const { provider } of discoverRuntimeStarknetProviders()) {
+  const preferredProvider = selectedStarknetProvider();
+  const discovered = discoverRuntimeStarknetProviders();
+  const orderedProviders = preferredProvider
+    ? [
+        { provider: preferredProvider },
+        ...discovered.filter(({ provider }) => provider !== preferredProvider),
+      ]
+    : discovered;
+  for (const { provider } of orderedProviders) {
     try {
       await ensureWalletAccountAccess(provider);
     } catch {
@@ -3383,6 +3399,18 @@ function requiredString(value: unknown, label: string) {
     throw new Error(`${field} is required`);
   }
   return value;
+}
+
+function requiredNonZeroFelt(value: unknown, label: string) {
+  const felt = requiredString(value, label).trim();
+  const normalized = felt.startsWith("0x") || felt.startsWith("0X")
+    ? felt.slice(2)
+    : felt;
+  if (/^0*$/i.test(normalized)) {
+    const field = label ? label[0].toUpperCase() + label.slice(1) : "Value";
+    throw new Error(`${field} must be configured`);
+  }
+  return felt;
 }
 
 function normalizeUrl(value: unknown) {

@@ -17,7 +17,7 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[]}
-        batchWindowMs={30_000}
+        batchWindowMs={90_000}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}

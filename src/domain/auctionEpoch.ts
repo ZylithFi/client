@@ -62,6 +62,10 @@ export type DeploymentConfig = {
     native_tx_prover_url?: string;
     native_prover_rpc_url?: string;
   };
+  market_data?: {
+    reference_price_url?: string;
+    reference_price_timeout_ms?: number;
+  };
 };
 
 export type CoordinatorStatus = {

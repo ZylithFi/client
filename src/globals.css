@@ -1172,7 +1172,7 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 }
 .tca-stat-cells {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 .tca-stat-cell {
   min-height: 58px;
