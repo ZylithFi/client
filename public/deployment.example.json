@@ -1,0 +1,199 @@
+{
+  "network": "sepolia",
+  "chain_id": "0x534e5f5345504f4c4941",
+  "rpc_url": "https://api.zan.top/public/starknet-sepolia/rpc/v0_10",
+  "contracts": {
+    "commitment_registry": "0x0",
+    "batch_registry": "0x0",
+    "fee_ledger": "0x0",
+    "shielded_asset_adapter": "0x0",
+    "privacy_deposit_bridge": "0x0",
+    "auction_verifier": "0x0"
+  },
+  "roles": {
+    "protocol_admin_address": "0x0",
+    "pause_guardian_address": "0x0",
+    "protocol_fee_recipient": "0x0",
+    "fee_claim_authority_address": "0x0",
+    "settlement_account_address": "0x0",
+    "batch_registrar_account_address": "0x0",
+    "paymaster_account_address": "0x0"
+  },
+  "runtime": {
+    "batch_window_ms": 90000,
+    "public_artifact_delay_epochs": 1,
+    "output_claim_delay_seconds": 1800
+  },
+  "token_addresses": {
+    "STRK": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+    "ETH": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
+    "USDC": "0x0",
+    "strkBTC": "0x0",
+    "WBTC": "0x0",
+    "USDT": "0x0"
+  },
+  "funding": {
+    "primary": "starknet_privacy",
+    "capabilities": {
+      "private_deposits": true,
+      "private_withdrawals": true,
+      "private_transfers": true,
+      "discovery_sync": true,
+      "proof_bearing_transactions": true,
+      "paymaster_ready": true,
+      "user_controlled_disclosure": true
+    },
+    "starknet_privacy": {
+      "privacy_pool": "0x0",
+      "bridge_adapter": "0x0",
+      "shielded_asset_adapter": "0x0",
+      "discovery_url": "/starknet-privacy-discovery",
+      "proving_url": "/starknet-privacy-prover",
+      "paymaster_address": "0x0",
+      "paymaster_url": "https://paymaster.example.invalid/execute-outside",
+      "sdk_package": "@starkware-libs/starknet-privacy-sdk",
+      "sdk_version": "0.14.2-rc.2",
+      "min_proving_delay_blocks": 10
+    }
+  },
+  "product": {
+    "assets": {
+      "STRK": {
+        "asset_id": "STRK",
+        "min_trade_amount": "1000000000000000000",
+        "decimals": 18,
+        "enabled": true
+      },
+      "ETH": {
+        "asset_id": "ETH",
+        "min_trade_amount": "1000000000000000",
+        "decimals": 18,
+        "enabled": true
+      },
+      "USDC": {
+        "asset_id": "USDC",
+        "min_trade_amount": "1000000",
+        "decimals": 6,
+        "enabled": true
+      },
+      "strkBTC": {
+        "asset_id": "strkBTC",
+        "min_trade_amount": "100000",
+        "decimals": 8,
+        "enabled": true
+      },
+      "WBTC": {
+        "asset_id": "WBTC",
+        "min_trade_amount": "100000",
+        "decimals": 8,
+        "enabled": true
+      },
+      "USDT": {
+        "asset_id": "USDT",
+        "min_trade_amount": "1000000",
+        "decimals": 6,
+        "enabled": true
+      }
+    },
+    "pairs": {
+      "STRK/USDC": {
+        "pair_id": "STRK/USDC",
+        "base_asset_id": "STRK",
+        "quote_asset_id": "USDC",
+        "min_order_amount": "1000000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "taker_fee_bps": 4,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 2,
+        "enabled": true
+      },
+      "ETH/USDC": {
+        "pair_id": "ETH/USDC",
+        "base_asset_id": "ETH",
+        "quote_asset_id": "USDC",
+        "min_order_amount": "1000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "taker_fee_bps": 4,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 2,
+        "enabled": true
+      },
+      "strkBTC/USDC": {
+        "pair_id": "strkBTC/USDC",
+        "base_asset_id": "strkBTC",
+        "quote_asset_id": "USDC",
+        "min_order_amount": "100000",
+        "price_base_scale": "100000000",
+        "taker_fee_bps": 4,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 2,
+        "enabled": true
+      },
+      "STRK/ETH": {
+        "pair_id": "STRK/ETH",
+        "base_asset_id": "STRK",
+        "quote_asset_id": "ETH",
+        "min_order_amount": "1000000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "taker_fee_bps": 4,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 2,
+        "enabled": true
+      },
+      "STRK/strkBTC": {
+        "pair_id": "STRK/strkBTC",
+        "base_asset_id": "STRK",
+        "quote_asset_id": "strkBTC",
+        "min_order_amount": "1000000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "taker_fee_bps": 4,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 2,
+        "enabled": true
+      },
+      "WBTC/strkBTC": {
+        "pair_id": "WBTC/strkBTC",
+        "base_asset_id": "WBTC",
+        "quote_asset_id": "strkBTC",
+        "min_order_amount": "100000",
+        "price_base_scale": "100000000",
+        "taker_fee_bps": 2,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 1,
+        "enabled": true
+      },
+      "USDC/USDT": {
+        "pair_id": "USDC/USDT",
+        "base_asset_id": "USDC",
+        "quote_asset_id": "USDT",
+        "min_order_amount": "1000000",
+        "price_base_scale": "1000000",
+        "taker_fee_bps": 2,
+        "maker_fee_bps": 0,
+        "relay_fee_bps": 1,
+        "enabled": true
+      }
+    }
+  },
+  "proof": {
+    "scheme": "native-starknet-proof-bearing-invoke-v3",
+    "proof_entrypoint": "compile_settlement_proof",
+    "proof_program_address": "0x0",
+    "proof_program_hash": "0x0",
+    "settlement_statement_program_address": "0x0",
+    "nullifier_statement_program_address": "0x0",
+    "renewal_statement_program_address": "0x0",
+    "note_consolidation_statement_program_address": "0x0",
+    "proof_account_address": "0x0",
+    "settlement_account_address": "0x0",
+    "proof_validity_blocks": 450,
+    "output_claim_delay_seconds": 1800,
+    "native_prover_rpc_url": "https://api.zan.top/public/starknet-sepolia/rpc/v0_10",
+    "native_tx_prover_url": "https://prover.example.invalid",
+    "native_tx_prover_ohttp_enabled": true
+  },
+  "market_data": {
+    "reference_price_url": "https://market-data.example.invalid/reference-price",
+    "reference_price_timeout_ms": 1500
+  }
+}

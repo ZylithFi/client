@@ -1077,7 +1077,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const deployment = await loadDeploymentConfig();
     const chainId = requiredString(configuredChainId || deployment.chain_id, "chain_id");
     const auctionVerifierAddress = requiredNonZeroFelt(
-      configuredAuctionVerifierAddress || deployment.contracts?.auction_verifier,
+      deployment.contracts?.auction_verifier || configuredAuctionVerifierAddress,
       "auction_verifier_address",
     );
     const plan = JSON.parse(
@@ -1848,8 +1848,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       "shielded_asset_adapter_address",
     );
     const auctionVerifierAddress = request.auction_verifier_address ||
-      configuredAuctionVerifierAddress ||
-      deployment.contracts?.auction_verifier;
+      deployment.contracts?.auction_verifier ||
+      configuredAuctionVerifierAddress;
     const outputNote = request.output_note ?? note.output_note;
     const outputProof = request.output_proof ?? note.output_proof;
     const batchId = request.batch_id ?? note.batch_id;
@@ -2309,7 +2309,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   async function resolveDeploymentScope() {
     const deployment = await loadDeploymentConfig();
     const chainId = configuredChainId || deployment.chain_id || "unknown-chain";
-    const verifier = configuredAuctionVerifierAddress || deployment.contracts?.auction_verifier || "unknown-verifier";
+    const verifier = deployment.contracts?.auction_verifier || configuredAuctionVerifierAddress || "unknown-verifier";
     return `${chainId}:${verifier}`;
   }
 
