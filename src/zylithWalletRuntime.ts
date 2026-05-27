@@ -962,7 +962,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
         paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
         privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-        minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 10,
+        minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
         sdkRegistry,
         plan: {
           amount: BigInt(plan.encoded_args.amount),

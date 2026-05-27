@@ -1,7 +1,7 @@
 {
   "network": "sepolia",
   "chain_id": "0x534e5f5345504f4c4941",
-  "rpc_url": "https://api.zan.top/public/starknet-sepolia/rpc/v0_10",
+  "rpc_url": "https://api.zylith.fi/starknet-rpc",
   "contracts": {
     "commitment_registry": "0x0",
     "batch_registry": "0x0",
@@ -53,7 +53,7 @@
       "paymaster_url": "https://paymaster.example.invalid/execute-outside",
       "sdk_package": "@starkware-libs/starknet-privacy-sdk",
       "sdk_version": "0.14.2-rc.2",
-      "min_proving_delay_blocks": 10
+      "min_proving_delay_blocks": 20
     }
   },
   "product": {

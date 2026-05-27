@@ -64,15 +64,30 @@ export type SubmitPrivacyBridgeDepositResult = {
 
 const STARK_FIELD_PRIME =
   3618502788666131213697322783095070105623107215331596699973092056135872020481n;
+const STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS = 10;
+const STARKNET_PRIVACY_MIN_PROOF_DELAY_BLOCKS = 20;
+const STARKNET_PRIVACY_PROOF_DELAY_RETRY_BLOCKS = 8;
+const STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS = 3;
+const STARKNET_PRIVACY_REPLAY_GUARD_ATOMS = 1n;
+const STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT = (1n << 128n) - 1n;
 
 export async function submitPrivacyBridgeDeposit(
   input: SubmitPrivacyBridgeDepositInput,
 ): Promise<SubmitPrivacyBridgeDepositResult> {
-  const depositorAddress = connectedStarknetAddress(input.provider);
+  const depositorAddress = await resolveConnectedStarknetAddress(input.provider);
   if (!depositorAddress) {
     throw new Error("Connect a Starknet wallet before using Starknet Privacy funding");
   }
   const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
+  const txDelayBlocks = Math.max(
+    input.minProvingDelayBlocks,
+    STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS,
+  );
+  const baseProofDelayBlocks = Math.max(
+    input.minProvingDelayBlocks,
+    STARKNET_PRIVACY_MIN_PROOF_DELAY_BLOCKS,
+  );
+  const sdkDepositAmount = input.plan.amount + STARKNET_PRIVACY_REPLAY_GUARD_ATOMS;
   const account = await runFundingStage(
     "Starknet Privacy signer setup failed",
     () =>
@@ -81,7 +96,7 @@ export async function submitPrivacyBridgeDeposit(
         rpcProvider,
         paymasterUrl: input.paymasterUrl,
         privacyProofSignerClassHash: input.privacyProofSignerClassHash,
-        minProvingDelayBlocks: input.minProvingDelayBlocks,
+        minProvingDelayBlocks: txDelayBlocks,
       }),
   );
   await runFundingStage("Starknet Privacy funding setup failed", () =>
@@ -93,14 +108,10 @@ export async function submitPrivacyBridgeDeposit(
       chainId: input.chainId,
       tokenAddress: input.tokenAddress,
       privacyPoolAddress: input.privacyPoolAddress,
-      amount: input.plan.amount,
+      amount: sdkDepositAmount,
       paymasterUrl: input.paymasterUrl,
-      minProvingDelayBlocks: input.minProvingDelayBlocks,
+      minProvingDelayBlocks: txDelayBlocks,
     })
-  );
-  const provingBlockId = await runFundingStage(
-    "Starknet Privacy proving block lookup failed",
-    () => provingBlock(rpcProvider, input.minProvingDelayBlocks),
   );
   const discoveryProvider = new IndexerDiscoveryProvider(
     input.discoveryUrl,
@@ -111,80 +122,104 @@ export async function submitPrivacyBridgeDeposit(
       throw new Error("Discovery service is not healthy");
     }
   });
-  const provingProvider = new ProvingServiceProofProvider(
-    input.provingUrl,
-    sdkChainId(input.chainId),
-    {
-      blockIdentifier: provingBlockId,
-      requestTimeoutMs: 240_000,
-      nodeUrl: input.rpcUrl,
-      poolAddress: input.privacyPoolAddress,
-    },
-  );
-  const transfers = createPrivateTransfers({
-    account: account as never,
-    viewingKeyProvider: {
-      getViewingKey: async () => derivePrivacyViewingKey(input.seedHex),
-    },
-    provingProvider,
-    discoveryProvider,
-    poolContractAddress: input.privacyPoolAddress,
-  });
   const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
-  const execution = await runFundingStage(
-    "Starknet Privacy proof generation failed",
-    () =>
-      transfers
-        .build({
-          autoRegister: true,
-          autoSetup: true,
-          autoDiscover: { notes: "refresh", channels: "refresh" },
-          registry: sdkRegistry,
-          registryConst: true,
-        })
-        .with(input.tokenAddress, (token) =>
-          token
-            .deposit({ amount: input.plan.amount })
-            .withdraw({ recipient: input.bridgeAddress, amount: input.plan.amount })
-        )
-        .surplusTo(account.address)
-        .invoke(({ withdrawals }) => {
-          const withdrawal = withdrawals.find((entry) =>
-            sameFelt(entry.recipient, input.bridgeAddress) &&
-            sameFelt(entry.token, input.tokenAddress) &&
-            entry.amount === input.plan.amount
-          );
-          if (!withdrawal) {
-            throw new Error("Starknet Privacy bridge withdrawal was not built correctly");
-          }
-          return {
-            contractAddress: input.bridgeAddress,
-            calldata: [
-              input.plan.encodedArgs.asset_id,
-              input.plan.encodedArgs.amount,
-              input.plan.encodedArgs.deposit_nonce,
-              input.plan.encodedArgs.note_commitment,
-              input.plan.encodedArgs.withdraw_authority,
-            ],
-          };
-        })
-        .execute({ provingBlockId }),
-  );
-  assertNoSdkPrivacyWarnings(execution.warnings);
+  let lastRetryableError: unknown = null;
+  for (let attempt = 0; attempt < STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const proofDelayBlocks =
+        baseProofDelayBlocks + (attempt * STARKNET_PRIVACY_PROOF_DELAY_RETRY_BLOCKS);
+      const provingBlockId = await runFundingStage(
+        "Starknet Privacy proving block lookup failed",
+        () => provingBlock(rpcProvider, proofDelayBlocks),
+      );
+      const provingProvider = new ProvingServiceProofProvider(
+        input.provingUrl,
+        sdkChainId(input.chainId),
+        {
+          blockIdentifier: provingBlockId,
+          requestTimeoutMs: 240_000,
+          nodeUrl: input.rpcUrl,
+          poolAddress: input.privacyPoolAddress,
+        },
+      );
+      const transfers = createPrivateTransfers({
+        account: account as never,
+        viewingKeyProvider: {
+          getViewingKey: async () => derivePrivacyViewingKey(input.seedHex),
+        },
+        provingProvider,
+        discoveryProvider,
+        poolContractAddress: input.privacyPoolAddress,
+      });
+      const execution = await runFundingStage(
+        "Starknet Privacy proof generation failed",
+        () =>
+          transfers
+            .build({
+              autoRegister: true,
+              autoSetup: true,
+              autoDiscover: { notes: "refresh", channels: "refresh" },
+              registry: sdkRegistry,
+              registryConst: true,
+            })
+            .with(input.tokenAddress, (token) =>
+              token
+                .deposit({ amount: sdkDepositAmount })
+                .withdraw({ recipient: input.bridgeAddress, amount: input.plan.amount })
+            )
+            .surplusTo(account.address)
+            .invoke(({ withdrawals }) => {
+              const withdrawal = withdrawals.find((entry) =>
+                sameFelt(entry.recipient, input.bridgeAddress) &&
+                sameFelt(entry.token, input.tokenAddress) &&
+                entry.amount === input.plan.amount
+              );
+              if (!withdrawal) {
+                throw new Error("Starknet Privacy bridge withdrawal was not built correctly");
+              }
+              return {
+                contractAddress: input.bridgeAddress,
+                calldata: [
+                  input.plan.encodedArgs.asset_id,
+                  input.plan.encodedArgs.amount,
+                  input.plan.encodedArgs.deposit_nonce,
+                  input.plan.encodedArgs.note_commitment,
+                  input.plan.encodedArgs.withdraw_authority,
+                ],
+              };
+            })
+            .execute({ provingBlockId }),
+      );
+      assertNoSdkPrivacyWarnings(execution.warnings);
 
-  const transactionHash = await runFundingStage("Starknet Privacy paymaster submission failed", () =>
-    submitProofBearingCall({
-      signerAddress: account.address,
-      chainId: input.chainId,
-      paymasterAddress: input.paymasterAddress,
-      paymasterUrl: input.paymasterUrl,
-      callAndProof: execution.callAndProof,
-    })
-  );
-  return {
-    transactionHash,
-    sdkRegistry: execution.registry,
-  };
+      const transactionHash = await runFundingStage(
+        "Starknet Privacy paymaster submission failed",
+        () =>
+          submitProofBearingCall({
+            signerAddress: account.address,
+            chainId: input.chainId,
+            paymasterAddress: input.paymasterAddress,
+            paymasterUrl: input.paymasterUrl,
+            callAndProof: execution.callAndProof,
+          }),
+      );
+      return {
+        transactionHash,
+        sdkRegistry: execution.registry,
+      };
+    } catch (error) {
+      if (
+        attempt < STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS - 1 &&
+        isProofBlockTooRecent(error)
+      ) {
+        lastRetryableError = error;
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastRetryableError ?? new Error("Starknet Privacy proof submission failed");
 }
 
 async function runFundingStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {
@@ -199,16 +234,22 @@ async function runFundingStage<T>(stage: string, operation: () => Promise<T>): P
 }
 
 function summarizeFundingError(error: unknown) {
-  const message = errorMessage(error).replace(/\s+/g, " ").trim();
+  const message = sanitizeRpcMessage(errorMessage(error));
   if (!message) return "No error detail was returned.";
+  if (/^Failed while /i.test(message)) {
+    return message.slice(0, 360);
+  }
   if (/Transfer allowance exceeded/i.test(message)) {
     return "Token approval was lower than the required privacy-pool deposit amount.";
   }
-  if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance/i.test(message)) {
+  if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow/i.test(message)) {
     return "Connected wallet does not have enough token balance for this deposit.";
   }
   if (/max fee|fee.*exceed|insufficient.*fee|not enough.*fee|actual fee/i.test(message)) {
     return "Connected wallet does not have enough STRK to pay the Starknet transaction fee.";
+  }
+  if (/privacy replay protection/i.test(message)) {
+    return message.slice(0, 280);
   }
   if (/entry point.*not found|entrypoint.*not found|invalid.*entrypoint/i.test(message)) {
     return "Configured token contract does not expose the expected ERC-20 entrypoint.";
@@ -218,6 +259,9 @@ function summarizeFundingError(error: unknown) {
   }
   if (/INVALID_SIG|INVALID_SIGNATURE/i.test(message)) {
     return "The embedded Zylith wallet did not produce a valid privacy authorization signature.";
+  }
+  if (/NO_REPLAY_PROTECTION/i.test(message)) {
+    return "Starknet Privacy requires a one-unit surplus note for replay protection.";
   }
   if (/Discovery service is not healthy/i.test(message)) {
     return "Starknet Privacy discovery service is unavailable.";
@@ -230,6 +274,9 @@ function summarizeFundingError(error: unknown) {
   }
   if (/Indexer API/i.test(message)) {
     return message.slice(0, 280);
+  }
+  if (/proof block number .* too recent|maximum allowed block number/i.test(message)) {
+    return "The privacy proof block is not old enough for the Starknet verifier yet.";
   }
   if (/proof facts|proofFacts/i.test(message)) {
     return "The proving service did not return valid proof facts.";
@@ -244,7 +291,10 @@ function summarizeFundingError(error: unknown) {
     return "A required service is unavailable.";
   }
   if (/RpcError|RPC:/i.test(message)) {
-    return "Starknet RPC returned an error.";
+    const reason = starknetRpcReason(message);
+    return reason
+      ? `Starknet RPC rejected the wallet transaction: ${reason}`
+      : "Starknet RPC rejected the wallet transaction during fee estimation.";
   }
   if (/paymaster/i.test(message) && /reject|invalid|mismatch|not allowed/i.test(message)) {
     return "The privacy paymaster rejected the authorization.";
@@ -273,6 +323,7 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
   paymasterUrl?: string;
   minProvingDelayBlocks: number;
 }) {
+  const setupTransactions: string[] = [];
   const balance = await withFundingSetupStep("reading embedded signer token balance", () =>
     readTokenBalance(
       input.rpcProvider,
@@ -282,6 +333,27 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
   );
   if (balance < input.amount) {
     const transferAmount = input.amount - balance;
+    const activeSourceOwner = await withFundingSetupStep("checking connected Starknet wallet", () =>
+      resolveConnectedStarknetAddress(input.provider)
+    );
+    if (!activeSourceOwner) {
+      throw new Error("Connect a Starknet wallet before funding the privacy signer");
+    }
+    if (activeSourceOwner !== normalizeAddress(input.sourceOwner)) {
+      throw new Error("Connected Starknet wallet changed during Starknet Privacy funding");
+    }
+    const sourceBalance = await withFundingSetupStep("reading connected wallet token balance", () =>
+      readTokenBalance(
+        input.rpcProvider,
+        input.tokenAddress,
+        activeSourceOwner,
+      )
+    );
+    if (sourceBalance < transferAmount) {
+      throw new Error(
+        `Connected wallet balance is below the requested deposit plus one smallest token unit required for Starknet Privacy replay protection.`,
+      );
+    }
     const transferCall: Call = {
       contractAddress: input.tokenAddress,
       entrypoint: "transfer",
@@ -294,18 +366,10 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     if (!txHash) {
       throw new Error("Starknet wallet did not return a funding transaction hash");
     }
-    await withFundingSetupStep(
-      "waiting for embedded signer funding transaction",
-      () =>
-        waitForTransactionAndProvingDelay(
-          input.rpcProvider,
-          txHash,
-          input.minProvingDelayBlocks,
-        ),
-    );
+    setupTransactions.push(txHash);
   } else {
     // Ensure the connected wallet is still the intended funding source before proving.
-    const connected = connectedStarknetAddress(input.provider);
+    const connected = await resolveConnectedStarknetAddress(input.provider);
     if (connected && connected !== normalizeAddress(input.sourceOwner)) {
       throw new Error("Connected Starknet wallet changed during Starknet Privacy funding");
     }
@@ -319,62 +383,67 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
       input.privacyPoolAddress,
     )
   );
-  if (allowance >= input.amount) return;
-  if (!input.paymasterUrl) {
-    throw new Error("Starknet Privacy paymaster is required for proof signer approval");
+  if (allowance < input.amount) {
+    if (!input.paymasterUrl) {
+      throw new Error("Starknet Privacy paymaster is required for proof signer approval");
+    }
+    const paymasterUrl = input.paymasterUrl;
+    const approveCall: Call = {
+      contractAddress: input.tokenAddress,
+      entrypoint: "approve",
+      calldata: [input.privacyPoolAddress, ...u256Calldata(STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT)],
+    };
+    const nonce = randomFelt();
+    const relayHash = privacyProofSignerRelayHash(
+      input.chainId,
+      input.account.address,
+      [approveCall],
+      nonce,
+    );
+    const signature = ec.starkCurve.sign(relayHash, input.account.privateKey);
+    const response = await withFundingSetupStep("requesting embedded signer approval relay", () =>
+      fetch(paymasterPrivacySignerRelayUrl(paymasterUrl), {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          account_address: input.account.address,
+          calls: [{
+            contract_address: approveCall.contractAddress,
+            entrypoint: approveCall.entrypoint,
+            calldata: approveCall.calldata ?? [],
+          }],
+          nonce,
+          signature_r: `0x${signature.r.toString(16)}`,
+          signature_s: `0x${signature.s.toString(16)}`,
+        }),
+      })
+    );
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(text || `Privacy paymaster rejected signer approval with HTTP ${response.status}`);
+    }
+    const json = await response.json() as { transaction_hash?: string; transactionHash?: string };
+    const txHash = json.transaction_hash ?? json.transactionHash;
+    if (!txHash) {
+      throw new Error("Privacy paymaster did not return an approval transaction hash");
+    }
+    setupTransactions.push(txHash);
   }
-  const paymasterUrl = input.paymasterUrl;
-  const approveCall: Call = {
-    contractAddress: input.tokenAddress,
-    entrypoint: "approve",
-    calldata: [input.privacyPoolAddress, ...u256Calldata(input.amount)],
-  };
-  const nonce = randomFelt();
-  const relayHash = privacyProofSignerRelayHash(
-    input.chainId,
-    input.account.address,
-    [approveCall],
-    nonce,
-  );
-  const signature = ec.starkCurve.sign(relayHash, input.account.privateKey);
-  const response = await withFundingSetupStep("requesting embedded signer approval relay", () =>
-    fetch(paymasterPrivacySignerRelayUrl(paymasterUrl), {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        account_address: input.account.address,
-        calls: [{
-          contract_address: approveCall.contractAddress,
-          entrypoint: approveCall.entrypoint,
-          calldata: approveCall.calldata ?? [],
-        }],
-        nonce,
-        signature_r: `0x${signature.r.toString(16)}`,
-        signature_s: `0x${signature.s.toString(16)}`,
-      }),
-    })
-  );
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(text || `Privacy paymaster rejected signer approval with HTTP ${response.status}`);
+
+  if (setupTransactions.length > 0) {
+    await withFundingSetupStep(
+      "waiting for embedded signer setup transactions",
+      () =>
+        waitForTransactionsAndProvingDelay(
+          input.rpcProvider,
+          setupTransactions,
+          input.minProvingDelayBlocks,
+        ),
+    );
   }
-  const json = await response.json() as { transaction_hash?: string; transactionHash?: string };
-  const txHash = json.transaction_hash ?? json.transactionHash;
-  if (!txHash) {
-    throw new Error("Privacy paymaster did not return an approval transaction hash");
-  }
-  await withFundingSetupStep(
-    "waiting for embedded signer approval transaction",
-    () =>
-      waitForTransactionAndProvingDelay(
-        input.rpcProvider,
-        txHash,
-        input.minProvingDelayBlocks,
-      ),
-  );
 }
 
 async function withFundingSetupStep<T>(step: string, operation: () => Promise<T>): Promise<T> {
@@ -382,21 +451,33 @@ async function withFundingSetupStep<T>(step: string, operation: () => Promise<T>
     return await operation();
   } catch (error) {
     const message = summarizeFundingError(error);
-    throw new Error(`Failed while ${step}: ${message}`);
+    const wrapped = new Error(`Failed while ${step}: ${message}`);
+    (wrapped as Error & { cause?: unknown }).cause = error;
+    throw wrapped;
   }
 }
 
 async function executeWalletCall(provider: StarknetProviderLike, call: Call) {
-  if (typeof provider.account?.execute === "function") {
+  if (typeof provider.request === "function") {
     try {
-      return await provider.account.execute.call(provider.account, call);
+      const result = await requestWalletInvoke(provider, call);
+      if (result !== undefined) return result;
     } catch (error) {
-      if (!isWalletCallShapeError(error)) throw error;
-      return provider.account.execute.call(provider.account, [call]);
+      if (
+        isUserRejected(error) ||
+        (!isWalletCallShapeError(error) && !isWalletRequestUnavailableError(error))
+      ) {
+        throw error;
+      }
     }
   }
-  if (typeof provider.request === "function") {
-    return requestWalletInvoke(provider, call);
+  if (typeof provider.account?.execute === "function") {
+    try {
+      return await provider.account.execute.call(provider.account, [call]);
+    } catch (error) {
+      if (!isWalletCallShapeError(error)) throw error;
+      return provider.account.execute.call(provider.account, call);
+    }
   }
   throw new Error("Selected Starknet wallet cannot approve Starknet Privacy deposits");
 }
@@ -621,13 +702,28 @@ async function waitForTransactionAndProvingDelay(
   txHash: string,
   minProvingDelayBlocks: number,
 ) {
-  const receipt = await provider.waitForTransaction(txHash, {
-    retryInterval: 5_000,
-  });
-  const receiptBlock = receiptBlockNumber(receipt);
-  const targetBlock = receiptBlock === null
-    ? await provider.getBlockNumber() + minProvingDelayBlocks
-    : receiptBlock + minProvingDelayBlocks;
+  await waitForTransactionsAndProvingDelay(provider, [txHash], minProvingDelayBlocks);
+}
+
+async function waitForTransactionsAndProvingDelay(
+  provider: RpcProvider,
+  txHashes: string[],
+  minProvingDelayBlocks: number,
+) {
+  const receipts = await Promise.all(
+    txHashes.map((txHash) =>
+      provider.waitForTransaction(txHash, {
+        retryInterval: 5_000,
+      })
+    ),
+  );
+  const receiptBlocks = receipts
+    .map(receiptBlockNumber)
+    .filter((block): block is number => block !== null);
+  const latestBlock = await provider.getBlockNumber();
+  const targetBlock = receiptBlocks.length === 0
+    ? latestBlock + minProvingDelayBlocks
+    : Math.max(...receiptBlocks) + minProvingDelayBlocks;
   await waitForBlock(provider, targetBlock);
 }
 
@@ -731,6 +827,32 @@ function connectedStarknetAddress(provider: StarknetProviderLike) {
   );
 }
 
+async function resolveConnectedStarknetAddress(provider: StarknetProviderLike) {
+  const requested = await requestWalletAccounts(provider, true)
+    .catch(() => null);
+  if (requested) return normalizeAddress(requested);
+  const current = connectedStarknetAddress(provider);
+  if (current) return current;
+  const interactive = await requestWalletAccounts(provider, false).catch(() => null);
+  return normalizeAddress(interactive);
+}
+
+async function requestWalletAccounts(provider: StarknetProviderLike, silent: boolean) {
+  if (!provider.request) return null;
+  const params = { silent_mode: silent };
+  const typed = await provider.request({
+    type: "wallet_requestAccounts",
+    params,
+  }).catch(() => null);
+  const typedAddress = addressFromUnknown(typed);
+  if (typedAddress) return typedAddress;
+  const method = await provider.request({
+    method: "wallet_requestAccounts",
+    params,
+  }).catch(() => null);
+  return addressFromUnknown(method);
+}
+
 async function derivePrivacyViewingKey(seedHex: string) {
   const bytes = await crypto.subtle.digest(
     "SHA-256",
@@ -797,7 +919,7 @@ function transactionHashFromResult(result: unknown) {
 
 function isWalletCallShapeError(error: unknown) {
   const message = errorMessage(error);
-  return /invalid_union|invalid input|contractAddress|contract_address|entrypoint|entry_point/i
+  return /invalid_union|invalid input|contractAddress|contract_address|entrypoint|entry_point|array|calls/i
     .test(message);
 }
 
@@ -807,7 +929,32 @@ function isUserRejected(error: unknown) {
     .test(message);
 }
 
+function isWalletRequestUnavailableError(error: unknown) {
+  const message = errorMessage(error);
+  return /method not found|not supported|unsupported|not implemented|unknown method|wallet_addInvokeTransaction/i
+    .test(message);
+}
+
+function isProofBlockTooRecent(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (
+    /proof block number .* too recent|maximum allowed block number|proof block is not old enough/i
+      .test(message)
+  ) {
+    return true;
+  }
+  if (error instanceof Error && "cause" in error) {
+    return isProofBlockTooRecent((error as Error & { cause?: unknown }).cause);
+  }
+  if (error && typeof error === "object" && "cause" in error) {
+    return isProofBlockTooRecent((error as { cause?: unknown }).cause);
+  }
+  return false;
+}
+
 function errorMessage(error: unknown) {
+  const nested = nestedErrorMessages(error);
+  if (nested.length > 0) return nested.join(" ");
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   try {
@@ -815,4 +962,107 @@ function errorMessage(error: unknown) {
   } catch {
     return String(error);
   }
+}
+
+function nestedErrorMessages(error: unknown, seen = new Set<unknown>()): string[] {
+  if (error === null || error === undefined || seen.has(error)) return [];
+  if (typeof error === "string") return [decodeMaybeHexString(error)];
+  if (typeof error === "number" || typeof error === "bigint" || typeof error === "boolean") {
+    return [String(error)];
+  }
+  if (error instanceof Error) {
+    seen.add(error);
+    return [
+      error.message,
+      ...nestedErrorMessages((error as Error & { cause?: unknown }).cause, seen),
+    ].filter(Boolean);
+  }
+  if (Array.isArray(error)) {
+    seen.add(error);
+    return error.flatMap((item) => nestedErrorMessages(item, seen));
+  }
+  if (typeof error !== "object") return [];
+
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  const messages: string[] = [];
+  for (const key of [
+    "message",
+    "error",
+    "execution_error",
+    "revert_error",
+    "failure_reason",
+    "data",
+    "details",
+    "cause",
+  ]) {
+    if (key in record) messages.push(...nestedErrorMessages(record[key], seen));
+  }
+  if (messages.length > 0) return dedupeMessages(messages);
+  try {
+    return [JSON.stringify(error)];
+  } catch {
+    return [String(error)];
+  }
+}
+
+function dedupeMessages(messages: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const message of messages.map((entry) => entry.replace(/\s+/g, " ").trim()).filter(Boolean)) {
+    if (seen.has(message)) continue;
+    seen.add(message);
+    out.push(message);
+  }
+  return out;
+}
+
+function decodeMaybeHexString(value: string) {
+  const trimmed = value.trim();
+  if (!/^0x[0-9a-fA-F]+$/.test(trimmed) || trimmed.length < 8 || trimmed.length % 2 !== 0) {
+    return trimmed;
+  }
+  try {
+    const bytes = trimmed
+      .slice(2)
+      .match(/../g)
+      ?.map((chunk) => parseInt(chunk, 16)) ?? [];
+    if (bytes.length === 0 || bytes.some((byte) => byte < 32 || byte > 126)) return trimmed;
+    return `${trimmed} ('${String.fromCharCode(...bytes)}')`;
+  } catch {
+    return trimmed;
+  }
+}
+
+function decodeHexStringsInText(value: string) {
+  return value.replace(/0x[0-9a-fA-F]{8,}/g, (match) => decodeMaybeHexString(match));
+}
+
+function sanitizeRpcMessage(value: string) {
+  return decodeHexStringsInText(value)
+    .replace(/"calldata"\s*:\s*\[[^\]]*\]/g, '"calldata":[...]')
+    .replace(/"signature"\s*:\s*\[[^\]]*\]/g, '"signature":[...]')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function starknetRpcReason(message: string) {
+  const quoted = message.match(/\('([^']{3,180})'\)/);
+  if (quoted?.[1]) return quoted[1];
+  const known = [
+    /transfer amount exceeds balance/i,
+    /insufficient balance/i,
+    /u256_sub overflow/i,
+    /transfer allowance exceeded/i,
+    /invalid signature/i,
+    /account validation failed/i,
+    /class hash .* not declared/i,
+    /contract .* not found/i,
+    /entry point .* not found/i,
+  ];
+  for (const pattern of known) {
+    const match = message.match(pattern);
+    if (match?.[0]) return match[0];
+  }
+  return null;
 }
