@@ -153,6 +153,12 @@ export function RightColumn({
     ? allOrders.filter(order => order.batchId === activeBatch.batch_id)
     : [];
   const depositTotals = pendingDepositTotals(pendingDeposits);
+  const failedDepositTotals = sumByAsset(pendingDeposits.filter(deposit => deposit.failed));
+  const failedDepositReasons = new Map(
+    pendingDeposits
+      .filter(deposit => deposit.failed)
+      .map(deposit => [deposit.asset, deposit.failure_reason ?? "Deposit transaction was not confirmed"]),
+  );
   const recognizedSettlementOutputs = withdrawableNotes.filter(note =>
     note.source === "settlement_output" &&
     (Boolean(note.pending_withdrawal_tx) || settlementBasisMs(note, settlementTranscripts) !== null),
@@ -170,6 +176,7 @@ export function RightColumn({
       locked > 0n ||
       (activeOrderTotals.get(asset) ?? 0n) > 0n ||
       (depositTotals.get(asset) ?? 0n) > 0n ||
+      (failedDepositTotals.get(asset) ?? 0n) > 0n ||
       (pendingOutputTotals.get(asset) ?? 0n) > 0n ||
       (claimableTotals.get(asset) ?? 0n) > 0n;
   });
@@ -215,6 +222,8 @@ export function RightColumn({
           const locked = balance && walletReady ? fromAtomicStr(balance.locked, asset) : "—";
           const activeOrderAmount = activeOrderTotals.get(asset) ?? 0n;
           const pendingDeposit = depositTotals.get(asset) ?? 0n;
+          const failedDeposit = failedDepositTotals.get(asset) ?? 0n;
+          const failedReason = failedDepositReasons.get(asset);
           const pendingOutput = pendingOutputTotals.get(asset) ?? 0n;
           const claimable = claimableTotals.get(asset) ?? 0n;
           return (
@@ -240,6 +249,12 @@ export function RightColumn({
                 <div className="rb-detail-row">
                   <span>Pending deposit</span>
                   <strong>{fromAtomicStr(pendingDeposit.toString(), asset)}</strong>
+                </div>
+              )}
+              {failedDeposit > 0n && (
+                <div className="rb-detail-row danger" title={failedReason}>
+                  <span>Failed deposit</span>
+                  <strong>{fromAtomicStr(failedDeposit.toString(), asset)}</strong>
                 </div>
               )}
               {pendingOutput > 0n && (

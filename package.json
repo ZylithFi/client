@@ -19,8 +19,10 @@
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@fontsource/syne": "^5.2.7",
     "@starknet-io/get-starknet-core": "^4.0.8",
+    "@starkware-libs/starknet-privacy-sdk": "0.14.2-rc.2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "starknet": "git+https://github.com/starkware-libs/starknet.js.git#PRIVACY-0.14.2-RC.2"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",

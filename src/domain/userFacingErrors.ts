@@ -45,6 +45,21 @@ export function userFacingErrorMessage(
   if (/wallet_addInvokeTransaction|contractAddress|contract_address|entrypoint|entry_point|invalid_union|invalid input/i.test(message)) {
     return "Wallet could not prepare the transaction. Please retry later.";
   }
+  if (/^Starknet Privacy .+ failed:/i.test(message)) {
+    return capitalizeFirst(message);
+  }
+  if (/Connect a Starknet wallet before using Starknet Privacy funding/i.test(message)) {
+    return "Connect a Starknet wallet before depositing.";
+  }
+  if (/INVALID_SIG|INVALID_SIGNATURE/i.test(message)) {
+    return "Embedded Zylith wallet authorization failed. Lock and unlock your Zylith wallet, then retry.";
+  }
+  if (/Starknet Privacy discovery and proving URLs are required/i.test(message)) {
+    return "Starknet Privacy services are not configured.";
+  }
+  if (/Starknet Privacy prover did not return proof facts/i.test(message)) {
+    return "Starknet Privacy prover did not return proof facts. Please retry later.";
+  }
   if (/failed to fetch|networkerror|network request failed|load failed/i.test(message)) {
     return "Network request failed. Check your connection and retry.";
   }
@@ -57,7 +72,10 @@ export function userFacingErrorMessage(
   if (/private ingress key registry is unavailable/i.test(message)) {
     return "Private ingress key registry is unavailable. Please retry later.";
   }
-  if (/private ingress|prover|request failed with HTTP|target service is not configured/i.test(message)) {
+  if (/\/api\/private\/orders failed with HTTP 400/i.test(message)) {
+    return "Private order was rejected. Refresh the app, unlock Zylith wallet, and submit again.";
+  }
+  if (/request to .* failed with HTTP 5\d\d|private ingress|prover|target service is not configured/i.test(message)) {
     return "Private execution service is unavailable. Please retry later.";
   }
   if (/deployment\.json missing|deployment configuration/i.test(message)) {

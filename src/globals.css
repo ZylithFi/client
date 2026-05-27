@@ -551,6 +551,8 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .rb-detail-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0 2px 50px; font-size: 10px; color: var(--z-text-body); }
 .rb-detail-row strong { color: var(--z-text-body); font-weight: 500; font-feature-settings: "tnum" 1; }
 .rb-detail-row.good strong { color: var(--z-status-good); }
+.rb-detail-row.danger,
+.rb-detail-row.danger strong { color: var(--z-status-danger); }
 .claim-empty { font-size: 11px; color: var(--z-text-body); padding: 4px 0; line-height: 1.45; }
 .claim-section.ready {
   background:
@@ -1550,13 +1552,18 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .asset-position-table th:nth-child(6),
 .asset-position-table td:nth-child(6),
 .asset-position-table th:nth-child(7),
-.asset-position-table td:nth-child(7) { width: 14%; }
+.asset-position-table td:nth-child(7),
+.asset-position-table th:nth-child(8),
+.asset-position-table td:nth-child(8) { width: 12%; }
 .asset-position-table th:nth-child(5),
 .asset-position-table td:nth-child(5),
 .asset-position-table th:nth-child(6),
 .asset-position-table td:nth-child(6),
 .asset-position-table th:nth-child(7),
-.asset-position-table td:nth-child(7) { text-align: right; }
+.asset-position-table td:nth-child(7),
+.asset-position-table th:nth-child(8),
+.asset-position-table td:nth-child(8) { text-align: right; }
+.danger-text { color: var(--z-status-danger); }
 .asset-pipeline-table th:nth-child(1),
 .asset-pipeline-table td:nth-child(1) { width: 18%; }
 .asset-pipeline-table th:nth-child(2),

@@ -288,6 +288,29 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("settling");
   });
 
+  it("marks proof job failures as settlement_blocked without waiting for epoch aging", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "settling" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Closed" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "proving-failed",
+          failure: "proving_failed",
+        },
+      },
+      withdrawableNotes: [],
+      settlementBlockedFallbackEpochs: 10,
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("settlement_blocked");
+  });
+
   it("marks unresolved old closed batches as settlement_blocked", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],

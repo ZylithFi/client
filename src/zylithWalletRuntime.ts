@@ -2,6 +2,10 @@ import { denominationTableForAsset, splitDepositAmount } from "./domain/depositS
 import { selectedStarknetProvider } from "./domain/browserWallet";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import type { MakerBandAttribution } from "./domain/shieldedBalances";
+import {
+  submitPrivacyBridgeDeposit,
+  type SubmitPrivacyBridgeDepositResult,
+} from "./integrations/starknetPrivacyFunding";
 
 type Side = "Buy" | "Sell";
 type OrderMode = "Limit" | "Maker Curve" | "TWAP" | "VWAP" | "Repeat" | "Resting";
@@ -330,20 +334,23 @@ type DeploymentConfig = {
   contracts?: {
     auction_verifier?: string;
     shielded_asset_adapter?: string;
-    deposit_router?: string;
+    privacy_deposit_bridge?: string;
   };
   token_addresses?: Record<string, string>;
   funding?: {
-    primary?: "starknet_privacy" | "protocol_local" | string;
+    primary?: "starknet_privacy" | string;
     starknet_privacy?: {
-      deposit_router?: string;
+      privacy_pool?: string;
+      bridge_adapter?: string;
+      discovery_url?: string;
+      proving_url?: string;
       paymaster_address?: string;
       paymaster_url?: string;
+      proof_signer_class_hash?: string;
       shielded_asset_adapter?: string;
-    };
-    protocol_local?: {
-      deposit_router?: string;
-      shielded_asset_adapter?: string;
+      sdk_package?: string;
+      sdk_version?: string;
+      min_proving_delay_blocks?: number;
     };
   };
   product?: {
@@ -355,12 +362,28 @@ type DeploymentConfig = {
 };
 
 type DepositFundingRail = {
-  depositRouter?: string;
+  kind: "starknet_privacy";
+  privacyPool?: string;
+  bridgeAdapter?: string;
+  discoveryUrl?: string;
+  provingUrl?: string;
+  paymasterAddress?: string;
+  paymasterUrl?: string;
+  privacyProofSignerClassHash?: string;
+  sdkPackage?: string;
+  sdkVersion?: string;
+  minProvingDelayBlocks?: number;
   shieldedAssetAdapter?: string;
 };
 
+type StarknetPrivacyDepositFundingRail = Extract<
+  DepositFundingRail,
+  { kind: "starknet_privacy" }
+>;
+
 const ZAN_STARKNET_SEPOLIA_RPC_URL = "https://api.zan.top/public/starknet-sepolia/rpc/v0_10";
 const SELECTED_STARKNET_WALLET_STORAGE_KEY = "zylith:selected-starknet-wallet";
+const CONNECTED_STARKNET_ADDRESS_STORAGE_KEY = "zylith:connected-starknet-address";
 const rpcSyncedProviders = new WeakSet<StarknetInjectedProvider>();
 const CHAIN_ID_ALIASES: Record<string, string> = {
   SN_SEPOLIA: "0x534e5f5345504f4c4941",
@@ -561,6 +584,7 @@ const MAX_STRATEGY_CHILDREN = boundedInteger(
   100_000,
 ); // 90d at the production 90s epoch cadence.
 const PENDING_DEPOSIT_FAILURE_GRACE_MS = 10 * 60 * 1000;
+const CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS = 60 * 1000;
 const DEFAULT_MAKER_CURVE_ROTATION_BPS = boundedInteger(
   import.meta.env.VITE_ZYLITH_MAKER_CURVE_ROTATION_BPS,
   250,
@@ -850,36 +874,60 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function submitDepositViaWallet(asset: string, amount: string) {
-    const { seedHex: unlockedSeed } = requireUnlocked();
+    requireUnlocked();
     const normalizedAsset = normalizeAssetId(asset);
     const rawAmount = parseRawAmount(amount, "deposit amount");
     const deployment = await loadDeploymentConfig();
     const fundingRail = selectedDepositFundingRail(deployment);
-    const depositRouterAddress = requiredNonZeroFelt(
-      fundingRail.depositRouter,
-      "deposit_router_address",
+    return submitDepositViaStarknetPrivacySdk(
+      fundingRail,
+      deployment,
+      normalizedAsset,
+      rawAmount,
     );
-    const tokenAddress = requiredNonZeroFelt(
-      deployment.token_addresses?.[normalizedAsset],
-      `${normalizedAsset} token address`,
-    );
+  }
+
+  async function submitDepositViaStarknetPrivacySdk(
+    fundingRail: StarknetPrivacyDepositFundingRail,
+    deployment: DeploymentConfig,
+    asset: string,
+    rawAmount: bigint,
+  ): Promise<{
+    transaction_hash: string;
+    note_commitment: string;
+    note_commitments: string[];
+  }> {
+    const { seedHex: unlockedSeed } = requireUnlocked();
+    const privacyPoolAddress = requiredNonZeroFelt(fundingRail.privacyPool, "privacy_pool_address");
+    const bridgeAddress = requiredNonZeroFelt(fundingRail.bridgeAdapter, "privacy_deposit_bridge_address");
     const shieldedAssetAdapterAddress = requiredNonZeroFelt(
       fundingRail.shieldedAssetAdapter || configuredShieldedAssetAdapterAddress,
       "shielded_asset_adapter_address",
     );
-    const depositChunks = splitDepositAmount(
-      rawAmount,
-      normalizedAsset,
-      assetDecimals(normalizedAsset),
+    const tokenAddress = requiredNonZeroFelt(
+      deployment.token_addresses?.[asset],
+      `${asset} token address`,
     );
+    const chainId = requiredString(configuredChainId || deployment.chain_id, "chain_id");
+    const rpcUrl = requiredString(deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL, "rpc_url");
+    const discoveryUrl = normalizeUrl(fundingRail.discoveryUrl);
+    const provingUrl = normalizeUrl(fundingRail.provingUrl);
+    if (!discoveryUrl || !provingUrl) {
+      throw new Error("Starknet Privacy discovery and proving URLs are required");
+    }
+    if (rawAmount <= 0n) {
+      throw new Error("Deposit amount must be greater than zero");
+    }
+    const provider = await selectInjectedStarknetProvider();
+    const depositChunks = splitDepositAmount(rawAmount, asset, assetDecimals(asset));
     const plans = depositChunks.map((depositChunk) => JSON.parse(
       core.zylith_wallet_build_deposit_submission_plan(
         JSON.stringify({
           seed_hex: unlockedSeed,
-          asset_id: normalizedAsset,
+          asset_id: asset,
           amount: depositChunk.toString(),
           deposit_nonce: randomU64(),
-          deposit_router_address: depositRouterAddress,
+          deposit_authority_address: bridgeAddress,
           token_address: tokenAddress,
           shielded_asset_adapter_address: shieldedAssetAdapterAddress,
         }),
@@ -887,14 +935,42 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     ) as {
       note: LocalNoteRecord["note"];
       note_commitment: string | { value?: string };
-      starknet_calls: Array<{ contract_address: string; entrypoint: string; calldata: string[] }>;
+      encoded_args: {
+        asset_id: string;
+        amount: string;
+        deposit_nonce: string;
+        note_commitment: string;
+        withdraw_authority: string;
+      };
     });
-    const transactionHash = await executeInjectedStarknetCalls(
-      plans.flatMap((plan) => plan.starknet_calls),
-    );
+
     const noteCommitments: string[] = [];
+    const transactionHashes: string[] = [];
+    let sdkRegistry: SubmitPrivacyBridgeDepositResult["sdkRegistry"] | undefined;
     for (const plan of plans) {
       const noteCommitment = normalizeNoteCommitment(plan.note_commitment);
+      const depositResult = await submitPrivacyBridgeDeposit({
+        provider: provider as never,
+        seedHex: unlockedSeed,
+        chainId,
+        rpcUrl,
+        privacyPoolAddress,
+        bridgeAddress,
+        tokenAddress,
+        discoveryUrl,
+        provingUrl,
+        paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
+        paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
+        privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
+        minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 10,
+        sdkRegistry,
+        plan: {
+          amount: BigInt(plan.encoded_args.amount),
+          encodedArgs: plan.encoded_args,
+        },
+      });
+      const transactionHash = depositResult.transactionHash;
+      transactionHashes.push(transactionHash);
       noteCommitments.push(noteCommitment);
       const existing = notes.find((record) => record.note_commitment === noteCommitment);
       if (!existing) {
@@ -908,14 +984,38 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           deposit_requested_at_unix_ms: Date.now(),
         });
       }
+      await saveNotes();
+      await waitForStarknetTransaction(transactionHash, deployment, "Starknet Privacy deposit");
+      sdkRegistry = depositResult.sdkRegistry;
+      await refreshDepositConfirmations().catch(() => false);
     }
     await saveNotes();
     await pushRecoverySnapshot(true);
     return {
-      transaction_hash: transactionHash,
+      transaction_hash: transactionHashes[0] ?? "",
       note_commitment: noteCommitments[0] ?? "",
       note_commitments: noteCommitments,
     };
+  }
+
+  async function waitForStarknetTransaction(
+    transactionHash: string,
+    deployment: DeploymentConfig,
+    label: string,
+  ) {
+    const deadline = Date.now() + 180_000;
+    let lastStatus: { failed?: boolean; reason?: string; confirmed?: boolean } | null = null;
+    while (Date.now() < deadline) {
+      lastStatus = await fetchTransactionReceiptStatus(transactionHash, deployment).catch(() => null);
+      if (lastStatus?.failed) {
+        throw new Error(`${label} failed: ${lastStatus.reason ?? "transaction reverted"}`);
+      }
+      if (lastStatus?.confirmed) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 3_000));
+    }
+    throw new Error(
+      `${label} was submitted but not confirmed yet. Please retry later after Starknet indexes the transaction.`,
+    );
   }
 
   async function refreshDepositConfirmations() {
@@ -923,27 +1023,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const pending = notes.filter(
       (record) =>
         record.source === "deposit" &&
-        record.deposit_confirmed !== true &&
-        record.deposit_failed !== true,
+        record.deposit_confirmed !== true,
     );
     if (pending.length === 0) return false;
-    const confirmations = await postJson<{
-      confirmed?: Array<{ note_commitment: string | { value?: string } }>;
-    }>(
-      indexerUrl,
-      "/api/deposits/confirmations",
-      { note_commitments: pending.map((record) => record.note_commitment) },
-    ).catch(() => null);
-    const confirmedCommitments = new Set(
-      (confirmations?.confirmed ?? []).map((record) => {
-        try {
-          return normalizeNoteCommitment(record.note_commitment);
-        } catch {
-          return "";
-        }
-      }).filter(Boolean),
-    );
-    if (confirmedCommitments.size === 0) return false;
+    const pendingCommitments = pending.map((record) => normalizeNoteCommitment(record.note_commitment));
+    const confirmedCommitments = await fetchConfirmedDepositCommitments(pendingCommitments);
     let changed = false;
     for (const record of pending) {
       if (!confirmedCommitments.has(normalizeNoteCommitment(record.note_commitment))) continue;
@@ -953,9 +1037,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       record.deposit_failure_reason = undefined;
       changed = true;
     }
-    if (await markFailedPendingDeposits(pending.filter(
-      (record) => !confirmedCommitments.has(normalizeNoteCommitment(record.note_commitment)),
-    ))) {
+    const unconfirmed = pending.filter(
+      (record) =>
+        !record.deposit_failed &&
+        !confirmedCommitments.has(normalizeNoteCommitment(record.note_commitment)),
+    );
+    if (await markFailedPendingDeposits(unconfirmed)) {
       changed = true;
     }
     if (changed) {
@@ -963,6 +1050,48 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       await pushRecoverySnapshot(false);
     }
     return changed;
+  }
+
+  async function fetchConfirmedDepositCommitments(noteCommitments: string[]) {
+    const confirmedCommitments = new Set<string>();
+    const confirmations = await postJson<{
+      confirmed?: Array<{ note_commitment?: string | { value?: string } }>;
+    }>(
+      indexerUrl,
+      "/api/deposits/confirmations",
+      { note_commitments: noteCommitments },
+    ).catch((error) => {
+      console.warn("Deposit confirmation lookup failed", error);
+      return null;
+    });
+    for (const record of confirmations?.confirmed ?? []) {
+      try {
+        if (record.note_commitment) {
+          confirmedCommitments.add(normalizeNoteCommitment(record.note_commitment));
+        }
+      } catch {
+        // Ignore malformed indexer rows and keep the deposit pending until the receipt reconciliation handles it.
+      }
+    }
+    const missingCommitments = noteCommitments.filter((commitment) => !confirmedCommitments.has(commitment));
+    if (missingCommitments.length === 0) return confirmedCommitments;
+    const individualLookups = await Promise.all(
+      missingCommitments.map(async (commitment) => {
+        const record = await fetchJson<{ note_commitment?: string | { value?: string } }>(
+          indexerUrl,
+          `/api/deposits/${encodeURIComponent(commitment)}`,
+        ).catch(() => null);
+        try {
+          return record?.note_commitment ? normalizeNoteCommitment(record.note_commitment) : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const commitment of individualLookups) {
+      if (commitment) confirmedCommitments.add(commitment);
+    }
+    return confirmedCommitments;
   }
 
   async function markFailedPendingDeposits(pending: LocalNoteRecord[]) {
@@ -992,9 +1121,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         changed = true;
         continue;
       }
-      if (status?.confirmed && ageMs >= PENDING_DEPOSIT_FAILURE_GRACE_MS) {
+      if (status?.confirmed && ageMs >= CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS) {
         record.deposit_failed = true;
-        record.deposit_failure_reason = "Deposit transaction did not register this note.";
+        record.deposit_failure_reason = "Deposit transaction confirmed, but no Zylith note was registered.";
         changed = true;
       }
     }
@@ -1341,7 +1470,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const limitPrice = isResting
       ? makerCurveEnvelopePrice(draft.side, makerCurvePoints)
       : parseRawAmount(draft.limitPrice, "limit price");
-    const minFill = parseOptionalRawAmount(draft.minFill, "minimum fill") ?? childAmount;
+    const minFill = normalizeOrderMinFill(draft, childAmount);
     const parent = JSON.parse(
       core.zylith_wallet_build_strategy_parent(
         JSON.stringify({
@@ -1362,7 +1491,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       remaining_amount: totalAmount.toString(),
       limit_price: limitPrice.toString(),
       price_base_scale: draftPriceBaseScale(draft).toString(),
-      min_fill: min(minFill, childAmount).toString(),
+      min_fill: minFill.toString(),
       fill_or_kill: draft.fillOrKill,
       submission_timing_preference: draft.submissionTimingPreference ?? "balanced",
       max_children: maxChildren,
@@ -1437,7 +1566,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const limitPrice = isResting
       ? makerCurveEnvelopePrice(draft.side, makerCurvePoints)
       : parseRawAmount(draft.limitPrice, "limit price");
-    const minFill = parseOptionalRawAmount(draft.minFill, "minimum fill") ?? childAmount;
+    const minFill = normalizeOrderMinFill(draft, childAmount);
     const firstEpoch =
       currentBatch.close_time_unix_ms - Date.now() > BATCH_SUBMISSION_SAFETY_BUFFER_MS
         ? currentBatch.epoch_id
@@ -1462,7 +1591,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       remaining_amount: totalAmount.toString(),
       limit_price: limitPrice.toString(),
       price_base_scale: draftPriceBaseScale(draft).toString(),
-      min_fill: min(minFill, childAmount).toString(),
+      min_fill: minFill.toString(),
       fill_or_kill: draft.fillOrKill,
       submission_timing_preference: draft.submissionTimingPreference ?? "balanced",
       max_children: maxChildren,
@@ -2310,7 +2439,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const deployment = await loadDeploymentConfig();
     const chainId = configuredChainId || deployment.chain_id || "unknown-chain";
     const verifier = deployment.contracts?.auction_verifier || configuredAuctionVerifierAddress || "unknown-verifier";
-    return `${chainId}:${verifier}`;
+    const fundingRail = selectedDepositFundingRail(deployment);
+    const privacyBridge = fundingRail.bridgeAdapter || "unknown-privacy-bridge";
+    const shieldedAssetAdapter = fundingRail.shieldedAssetAdapter || "unknown-shielded-adapter";
+    return `${chainId}:${verifier}:${privacyBridge}:${shieldedAssetAdapter}`;
   }
 
   function localStateScope() {
@@ -2402,7 +2534,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       draft.mode === "Maker Curve" && makerCurvePoints.length > 0
         ? makerCurveEnvelopePrice(draft.side, makerCurvePoints)
         : parseRawAmount(draft.limitPrice, "limit price");
-    const minFill = parseOptionalRawAmount(draft.minFill, "minimum fill") ?? amount;
+    const minFill = normalizeOrderMinFill(draft, amount);
     const orderType = draft.mode === "Maker Curve" ? "MakerCurve" : "LimitBatch";
     const makerCurve =
       draft.mode === "Maker Curve"
@@ -2522,6 +2654,13 @@ function quoteAmountForBase(baseAmount: bigint, price: bigint, priceBaseScale: b
   return (baseAmount * price) / priceBaseScale;
 }
 
+function normalizeOrderMinFill(draft: PrivateOrderDraft, amount: bigint) {
+  if (amount <= 0n) throw new Error("Order amount must be positive");
+  if (draft.fillOrKill) return amount;
+  const parsed = parseOptionalRawAmount(draft.minFill, "minimum fill");
+  return min(parsed ?? 1n, amount);
+}
+
 function draftPriceBaseScale(draft: PrivateOrderDraft) {
   const explicit = parseOptionalRawAmount(draft.priceBaseScale, "price base scale");
   return explicit ?? pairPriceBaseScale(draft.pair);
@@ -2561,12 +2700,12 @@ function materializeMakerCurveDraft(draft: PrivateOrderDraft): PrivateOrderDraft
   if (points.length === 0) return draft;
   const rotated = rotateMakerCurvePoints(points, makerCurveRotationBps(draft));
   const amount = makerCurveTotalBaseAmount(rotated);
-  const minFill = parseOptionalRawAmount(draft.minFill, "minimum fill") ?? amount;
+  const minFill = normalizeOrderMinFill(draft, amount);
   return {
     ...draft,
     amount: amount.toString(),
     limitPrice: makerCurveEnvelopePrice(draft.side, rotated).toString(),
-    minFill: min(minFill, amount).toString(),
+    minFill: minFill.toString(),
     makerCurvePoints: rotated.map((point) => ({
       price: point.price.toString(),
       baseAmount: point.base_amount.toString(),
@@ -2764,30 +2903,38 @@ function normalizeNoteCommitment(value: string | { value?: string }) {
 }
 
 function selectedDepositFundingRail(deployment: DeploymentConfig): DepositFundingRail {
-  const rails: Record<string, DepositFundingRail | undefined> = {
-    starknet_privacy: {
-      depositRouter: deployment.funding?.starknet_privacy?.deposit_router,
-      shieldedAssetAdapter: deployment.funding?.starknet_privacy?.shielded_asset_adapter,
-    },
-    protocol_local: {
-      depositRouter: deployment.funding?.protocol_local?.deposit_router || deployment.contracts?.deposit_router,
-      shieldedAssetAdapter:
-        deployment.funding?.protocol_local?.shielded_asset_adapter || deployment.contracts?.shielded_asset_adapter,
-    },
-  };
-  const primary = deployment.funding?.primary;
-  const selected = primary ? rails[primary] : undefined;
-  if (selected?.depositRouter && selected?.shieldedAssetAdapter) return selected;
-  if (rails.starknet_privacy?.depositRouter && rails.starknet_privacy?.shieldedAssetAdapter) {
-    return rails.starknet_privacy;
+  const primary = deployment.funding?.primary || "starknet_privacy";
+  if (primary !== "starknet_privacy") {
+    throw new Error(`Unsupported funding rail: ${primary}`);
   }
-  return {
-    depositRouter: deployment.contracts?.deposit_router || deployment.funding?.protocol_local?.deposit_router,
+  const selected: DepositFundingRail = {
+    kind: "starknet_privacy",
+    privacyPool: deployment.funding?.starknet_privacy?.privacy_pool,
+    bridgeAdapter:
+      deployment.funding?.starknet_privacy?.bridge_adapter ||
+      deployment.contracts?.privacy_deposit_bridge,
+    discoveryUrl: deployment.funding?.starknet_privacy?.discovery_url,
+    provingUrl: deployment.funding?.starknet_privacy?.proving_url,
+    paymasterAddress: deployment.funding?.starknet_privacy?.paymaster_address,
+    paymasterUrl: deployment.funding?.starknet_privacy?.paymaster_url,
+    privacyProofSignerClassHash: deployment.funding?.starknet_privacy?.proof_signer_class_hash,
+    sdkPackage: deployment.funding?.starknet_privacy?.sdk_package,
+    sdkVersion: deployment.funding?.starknet_privacy?.sdk_version,
+    minProvingDelayBlocks: deployment.funding?.starknet_privacy?.min_proving_delay_blocks,
     shieldedAssetAdapter:
-      deployment.contracts?.shielded_asset_adapter ||
-      deployment.funding?.protocol_local?.shielded_asset_adapter ||
-      deployment.funding?.starknet_privacy?.shielded_asset_adapter,
+      deployment.funding?.starknet_privacy?.shielded_asset_adapter ||
+      deployment.contracts?.shielded_asset_adapter,
   };
+  if (
+    selected.privacyPool &&
+    selected.bridgeAdapter &&
+    selected.discoveryUrl &&
+    selected.provingUrl &&
+    selected.shieldedAssetAdapter
+  ) {
+    return selected;
+  }
+  throw new Error("Starknet Privacy funding is not fully configured");
 }
 
 async function executeInjectedStarknetCalls(
@@ -2903,26 +3050,65 @@ function runtimeAddressFromUnknown(value: unknown): string | null {
 function providerHasConnectedAddress(provider: StarknetInjectedProvider) {
   return Boolean(
     runtimeAddressFromUnknown(provider.account?.address)
-    ?? runtimeAddressFromUnknown(provider.selectedAddress),
+      ?? runtimeAddressFromUnknown(provider.selectedAddress),
   );
 }
 
+function connectedProviderAddress(provider: StarknetInjectedProvider) {
+  return runtimeAddressFromUnknown(provider.account?.address)
+    ?? runtimeAddressFromUnknown(provider.selectedAddress);
+}
+
+function rememberProviderAddress(provider: StarknetInjectedProvider, address: string) {
+  try {
+    provider.selectedAddress = provider.selectedAddress || address;
+  } catch {
+    // Some injected wallet objects expose read-only properties.
+  }
+  if (provider.account && !provider.account.address) {
+    try {
+      provider.account.address = address;
+    } catch {
+      // Some account wrappers expose read-only properties.
+    }
+  }
+  try {
+    window.localStorage.setItem(SELECTED_STARKNET_WALLET_STORAGE_KEY, providerIdFor("selected", provider));
+    window.localStorage.setItem(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY, address);
+  } catch {
+    // Local storage can be unavailable; mutating the in-memory provider is sufficient for this session.
+  }
+}
+
 async function ensureWalletAccountAccess(provider: StarknetInjectedProvider) {
-  if (providerHasConnectedAddress(provider)) return;
+  const existing = connectedProviderAddress(provider);
+  if (existing) return existing;
   if (provider.request) {
     const silent = await provider.request({
       type: "wallet_requestAccounts",
       params: { silent_mode: true },
     }).catch(() => null);
-    if (runtimeAddressFromUnknown(silent) || providerHasConnectedAddress(provider)) return;
+    const silentAddress = runtimeAddressFromUnknown(silent) || connectedProviderAddress(provider);
+    if (silentAddress) {
+      rememberProviderAddress(provider, silentAddress);
+      return silentAddress;
+    }
     const interactive = await provider.request({
       type: "wallet_requestAccounts",
       params: { silent_mode: false },
     }).catch(() => null);
-    if (runtimeAddressFromUnknown(interactive) || providerHasConnectedAddress(provider)) return;
+    const interactiveAddress = runtimeAddressFromUnknown(interactive) || connectedProviderAddress(provider);
+    if (interactiveAddress) {
+      rememberProviderAddress(provider, interactiveAddress);
+      return interactiveAddress;
+    }
   } else if (provider.enable) {
     const enabled = await provider.enable().catch(() => null);
-    if (runtimeAddressFromUnknown(enabled) || providerHasConnectedAddress(provider)) return;
+    const enabledAddress = runtimeAddressFromUnknown(enabled) || connectedProviderAddress(provider);
+    if (enabledAddress) {
+      rememberProviderAddress(provider, enabledAddress);
+      return enabledAddress;
+    }
   }
   throw new Error("Connect a Starknet wallet to submit protocol transactions");
 }
@@ -3267,7 +3453,7 @@ async function postJson<T>(
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    throw new Error(detail || `Request failed with HTTP ${response.status}`);
+    throw new Error(detail || `Request to ${path} failed with HTTP ${response.status}`);
   }
   return (await response.json()) as T;
 }

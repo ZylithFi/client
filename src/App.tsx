@@ -40,6 +40,7 @@ import {
   useBatches,
   useCoordinatorStatus,
   useDeployment,
+  usePublicProofJobStatuses,
   usePublicSettlementTranscripts,
 } from "./domain/auctionEpoch";
 import { PairHeader, PairList, ReportsStrip } from "./components/MarketPanels";
@@ -353,6 +354,16 @@ export default function App() {
   // Orders
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() => walletOrderOwnerKey(null));
   const [orders, setOrders] = useState<LocalOrder[]>(() => loadOrders(orderOwnerKey));
+  const activeProofBatchIds = useMemo(
+    () => Array.from(new Set(
+      orders
+        .filter(order => ["queued", "in_batch", "proving", "settling"].includes(order.status))
+        .map(order => order.batchId)
+        .filter(Boolean),
+    )),
+    [orders],
+  );
+  const proofStatuses = usePublicProofJobStatuses(activeProofBatchIds);
   const saveAndSet = useCallback((next: LocalOrder[]) => {
     setOrders(next);
     saveOrders(next, orderOwnerKey ?? walletOrderOwnerKey(deployment));
@@ -406,6 +417,7 @@ export default function App() {
       orders,
       batches,
       settlementTranscripts,
+      proofStatuses,
       withdrawableNotes,
       pairs,
       formatClearingPrice: (price, pair) => formatClearingPrice(price, pair as PairConfig),
@@ -430,7 +442,7 @@ export default function App() {
       }
       saveAndSet(updated);
     }
-  }, [batches, balanceTick, settlementTranscripts, pairs, orders, saveAndSet, withdrawableNotes]);
+  }, [batches, balanceTick, settlementTranscripts, proofStatuses, pairs, orders, saveAndSet, withdrawableNotes]);
 
   useEffect(() => {
     if (!walletReady) return;

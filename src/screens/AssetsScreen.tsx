@@ -103,6 +103,7 @@ export function AssetsScreen({
   const claimable = claimableOutputs(recognizedSettlementOutputs, settlementTranscripts, claimDelaySeconds, now);
   const claimDelayed = claimDelayedOutputs(recognizedSettlementOutputs, settlementTranscripts, claimDelaySeconds, now);
   const depositTotals = pendingDepositTotals(pendingDeposits);
+  const failedDepositTotals = sumByAsset(pendingDeposits.filter(deposit => deposit.failed));
   const claimDelayedTotals = sumByAsset(claimDelayed);
   const claimableTotals = sumByAsset(claimable);
   const activeOrderTotals = activeOrderFundingTotals(pendingOrders, pairs);
@@ -116,7 +117,7 @@ export function AssetsScreen({
     const assets = new Set(allAssets);
     for (const balance of balances) assets.add(balance.asset);
     for (const deposit of pendingDeposits) {
-      if (!deposit.failed) assets.add(deposit.asset);
+      assets.add(deposit.asset);
     }
     for (const note of recognizedSettlementOutputs) assets.add(note.asset);
     return [...assets];
@@ -173,6 +174,7 @@ export function AssetsScreen({
               <th>Active order size</th>
               <th>Locked capital</th>
               <th>Pending deposit</th>
+              <th>Failed deposit</th>
               <th>In claim delay</th>
               <th>Claimable</th>
             </tr>
@@ -184,6 +186,7 @@ export function AssetsScreen({
               const locked = balance?.locked ?? "0";
               const activeOrderAmount = activeOrderTotals.get(asset) ?? 0n;
               const pendingDeposit = depositTotals.get(asset) ?? 0n;
+              const failedDeposit = failedDepositTotals.get(asset) ?? 0n;
               const claimDelay = claimDelayedTotals.get(asset) ?? 0n;
               const withdrawable = claimableTotals.get(asset) ?? 0n;
               return (
@@ -200,6 +203,9 @@ export function AssetsScreen({
                   </td>
                   <td className={`num ${pendingDeposit === 0n ? "is-empty" : ""}`}>
                     {amountOrDash(pendingDeposit, asset)}
+                  </td>
+                  <td className={`num ${failedDeposit === 0n ? "is-empty" : "danger-text"}`}>
+                    {amountOrDash(failedDeposit, asset)}
                   </td>
                   <td className={`num ${claimDelay === 0n ? "is-empty" : ""}`}>
                     {amountOrDash(claimDelay, asset)}

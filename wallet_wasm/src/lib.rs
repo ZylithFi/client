@@ -85,7 +85,7 @@ pub fn zylith_wallet_build_deposit_submission_plan(input_json: &str) -> Result<S
     };
     let plan = build_deposit_submission_plan(
         &intent,
-        &request.deposit_router_address,
+        &request.deposit_authority_address,
         &request.token_address,
         &request.shielded_asset_adapter_address,
     )
@@ -467,7 +467,7 @@ pub struct BuildDepositSubmissionPlanRequest {
     #[serde(with = "u128_decimal")]
     pub amount: u128,
     pub deposit_nonce: u64,
-    pub deposit_router_address: String,
+    pub deposit_authority_address: String,
     pub token_address: String,
     pub shielded_asset_adapter_address: String,
 }

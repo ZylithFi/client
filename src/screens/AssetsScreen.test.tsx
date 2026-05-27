@@ -46,6 +46,7 @@ describe("AssetsScreen", () => {
     expect(screen.getByText("Active order size")).toBeInTheDocument();
     expect(screen.getByText("Locked capital")).toBeInTheDocument();
     expect(screen.getByText("Pending deposit")).toBeInTheDocument();
+    expect(screen.getByText("Failed deposit")).toBeInTheDocument();
     expect(screen.getByText("In claim delay")).toBeInTheDocument();
     expect(screen.getByText("Claimable")).toBeInTheDocument();
     expect(screen.getByText("In-Flight Capital")).toBeInTheDocument();

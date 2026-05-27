@@ -102,6 +102,12 @@ export type OrderLifecycleTranscript = {
   price_base_scale?: string | number;
 };
 
+export type OrderLifecycleProofStatus = {
+  batch_id: string;
+  state: string;
+  failure?: string | null;
+};
+
 export type OrderLifecycleOutputNote = {
   source: "deposit" | "settlement_output";
   batch_id?: string;
@@ -186,6 +192,7 @@ export function reconcileOrderLifecycle({
   orders,
   batches,
   settlementTranscripts,
+  proofStatuses,
   withdrawableNotes,
   pairs,
   noFillFallbackEpochs = 10,
@@ -198,6 +205,7 @@ export function reconcileOrderLifecycle({
   orders: LocalOrder[];
   batches: OrderLifecycleBatch[];
   settlementTranscripts: Record<string, OrderLifecycleTranscript>;
+  proofStatuses?: Record<string, OrderLifecycleProofStatus>;
   withdrawableNotes: OrderLifecycleOutputNote[];
   pairs: OrderLifecyclePair[];
   noFillFallbackEpochs?: number;
@@ -226,11 +234,15 @@ export function reconcileOrderLifecycle({
 
   return orders.map((order) => {
     const transcript = settlementTranscripts[order.batchId];
+    const proofStatus = proofStatuses?.[order.batchId];
     if (
       ["cancelled", "rolled", "failed"].includes(order.status) ||
       (order.status === "settlement_blocked" && !transcript)
     ) {
       return order;
+    }
+    if (!transcript && proofStatus?.failure) {
+      return { ...order, status: "settlement_blocked" as LocalOrderStatus };
     }
     const batch = batches.find(candidate => candidate.batch_id === order.batchId);
     if (!batch && !transcript) return order;
@@ -323,6 +335,10 @@ export function reconcileOrderLifecycle({
       (batch.status === "Closed" || batch.status === "Clearing" || batch.status === "Proving") &&
       (order.status === "queued" || order.status === "in_batch" || order.status === "proving" || order.status === "settling")
     ) {
+      if (proofStatus?.state === "proving") return { ...order, status: "proving" as LocalOrderStatus };
+      if (proofStatus?.state === "proof-generated" || proofStatus?.state === "submitting-onchain" || proofStatus?.state === "submitted-onchain") {
+        return { ...order, status: "settling" as LocalOrderStatus };
+      }
       const batchEpoch = batch.epoch_id ?? order.epochId;
       if (
         latestEpoch > 0 &&

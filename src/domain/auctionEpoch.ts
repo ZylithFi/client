@@ -4,6 +4,9 @@ export const COORDINATOR_URL: string =
   (import.meta.env.VITE_ZYLITH_COORDINATOR_URL as string | undefined) ?? localServiceUrl(3000);
 export const INDEXER_URL: string =
   (import.meta.env.VITE_ZYLITH_INDEXER_URL as string | undefined) ?? localServiceUrl(3300);
+export const PROVER_URL: string =
+  ((import.meta.env.VITE_ZYLITH_PRIVATE_INGRESS_URL as string | undefined) ||
+    (import.meta.env.VITE_ZYLITH_PROVER_URL as string | undefined)) ?? localServiceUrl(3200);
 
 function localServiceUrl(port: number) {
   if (typeof window === "undefined") return "";
@@ -79,6 +82,17 @@ export type PublicSettlementTranscript = {
   loaded_at_unix_ms?: number;
 };
 
+export type PublicProofJobStatus = {
+  batch_id: string;
+  state: string;
+  matched_order_count: number;
+  witness_available: boolean;
+  proof_artifact_available: boolean;
+  onchain_submission_available: boolean;
+  failure?: "proving_failed" | "onchain_submit_failed" | string | null;
+  updated_at_unix_ms: number;
+};
+
 export type LastClearingPrice = {
   batchId: string;
   epochId: number;
@@ -118,6 +132,14 @@ async function apiBatchTranscript(batchId: string): Promise<PublicSettlementTran
     }
   }
   return null;
+}
+
+async function apiProofJobStatus(batchId: string): Promise<PublicProofJobStatus | null> {
+  if (!PROVER_URL) return null;
+  const r = await fetch(`${PROVER_URL}/api/public/proof-jobs/${encodeURIComponent(batchId)}`);
+  if (r.status === 404) return null;
+  if (!r.ok) return null;
+  return r.json() as Promise<PublicProofJobStatus>;
 }
 
 async function loadDeployment(): Promise<DeploymentConfig> {
@@ -200,6 +222,46 @@ export function usePublicSettlementTranscripts(
   }, [settledKey]);
 
   return transcripts;
+}
+
+export function usePublicProofJobStatuses(
+  batchIds: string[],
+): Record<string, PublicProofJobStatus> {
+  const [statuses, setStatuses] = useState<Record<string, PublicProofJobStatus>>({});
+  const key = [...new Set(batchIds)].filter(Boolean).sort().join("|");
+
+  useEffect(() => {
+    if (!key) return;
+    let cancelled = false;
+
+    async function loadStatuses() {
+      const ids = key.split("|").filter(Boolean);
+      const loaded = await Promise.all(
+        ids.map(async batchId => {
+          try {
+            const status = await apiProofJobStatus(batchId);
+            return status ? [batchId, status] as const : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      if (cancelled) return;
+      const next: Record<string, PublicProofJobStatus> = {};
+      for (const entry of loaded) {
+        if (entry) next[entry[0]] = entry[1];
+      }
+      if (Object.keys(next).length > 0) {
+        setStatuses(prev => ({ ...prev, ...next }));
+      }
+    }
+
+    void loadStatuses();
+    const t = setInterval(() => { void loadStatuses(); }, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [key]);
+
+  return statuses;
 }
 
 export function useDeployment(): DeploymentConfig | null {
