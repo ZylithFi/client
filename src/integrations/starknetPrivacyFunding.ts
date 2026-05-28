@@ -32,10 +32,11 @@ export type PrivacyBridgeDepositPlan = {
   amount: bigint;
   encodedArgs: {
     asset_id: string;
-    amount: string;
-    deposit_nonce: string;
-    note_commitment: string;
-    withdraw_authority: string;
+    total_amount: string;
+    amounts: string[];
+    deposit_nonces: string[];
+    note_commitments: string[];
+    withdraw_authorities: string[];
   };
 };
 
@@ -61,6 +62,17 @@ export type SubmitPrivacyBridgeDepositResult = {
   transactionHash: string;
   sdkRegistry: PrivateRegistry;
 };
+
+export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
+  return [
+    plan.encodedArgs.asset_id,
+    plan.encodedArgs.total_amount,
+    plan.encodedArgs.amounts,
+    plan.encodedArgs.deposit_nonces,
+    plan.encodedArgs.note_commitments,
+    plan.encodedArgs.withdraw_authorities,
+  ];
+}
 
 const STARK_FIELD_PRIME =
   3618502788666131213697322783095070105623107215331596699973092056135872020481n;
@@ -179,13 +191,7 @@ export async function submitPrivacyBridgeDeposit(
               }
               return {
                 contractAddress: input.bridgeAddress,
-                calldata: [
-                  input.plan.encodedArgs.asset_id,
-                  input.plan.encodedArgs.amount,
-                  input.plan.encodedArgs.deposit_nonce,
-                  input.plan.encodedArgs.note_commitment,
-                  input.plan.encodedArgs.withdraw_authority,
-                ],
+                calldata: privacyBridgeDepositCalldata(input.plan),
               };
             })
             .execute({ provingBlockId }),

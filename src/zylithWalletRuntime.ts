@@ -944,34 +944,23 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       };
     });
 
-    const noteCommitments: string[] = [];
-    const transactionHashes: string[] = [];
-    let sdkRegistry: SubmitPrivacyBridgeDepositResult["sdkRegistry"] | undefined;
+    if (plans.length === 0) {
+      throw new Error("Deposit split produced no notes");
+    }
+    const noteCommitments = plans.map((plan) => normalizeNoteCommitment(plan.note_commitment));
+    const totalDepositAmount = plans.reduce(
+      (sum, plan) => sum + BigInt(plan.encoded_args.amount),
+      0n,
+    );
+    if (totalDepositAmount !== rawAmount) {
+      throw new Error("Deposit split total does not match requested amount");
+    }
+    if (plans.some((plan) => plan.encoded_args.asset_id !== plans[0]?.encoded_args.asset_id)) {
+      throw new Error("Deposit split produced mixed assets");
+    }
+    const requestTime = Date.now();
     for (const plan of plans) {
       const noteCommitment = normalizeNoteCommitment(plan.note_commitment);
-      const depositResult = await submitPrivacyBridgeDeposit({
-        provider: provider as never,
-        seedHex: unlockedSeed,
-        chainId,
-        rpcUrl,
-        privacyPoolAddress,
-        bridgeAddress,
-        tokenAddress,
-        discoveryUrl,
-        provingUrl,
-        paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
-        paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
-        privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-        minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
-        sdkRegistry,
-        plan: {
-          amount: BigInt(plan.encoded_args.amount),
-          encodedArgs: plan.encoded_args,
-        },
-      });
-      const transactionHash = depositResult.transactionHash;
-      transactionHashes.push(transactionHash);
-      noteCommitments.push(noteCommitment);
       const existing = notes.find((record) => record.note_commitment === noteCommitment);
       if (!existing) {
         notes.push({
@@ -979,20 +968,53 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           deployment_scope: deploymentScope,
           source: "deposit",
           note: plan.note,
-          pending_deposit_tx: transactionHash,
           deposit_confirmed: false,
-          deposit_requested_at_unix_ms: Date.now(),
+          deposit_requested_at_unix_ms: requestTime,
         });
       }
-      await saveNotes();
-      await waitForStarknetTransaction(transactionHash, deployment, "Starknet Privacy deposit");
-      sdkRegistry = depositResult.sdkRegistry;
-      await refreshDepositConfirmations().catch(() => false);
     }
     await saveNotes();
     await pushRecoverySnapshot(true);
+    const depositResult: SubmitPrivacyBridgeDepositResult = await submitPrivacyBridgeDeposit({
+      provider: provider as never,
+      seedHex: unlockedSeed,
+      chainId,
+      rpcUrl,
+      privacyPoolAddress,
+      bridgeAddress,
+      tokenAddress,
+      discoveryUrl,
+      provingUrl,
+      paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
+      paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
+      privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
+      minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
+      plan: {
+        amount: totalDepositAmount,
+        encodedArgs: {
+          asset_id: plans[0]?.encoded_args.asset_id ?? asset,
+          total_amount: totalDepositAmount.toString(),
+          amounts: plans.map((plan) => plan.encoded_args.amount),
+          deposit_nonces: plans.map((plan) => plan.encoded_args.deposit_nonce),
+          note_commitments: plans.map((plan) => plan.encoded_args.note_commitment),
+          withdraw_authorities: plans.map((plan) => plan.encoded_args.withdraw_authority),
+        },
+      },
+    });
+    const transactionHash = depositResult.transactionHash;
+    for (const noteCommitment of noteCommitments) {
+      const record = notes.find((entry) => entry.note_commitment === noteCommitment);
+      if (!record) continue;
+      record.pending_deposit_tx = transactionHash;
+      record.deposit_failed = undefined;
+      record.deposit_failure_reason = undefined;
+    }
+    await saveNotes();
+    await pushRecoverySnapshot(false);
+    await waitForStarknetTransaction(transactionHash, deployment, "Starknet Privacy deposit");
+    await refreshDepositConfirmations().catch(() => false);
     return {
-      transaction_hash: transactionHashes[0] ?? "",
+      transaction_hash: transactionHash,
       note_commitment: noteCommitments[0] ?? "",
       note_commitments: noteCommitments,
     };
