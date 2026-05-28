@@ -443,6 +443,7 @@ export default function App() {
           asset: next.fundingAsset,
           amount: next.fundingAmount,
           batchId: next.batchId,
+          noteCommitments: next.fundingNoteCommitments,
         };
         if (SPENT_LOCK_STATUSES.has(next.status)) {
           void w?.settlePrivateOrderLock?.(next.orderCommitment, "spent", fundingFallback)
@@ -476,6 +477,7 @@ export default function App() {
           asset: order.fundingAsset,
           amount: order.fundingAmount,
           batchId: order.batchId,
+          noteCommitments: order.fundingNoteCommitments,
         }).catch(() => false) || changed;
       }
       if (!cancelled && changed) setBalanceTick(v => v + 1);
@@ -595,6 +597,7 @@ export default function App() {
           orderCommitment: child.order_commitment,
           cancellationSecret: child.cancellation_secret ?? "",
           expectedOutputMetadataCommitment: child.expected_output_metadata_commitment,
+          fundingNoteCommitments: child.funding_note_commitments,
           strategyId: strategy.id,
           batchId: child.batch_id,
           epochId: child.epoch_id,
@@ -724,6 +727,7 @@ export default function App() {
         orderCommitment: result.order_commitment ?? result.first_child_order_commitment ?? "",
         cancellationSecret: result.cancellation_secret ?? result.first_child_cancellation_secret ?? "",
         expectedOutputMetadataCommitment: result.expected_output_metadata_commitment,
+        fundingNoteCommitments: result.funding_note_commitments,
         strategyId: result.strategy_id,
         batchId: result.batch_id ?? result.first_child_batch_id ?? currentBatch.batch_id,
         epochId: currentBatch.epoch_id,

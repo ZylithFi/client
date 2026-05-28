@@ -15,8 +15,9 @@ use zylith_core::{
     derive_order_cancellation_secret, derive_recovery_auth_tag, derive_user_keys,
     funding_input_set_commitment, funding_nullifier_set_commitment,
     note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
-    renewal_cancel_auth_key_felt_from_raw_key_hex, renewal_cancel_authority_from_raw_key_hex,
-    renewal_parent_commitment, renewal_parent_secret_commitment, sign_order_authorization,
+    output_note_metadata_commitment, renewal_cancel_auth_key_felt_from_raw_key_hex,
+    renewal_cancel_authority_from_raw_key_hex, renewal_parent_commitment,
+    renewal_parent_secret_commitment, sign_order_authorization,
     spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
     verify_output_note_membership, withdraw_auth_key_felt_from_raw_key_hex,
     withdraw_authority_from_raw_key_hex,
@@ -137,6 +138,15 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
     order.recipient_residual_withdraw_authority = withdraw_authority;
 
     let order_commitment = order.commitment().map_err(js_error)?;
+    let expected_output_metadata_commitment = output_note_metadata_commitment(
+        &order.batch_id.0,
+        &order_commitment,
+        &order.funding_note_ref,
+        &order.pair_id,
+        &order.recipient_spend_authority,
+        &order.recipient_withdraw_authority,
+    )
+    .map_err(js_error)?;
     let funding_authorization =
         sign_order_authorization(&spend_auth_key_felt, &order_commitment).map_err(js_error)?;
     let payload = PrivateOrderPayload {
@@ -158,6 +168,11 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
     to_json(&BuildPrivateOrderSubmissionResponse {
         order_commitment,
         cancellation_secret,
+        expected_output_metadata_commitment,
+        funding_note_commitments: funding_commitments
+            .into_iter()
+            .map(|commitment| commitment.0)
+            .collect(),
         order_submission,
         ingress_request,
     })
@@ -488,6 +503,8 @@ pub struct BuildPrivateOrderSubmissionRequest {
 pub struct BuildPrivateOrderSubmissionResponse {
     pub order_commitment: OrderCommitment,
     pub cancellation_secret: String,
+    pub expected_output_metadata_commitment: String,
+    pub funding_note_commitments: Vec<String>,
     pub order_submission: OrderSubmission,
     pub ingress_request: TrustedOrderIngressRequest,
 }

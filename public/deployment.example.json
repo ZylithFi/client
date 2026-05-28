@@ -21,7 +21,9 @@
   },
   "runtime": {
     "batch_window_ms": 90000,
-    "public_artifact_delay_epochs": 1,
+    "public_artifact_delay_min_epochs": 3,
+    "public_artifact_delay_max_epochs": 8,
+    "artifact_epoch_bucket_size": 8,
     "output_claim_delay_seconds": 1800
   },
   "token_addresses": {

@@ -10,6 +10,7 @@ export type LocalOrder = {
   orderCommitment: string;
   cancellationSecret: string;
   expectedOutputMetadataCommitment?: string;
+  fundingNoteCommitments?: string[];
   strategyId?: string;
   batchId: string;
   epochId: number;
@@ -41,6 +42,7 @@ export type PrivateStrategyChildSummary = {
   order_commitment?: string;
   cancellation_secret?: string;
   expected_output_metadata_commitment?: string;
+  funding_note_commitments?: string[];
   submitted_at_unix_ms: number;
   delegated?: boolean;
 };
@@ -182,6 +184,7 @@ export function ordersChanged(before: LocalOrder[], after: LocalOrder[]): boolea
       order.filledAmount !== previous.filledAmount ||
       order.fundingAsset !== previous.fundingAsset ||
       order.fundingAmount !== previous.fundingAmount ||
+      JSON.stringify(order.fundingNoteCommitments ?? []) !== JSON.stringify(previous.fundingNoteCommitments ?? []) ||
       order.cancelTransactionHash !== previous.cancelTransactionHash ||
       order.makerBandAttribution !== previous.makerBandAttribution
     );
@@ -232,6 +235,8 @@ export function reconcileOrderLifecycle({
     settlementOutputs.set(note.batch_id, [...(settlementOutputs.get(note.batch_id) ?? []), note]);
   }
 
+  const usedOutputCommitments = new Set<string>();
+
   return orders.map((order) => {
     const transcript = settlementTranscripts[order.batchId];
     const proofStatus = proofStatuses?.[order.batchId];
@@ -263,14 +268,27 @@ export function reconcileOrderLifecycle({
               : String(transcript.price_base_scale),
           }, pair)
         : String(transcript.clearing_price);
+      const batchOutputs = settlementOutputs.get(order.batchId) ?? [];
       const exactOutput = order.expectedOutputMetadataCommitment
-        ? (settlementOutputs.get(order.batchId) ?? [])
+        ? batchOutputs
             .find(note =>
+              !usedOutputCommitments.has(note.metadata_commitment) &&
               sameFelt(note.metadata_commitment, order.expectedOutputMetadataCommitment) &&
               (!expectedOutputAsset || note.asset === expectedOutputAsset)
             )
         : null;
-      if (exactOutput && pair) {
+      const matchedOutput = exactOutput ?? (pair
+        ? findAmountMatchedOutput({
+            order,
+            transcript,
+            pair,
+            batchOutputs,
+            usedOutputCommitments,
+            toAtomicStr,
+            assetScale,
+          })
+        : null);
+      if (matchedOutput && pair) {
         const amountAtomic = BigInt(toAtomicStr(order.amount, pair.base_asset_id));
         const priceBaseScale = BigInt(
           transcript.price_base_scale === undefined
@@ -289,7 +307,7 @@ export function reconcileOrderLifecycle({
         const feeDenominator = 10_000n;
         const fullOutputAtomic =
           (grossOutputAtomic * (feeDenominator - feeBps)) / feeDenominator;
-        const outputAtomic = BigInt(exactOutput.amount);
+        const outputAtomic = BigInt(matchedOutput.amount);
         const isPartial = outputAtomic > 0n && outputAtomic < fullOutputAtomic;
         const feeAdjustedOutput = feeBps > 0n
           ? (outputAtomic * feeDenominator) / (feeDenominator - feeBps)
@@ -301,20 +319,22 @@ export function reconcileOrderLifecycle({
             : clearingAtomic > 0n
               ? fromAtomicStr(((feeAdjustedOutput * priceBaseScale) / clearingAtomic).toString(), pair.base_asset_id)
               : undefined;
+        usedOutputCommitments.add(matchedOutput.metadata_commitment);
         return {
           ...order,
           status: (isPartial ? "partial" : "filled") as LocalOrderStatus,
           clearingPrice,
           filledAmount,
-          makerBandAttribution: exactOutput.maker_attribution ?? order.makerBandAttribution,
+          makerBandAttribution: matchedOutput.maker_attribution ?? order.makerBandAttribution,
         };
       }
-      if (exactOutput) {
+      if (matchedOutput) {
+        usedOutputCommitments.add(matchedOutput.metadata_commitment);
         return {
           ...order,
           status: "filled" as LocalOrderStatus,
           clearingPrice,
-          makerBandAttribution: exactOutput.maker_attribution ?? order.makerBandAttribution,
+          makerBandAttribution: matchedOutput.maker_attribution ?? order.makerBandAttribution,
         };
       }
       const transcriptEpoch = Number(transcript.batch_epoch);
@@ -366,6 +386,49 @@ export function reconcileOrderLifecycle({
     }
     return order;
   });
+}
+
+function findAmountMatchedOutput({
+  order,
+  transcript,
+  pair,
+  batchOutputs,
+  usedOutputCommitments,
+  toAtomicStr,
+  assetScale,
+}: {
+  order: LocalOrder;
+  transcript: OrderLifecycleTranscript;
+  pair: OrderLifecyclePair;
+  batchOutputs: OrderLifecycleOutputNote[];
+  usedOutputCommitments: Set<string>;
+  toAtomicStr: (human: string, assetId: string) => string;
+  assetScale: (assetId: string) => bigint;
+}) {
+  const expectedOutputAsset = order.side === "Buy" ? pair.base_asset_id : pair.quote_asset_id;
+  const amountAtomic = BigInt(toAtomicStr(order.amount, pair.base_asset_id));
+  const priceBaseScale = BigInt(
+    transcript.price_base_scale === undefined
+      ? pair.price_base_scale ?? assetScale(pair.base_asset_id).toString()
+      : String(transcript.price_base_scale),
+  );
+  const clearingAtomic = BigInt(String(transcript.clearing_price));
+  const grossOutputAtomic = order.side === "Buy"
+    ? amountAtomic
+    : (amountAtomic * clearingAtomic) / priceBaseScale;
+  const feeBps = BigInt(
+    order.wireMode === "Maker Curve" || order.wireMode === "Resting"
+      ? pair.maker_fee_bps ?? 0
+      : pair.taker_fee_bps ?? 4,
+  );
+  const expectedNetOutput =
+    (grossOutputAtomic * (10_000n - feeBps)) / 10_000n;
+  if (expectedNetOutput <= 0n) return null;
+  return batchOutputs.find(note =>
+    !usedOutputCommitments.has(note.metadata_commitment) &&
+    note.asset === expectedOutputAsset &&
+    BigInt(note.amount) === expectedNetOutput
+  ) ?? null;
 }
 
 export function sameFelt(left: string | undefined, right: string | undefined): boolean {

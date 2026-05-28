@@ -276,6 +276,55 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].filledAmount).toBe("10");
   });
 
+  it("recovers older filled orders by matching net output amount when metadata was not stored", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [
+        order({
+          ordRef: "ORD-sell",
+          side: "Sell",
+          amount: "20",
+          expectedOutputMetadataCommitment: undefined,
+        }),
+        order({
+          ordRef: "ORD-buy",
+          side: "Buy",
+          amount: "20",
+          expectedOutputMetadataCommitment: undefined,
+        }),
+      ],
+      batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
+      settlementTranscripts: {
+        "batch-1": {
+          batch_id: "batch-1",
+          batch_epoch: 10,
+          clearing_price: "45000",
+          price_base_scale: "1000000000000000000",
+        },
+      },
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "USDC",
+          amount: "899640",
+          metadata_commitment: "0xsell-output",
+        },
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "19992000000000000000",
+          metadata_commitment: "0xbuy-output",
+        },
+      ],
+      ...deps,
+    });
+
+    expect(updated.find(o => o.ordRef === "ORD-sell")?.status).toBe("filled");
+    expect(updated.find(o => o.ordRef === "ORD-buy")?.status).toBe("filled");
+    expect(updated.find(o => o.ordRef === "ORD-buy")?.filledAmount).toBe("20");
+  });
+
   it("settles from transcript and notes even when the batch aged out of the current batch list", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "in_batch", expectedOutputMetadataCommitment: "0xmatch" })],

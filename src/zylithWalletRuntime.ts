@@ -110,6 +110,7 @@ type WalletRuntime = {
     first_child_batch_id?: string;
     first_child_cancellation_secret?: string;
     expected_output_metadata_commitment?: string;
+    funding_note_commitments?: string[];
     offline_package?: OfflineRenewalPackage;
     status?: string;
   }>;
@@ -143,6 +144,7 @@ type WalletRuntime = {
       asset?: string;
       amount?: string;
       batchId?: string;
+      noteCommitments?: string[];
     },
   ) => Promise<boolean>;
   createOfflineRenewalPackage: (order: PrivateOrderDraft) => Promise<OfflineRenewalPackage>;
@@ -282,6 +284,7 @@ type PrivateStrategySummary = {
     order_commitment?: string;
     cancellation_secret?: string;
     expected_output_metadata_commitment?: string;
+    funding_note_commitments?: string[];
     submitted_at_unix_ms: number;
     delegated?: boolean;
   }>;
@@ -495,6 +498,7 @@ type StrategyChildRecord = {
   order_commitment: string;
   cancellation_secret: string;
   expected_output_metadata_commitment?: string;
+  funding_note_commitments?: string[];
   submitted_at_unix_ms: number;
   delegated?: boolean;
 };
@@ -1260,14 +1264,15 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     const registry = await fetchIngressRegistry();
     const submitted = await submitSinglePrivateOrder(draft, batch, registry);
-      return {
-        order_id: submitted.order_commitment,
-        order_commitment: submitted.order_commitment,
-        batch_id: submitted.batch_id,
-        cancellation_secret: submitted.cancellation_secret,
-        expected_output_metadata_commitment: submitted.expected_output_metadata_commitment,
-        status: "private ingress accepted",
-      };
+    return {
+      order_id: submitted.order_commitment,
+      order_commitment: submitted.order_commitment,
+      batch_id: submitted.batch_id,
+      cancellation_secret: submitted.cancellation_secret,
+      expected_output_metadata_commitment: submitted.expected_output_metadata_commitment,
+      funding_note_commitments: submitted.funding_note_commitments,
+      status: "private ingress accepted",
+    };
   }
 
   async function cancelPrivateOrder(request: {
@@ -1297,7 +1302,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   async function settlePrivateOrderLock(
     orderCommitment: string,
     outcome: "released" | "spent",
-    fundingFallback?: { asset?: string; amount?: string; batchId?: string },
+    fundingFallback?: { asset?: string; amount?: string; batchId?: string; noteCommitments?: string[] },
   ) {
     requireUnlocked();
     const expectedOrderCommitment = normalizeFeltForComparison(orderCommitment);
@@ -1311,6 +1316,20 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         spent: outcome === "spent" ? true : note.spent,
       };
     });
+    if (outcome === "spent" && fundingFallback?.noteCommitments?.length) {
+      const commitments = new Set(
+        fundingFallback.noteCommitments.map(normalizeFeltForComparison),
+      );
+      notes = notes.map((note) => {
+        if (!commitments.has(normalizeFeltForComparison(note.note_commitment))) return note;
+        changed = true;
+        return {
+          ...note,
+          locked_by_order: undefined,
+          spent: true,
+        };
+      });
+    }
     if (!changed && outcome === "spent" && !spentFallbackAlreadyApplied(expectedOrderCommitment)) {
       changed = markSpentByFundingFallback(fundingFallback);
       if (changed) markSpentFallbackApplied(expectedOrderCommitment);
@@ -1605,6 +1624,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       order_commitment: acceptedOrderCommitment,
       cancellation_secret: built.cancellation_secret,
       expected_output_metadata_commitment: built.expected_output_metadata_commitment,
+      funding_note_commitments: fundingNotes.map((note) => note.note_commitment),
       batch_id: accepted.batch_id ?? batch.batch_id,
     };
   }
@@ -1697,6 +1717,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       first_child_batch_id: strategy.submitted_children[0]?.batch_id,
       first_child_cancellation_secret: strategy.submitted_children[0]?.cancellation_secret,
       expected_output_metadata_commitment: strategy.submitted_children[0]?.expected_output_metadata_commitment,
+      funding_note_commitments: strategy.submitted_children[0]?.funding_note_commitments,
       status:
         strategy.submitted_children.length > 0
           ? "Strategy active; first child submitted"
@@ -1827,6 +1848,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         order_commitment: built.order_commitment,
         cancellation_secret: built.cancellation_secret,
         expected_output_metadata_commitment: built.expected_output_metadata_commitment,
+        funding_note_commitments: fundingNotes.map((note) => note.note_commitment),
         submitted_at_unix_ms: 0,
         delegated: true,
       });
@@ -1967,6 +1989,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         order_commitment: built.order_commitment,
         cancellation_secret: built.cancellation_secret,
         expected_output_metadata_commitment: built.expected_output_metadata_commitment,
+        funding_note_commitments: fundingNotes.map((note) => note.note_commitment),
         submitted_at_unix_ms: 0,
         delegated: true,
       });
@@ -2107,6 +2130,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         order_commitment: submitted.order_commitment,
         cancellation_secret: submitted.cancellation_secret,
         expected_output_metadata_commitment: submitted.expected_output_metadata_commitment,
+        funding_note_commitments: submitted.funding_note_commitments,
         submitted_at_unix_ms: Date.now(),
       });
       if (strategy.mode !== "Resting") {
@@ -2301,6 +2325,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         order_commitment: child.order_commitment,
         cancellation_secret: child.cancellation_secret,
         expected_output_metadata_commitment: child.expected_output_metadata_commitment,
+        funding_note_commitments: child.funding_note_commitments,
         submitted_at_unix_ms: child.submitted_at_unix_ms,
         delegated: child.delegated,
       })),
