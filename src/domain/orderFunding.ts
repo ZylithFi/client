@@ -8,7 +8,7 @@ export type OrderFundingPair = {
   price_base_scale?: string;
 };
 
-const ACTIVE_ORDER_STATUSES = new Set(["queued", "in_batch", "proving", "settling"]);
+const ACTIVE_ORDER_STATUSES = new Set(["queued", "in_batch", "proving", "settling", "settled_pending_output"]);
 
 export function orderFundingAsset(order: LocalOrder, pairs: OrderFundingPair[]): string {
   if (order.fundingAsset) return order.fundingAsset;

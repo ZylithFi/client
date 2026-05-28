@@ -1,7 +1,7 @@
 import type { MakerBandAttribution } from "./shieldedBalances";
 
 export type LocalOrderStatus =
-  | "queued" | "in_batch" | "proving" | "settling"
+  | "queued" | "in_batch" | "proving" | "settling" | "settled_pending_output"
   | "filled" | "partial" | "no_fill" | "rolled" | "cancelled" | "failed"
   | "settlement_blocked";
 
@@ -107,6 +107,7 @@ export type OrderLifecycleTranscript = {
 export type OrderLifecycleProofStatus = {
   batch_id: string;
   state: string;
+  matched_order_count?: number;
   failure?: string | null;
 };
 
@@ -125,7 +126,8 @@ const ORDERS_KEY_PREFIX = "zylith.local.orders";
 export function statusLabel(s: LocalOrderStatus): string {
   const m: Record<LocalOrderStatus, string> = {
     queued: "Queued", in_batch: "In batch", proving: "Proving",
-    settling: "Settling", filled: "Filled", partial: "Partial",
+    settling: "Settling", settled_pending_output: "Output pending",
+    filled: "Filled", partial: "Partial",
     no_fill: "No fill", rolled: "Rolled", cancelled: "Cancelled", failed: "Failed",
     settlement_blocked: "Settlement blocked",
   };
@@ -134,7 +136,7 @@ export function statusLabel(s: LocalOrderStatus): string {
 
 export function statusTone(s: LocalOrderStatus): string {
   if (s === "filled" || s === "partial") return "good";
-  if (s === "in_batch" || s === "proving" || s === "settling") return "info";
+  if (s === "in_batch" || s === "proving" || s === "settling" || s === "settled_pending_output") return "info";
   if (s === "queued") return "muted";
   if (s === "rolled" || s === "no_fill") return "warn";
   if (s === "settlement_blocked") return "danger";
@@ -249,11 +251,17 @@ export function reconcileOrderLifecycle({
     if (!transcript && proofStatus?.failure) {
       return { ...order, status: "settlement_blocked" as LocalOrderStatus };
     }
+    if (!transcript && proofStatus?.state === "confirmed-onchain") {
+      if (proofStatus.matched_order_count === 0) {
+        return { ...order, status: "no_fill" as LocalOrderStatus };
+      }
+      return { ...order, status: "settled_pending_output" as LocalOrderStatus };
+    }
     const batch = batches.find(candidate => candidate.batch_id === order.batchId);
     if (!batch && !transcript) return order;
     if (batch?.status === "Cancelled") return { ...order, status: "cancelled" as LocalOrderStatus };
     if (transcript || batch?.status === "Settled") {
-      if (!transcript) return { ...order, status: "settling" as LocalOrderStatus };
+      if (!transcript) return { ...order, status: "settled_pending_output" as LocalOrderStatus };
       const pair = pairs.find(candidate => candidate.pair_id === order.pair);
       const expectedOutputAsset = pair
         ? order.side === "Buy" ? pair.base_asset_id : pair.quote_asset_id

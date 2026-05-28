@@ -119,7 +119,7 @@ function fmtAddr(value?: string): string {
 }
 
 function activeStatuses(order: LocalOrder): boolean {
-  return ["queued", "in_batch", "proving", "settling"].includes(order.status);
+  return ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status);
 }
 
 function terminalFill(order: LocalOrder): boolean {

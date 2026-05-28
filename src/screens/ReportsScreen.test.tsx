@@ -76,4 +76,23 @@ describe("ReportsScreen", () => {
     expect(within(table).getByText("STRK/USDC")).toBeInTheDocument();
     expect(within(table).queryByText("ETH/USDC")).not.toBeInTheDocument();
   });
+
+  it("shows pending output reports before delayed artifacts publish", () => {
+    render(
+      <ReportsScreen
+        walletReady
+        strategies={[]}
+        orders={[
+          order({
+            ordRef: "pending",
+            status: "settled_pending_output",
+            clearingPrice: undefined,
+            filledAmount: undefined,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Output reports pending. TCA appears after delayed outputs publish.")).toBeInTheDocument();
+  });
 });

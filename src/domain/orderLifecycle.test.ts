@@ -366,6 +366,50 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("settling");
   });
 
+  it("marks confirmed onchain settlement as output pending while delayed artifacts are hidden", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "settling" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "confirmed-onchain",
+          matched_order_count: 2,
+        },
+      },
+      withdrawableNotes: [],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("settled_pending_output");
+  });
+
+  it("releases confirmed zero-match batches before delayed artifacts publish", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "settling" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "confirmed-onchain",
+          matched_order_count: 0,
+        },
+      },
+      withdrawableNotes: [],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("no_fill");
+  });
+
   it("marks proof job failures as settlement_blocked without waiting for epoch aging", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],

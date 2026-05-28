@@ -89,7 +89,7 @@ export function AssetsScreen({
   }, []);
 
   const pendingOrders = orders.filter(order =>
-    ["queued", "in_batch", "proving", "settling"].includes(order.status),
+    ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status),
   );
   const recognizedSettlementOutputs = useMemo(
     () => withdrawableNotes.filter(note =>
@@ -243,7 +243,7 @@ export function AssetsScreen({
                     )}
                   </td>
                   <td className="ref">{order.batchId}</td>
-                  <td>{order.status === "settling" ? "Awaiting output recognition" : "Locked until batch resolves"}</td>
+                  <td>{order.status === "settled_pending_output" ? "Awaiting delayed output report" : order.status === "settling" ? "Awaiting output recognition" : "Locked until batch resolves"}</td>
                   <td />
                 </tr>
               ))}

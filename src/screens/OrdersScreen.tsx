@@ -61,6 +61,9 @@ function childLifecycle({
   if (settlementTranscripts[child.batch_id] && batchStatus === "Settled") {
     return { label: "No fill", tone: "warn", detail: "Batch settled without output" };
   }
+  if (batchStatus === "Settled") {
+    return { label: "Output pending", tone: "info", detail: "Settlement confirmed; output report delayed" };
+  }
   if (
     (batchStatus === "Closed" || batchStatus === "Proving" || batchStatus === "Clearing" || batchStatus === "Settling") &&
     latestEpoch > 0 &&
@@ -102,7 +105,7 @@ export function OrdersScreen({
 }) {
   const [filter, setFilter] = useState<"active" | "history">("active");
 
-  const activeStatuses: LocalOrderStatus[] = ["queued", "in_batch", "proving", "settling"];
+  const activeStatuses: LocalOrderStatus[] = ["queued", "in_batch", "proving", "settling", "settled_pending_output"];
   const historyStatuses: LocalOrderStatus[] = ["filled", "partial", "no_fill", "rolled", "cancelled", "failed", "settlement_blocked"];
   const displayed = filter === "active"
     ? orders.filter(o => activeStatuses.includes(o.status))

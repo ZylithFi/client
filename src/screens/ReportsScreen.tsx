@@ -263,6 +263,8 @@ export function ReportsScreen({
   const allFilled = orders.filter(order => order.status === "filled" || order.status === "partial");
   const periodOrders = orders.filter(order => period === "all" || order.submittedAt >= cutoff);
   const filled = periodOrders.filter(order => order.status === "filled" || order.status === "partial");
+  const allOutputPending = orders.filter(order => order.status === "settled_pending_output");
+  const periodOutputPending = periodOrders.filter(order => order.status === "settled_pending_output");
   const headroomValues = filled
     .map(order => headroomBpsValue(order.side, order.limitPrice, order.clearingPrice ?? ""))
     .filter((value): value is number => value !== null);
@@ -437,7 +439,9 @@ export function ReportsScreen({
           <div className="empty-zone">
             <div className="empty-mark">—</div>
             <div className="empty-body">
-              No fills yet. TCA appears after your first filled order.
+              {allOutputPending.length > 0
+                ? "Output reports pending. TCA appears after delayed outputs publish."
+                : "No fills yet. TCA appears after your first filled order."}
             </div>
           </div>
         </div>
@@ -485,7 +489,11 @@ export function ReportsScreen({
             <div className="table-zone tca-table-zone">
               <div className="empty-zone">
                 <div className="empty-mark">—</div>
-                <div className="empty-body">No fills in the selected period.</div>
+                <div className="empty-body">
+                  {periodOutputPending.length > 0
+                    ? "Output reports pending for the selected period."
+                    : "No fills in the selected period."}
+                </div>
               </div>
             </div>
           ) : (

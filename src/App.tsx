@@ -365,7 +365,7 @@ export default function App() {
   const activeProofBatchIds = useMemo(
     () => Array.from(new Set(
       orders
-        .filter(order => ["queued", "in_batch", "proving", "settling"].includes(order.status))
+        .filter(order => ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status))
         .map(order => order.batchId)
         .filter(Boolean),
     )),
@@ -547,7 +547,7 @@ export default function App() {
   }, [walletReady, strategies]);
 
   const activeOrders = orders.filter(o =>
-    ["queued", "in_batch", "proving", "settling"].includes(o.status),
+    ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(o.status),
   );
 
   useEffect(() => {
