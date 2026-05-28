@@ -598,14 +598,6 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   font-size: 10px;
   letter-spacing: 0.04em;
 }
-.claim-help {
-  margin-top: 7px;
-  padding-top: 7px;
-  box-shadow: inset 0 1px 0 var(--z-border);
-  color: var(--z-text-body);
-  font-size: 10px;
-  line-height: 1.45;
-}
 .right-active-row { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: center; padding: 8px 0; box-shadow: inset 0 -1px 0 var(--z-border); }
 .right-active-row:last-child { box-shadow: none; }
 .active-side { width: 18px; height: 18px; border-radius: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; letter-spacing: 0.04em; }

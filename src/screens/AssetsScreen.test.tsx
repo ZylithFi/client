@@ -47,8 +47,6 @@ describe("AssetsScreen", () => {
     expect(screen.getByText("Locked capital")).toBeInTheDocument();
     expect(screen.getByText("Pending deposit")).toBeInTheDocument();
     expect(screen.getByText("Failed deposit")).toBeInTheDocument();
-    expect(screen.getByText("In claim delay")).toBeInTheDocument();
-    expect(screen.getByText("Claimable")).toBeInTheDocument();
     expect(screen.getByText("In-Flight Capital")).toBeInTheDocument();
     expect(screen.getByText("No private capital in flight.")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Deposit" })).toHaveLength(1);

@@ -11,8 +11,6 @@ import {
 import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/shieldedBalances";
 import {
   activeSettlementOutputs,
-  claimableOutputs,
-  claimDelayedOutputs,
   pendingDepositTotals,
   settlementBasisMs,
   settlementReadyAtMs,
@@ -100,12 +98,8 @@ export function AssetsScreen({
     ),
     [settlementTranscripts, withdrawableNotes],
   );
-  const claimable = claimableOutputs(recognizedSettlementOutputs, settlementTranscripts, claimDelaySeconds, now);
-  const claimDelayed = claimDelayedOutputs(recognizedSettlementOutputs, settlementTranscripts, claimDelaySeconds, now);
   const depositTotals = pendingDepositTotals(pendingDeposits);
   const failedDepositTotals = sumByAsset(pendingDeposits.filter(deposit => deposit.failed));
-  const claimDelayedTotals = sumByAsset(claimDelayed);
-  const claimableTotals = sumByAsset(claimable);
   const activeOrderTotals = activeOrderFundingTotals(pendingOrders, pairs);
   const activeOutputCount = activeSettlementOutputs(recognizedSettlementOutputs).length;
   const consolidationPlans = useMemo(
@@ -122,18 +116,6 @@ export function AssetsScreen({
     for (const note of recognizedSettlementOutputs) assets.add(note.asset);
     return [...assets];
   }, [allAssets, balances, pendingDeposits, recognizedSettlementOutputs]);
-  const privateAssetCount = useMemo(() => {
-    const assets = new Set<string>();
-    for (const balance of balances) {
-      if (BigInt(balance.available) > 0n || BigInt(balance.locked) > 0n) assets.add(balance.asset);
-    }
-    for (const deposit of pendingDeposits) {
-      if (!deposit.failed) assets.add(deposit.asset);
-    }
-    for (const note of recognizedSettlementOutputs) assets.add(note.asset);
-    return assets.size;
-  }, [balances, pendingDeposits, recognizedSettlementOutputs]);
-
   if (!walletReady || !starknetAddress) {
     return (
       <div className="workspace-page">
@@ -175,8 +157,6 @@ export function AssetsScreen({
               <th>Locked capital</th>
               <th>Pending deposit</th>
               <th>Failed deposit</th>
-              <th>In claim delay</th>
-              <th>Claimable</th>
             </tr>
           </thead>
           <tbody>
@@ -187,8 +167,6 @@ export function AssetsScreen({
               const activeOrderAmount = activeOrderTotals.get(asset) ?? 0n;
               const pendingDeposit = depositTotals.get(asset) ?? 0n;
               const failedDeposit = failedDepositTotals.get(asset) ?? 0n;
-              const claimDelay = claimDelayedTotals.get(asset) ?? 0n;
-              const withdrawable = claimableTotals.get(asset) ?? 0n;
               return (
                 <tr key={asset}>
                   <td className="ref">{asset}</td>
@@ -206,12 +184,6 @@ export function AssetsScreen({
                   </td>
                   <td className={`num ${failedDeposit === 0n ? "is-empty" : "danger-text"}`}>
                     {amountOrDash(failedDeposit, asset)}
-                  </td>
-                  <td className={`num ${claimDelay === 0n ? "is-empty" : ""}`}>
-                    {amountOrDash(claimDelay, asset)}
-                  </td>
-                  <td className={`num ${withdrawable === 0n ? "is-empty" : ""}`}>
-                    {amountOrDash(withdrawable, asset)}
                   </td>
                 </tr>
               );

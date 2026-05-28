@@ -7,8 +7,6 @@ import { activeOrderFundingTotals } from "../domain/orderFunding";
 import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/shieldedBalances";
 import {
   activeSettlementOutputs,
-  claimableOutputs,
-  claimDelayedOutputs,
   pendingDepositTotals,
   pendingWithdrawalOutputs,
   settlementBasisMs,
@@ -90,11 +88,6 @@ function ClaimSection({
               </div>
             );
           })}
-          <div className="claim-help">
-            Claim delay separates settlement recognition from public withdrawal timing.
-            You can keep trading with other notes while this output waits.
-            If you never withdraw, the note remains claimable later.
-          </div>
         </>
       )}
     </div>
@@ -163,10 +156,6 @@ export function RightColumn({
     note.source === "settlement_output" &&
     (Boolean(note.pending_withdrawal_tx) || settlementBasisMs(note, settlementTranscripts) !== null),
   );
-  const claimable = claimableOutputs(recognizedSettlementOutputs, settlementTranscripts, claimDelaySeconds, now);
-  const claimDelayed = claimDelayedOutputs(recognizedSettlementOutputs, settlementTranscripts, claimDelaySeconds, now);
-  const pendingOutputTotals = sumByAsset(claimDelayed);
-  const claimableTotals = sumByAsset(claimable);
   const activeOrderTotals = activeOrderFundingTotals(activeOrders, pairs);
   const visibleAssets = allAssets.filter(asset => {
     const balance = balances.find(entry => entry.asset === asset);
@@ -176,9 +165,7 @@ export function RightColumn({
       locked > 0n ||
       (activeOrderTotals.get(asset) ?? 0n) > 0n ||
       (depositTotals.get(asset) ?? 0n) > 0n ||
-      (failedDepositTotals.get(asset) ?? 0n) > 0n ||
-      (pendingOutputTotals.get(asset) ?? 0n) > 0n ||
-      (claimableTotals.get(asset) ?? 0n) > 0n;
+      (failedDepositTotals.get(asset) ?? 0n) > 0n;
   });
 
   return (
@@ -224,8 +211,6 @@ export function RightColumn({
           const pendingDeposit = depositTotals.get(asset) ?? 0n;
           const failedDeposit = failedDepositTotals.get(asset) ?? 0n;
           const failedReason = failedDepositReasons.get(asset);
-          const pendingOutput = pendingOutputTotals.get(asset) ?? 0n;
-          const claimable = claimableTotals.get(asset) ?? 0n;
           return (
             <div key={asset} className="right-balance-card">
               <div className="right-bal-row">
@@ -255,18 +240,6 @@ export function RightColumn({
                 <div className="rb-detail-row danger" title={failedReason}>
                   <span>Failed deposit</span>
                   <strong>{fromAtomicStr(failedDeposit.toString(), asset)}</strong>
-                </div>
-              )}
-              {pendingOutput > 0n && (
-                <div className="rb-detail-row">
-                  <span>Pending output</span>
-                  <strong>{fromAtomicStr(pendingOutput.toString(), asset)}</strong>
-                </div>
-              )}
-              {claimable > 0n && (
-                <div className="rb-detail-row good">
-                  <span>Claimable</span>
-                  <strong>{fromAtomicStr(claimable.toString(), asset)}</strong>
                 </div>
               )}
             </div>

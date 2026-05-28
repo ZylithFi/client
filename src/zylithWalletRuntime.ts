@@ -1278,8 +1278,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       order_commitment: request.order_commitment,
       cancellation_secret: request.cancellation_secret,
     });
+    const orderCommitment = normalizeFeltForComparison(request.order_commitment);
     notes = notes.map((note) =>
-      note.locked_by_order === request.order_commitment ? { ...note, locked_by_order: undefined } : note,
+      normalizeFeltForComparison(note.locked_by_order) === orderCommitment
+        ? { ...note, locked_by_order: undefined }
+        : note,
     );
     await saveNotes();
     await pushRecoverySnapshot(false);
@@ -1288,9 +1291,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   async function settlePrivateOrderLock(orderCommitment: string, outcome: "released" | "spent") {
     requireUnlocked();
+    const expectedOrderCommitment = normalizeFeltForComparison(orderCommitment);
     let changed = false;
     notes = notes.map((note) => {
-      if (note.locked_by_order !== orderCommitment) return note;
+      if (normalizeFeltForComparison(note.locked_by_order) !== expectedOrderCommitment) return note;
       changed = true;
       return {
         ...note,
@@ -1354,10 +1358,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       }).catch(() => undefined);
     }
     const childCommitments = new Set(
-      strategy.submitted_children.map((child) => child.order_commitment).filter(Boolean),
+      strategy.submitted_children
+        .map((child) => normalizeFeltForComparison(child.order_commitment))
+        .filter(Boolean),
     );
     notes = notes.map((note) =>
-      note.locked_by_order && childCommitments.has(note.locked_by_order)
+      note.locked_by_order && childCommitments.has(normalizeFeltForComparison(note.locked_by_order))
         ? { ...note, locked_by_order: undefined }
         : note,
     );
@@ -1524,13 +1530,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       "/api/orders",
       ingress.coordinator_submission,
     );
+    const acceptedOrderCommitment = normalizeFeltForComparison(
+      accepted.order_commitment ?? built.order_commitment,
+    );
     for (const fundingNote of fundingNotes) {
-      fundingNote.locked_by_order = built.order_commitment;
+      fundingNote.locked_by_order = acceptedOrderCommitment;
     }
     await saveNotes();
     await pushRecoverySnapshot(false);
     return {
-      order_commitment: accepted.order_commitment ?? built.order_commitment,
+      order_commitment: acceptedOrderCommitment,
       cancellation_secret: built.cancellation_secret,
       expected_output_metadata_commitment: built.expected_output_metadata_commitment,
       batch_id: accepted.batch_id ?? batch.batch_id,
@@ -1805,8 +1814,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.offline_package = offlinePackage;
     strategies.push(strategy);
     for (const lock of fundingLocks) {
+      const orderCommitment = normalizeFeltForComparison(lock.orderCommitment);
       for (const note of lock.notes) {
-        note.locked_by_order = lock.orderCommitment;
+        note.locked_by_order = orderCommitment;
       }
     }
     await saveNotes();
@@ -1947,8 +1957,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.end_epoch = offlinePackage.end_epoch;
     strategy.last_error = undefined;
     for (const lock of fundingLocks) {
+      const orderCommitment = normalizeFeltForComparison(lock.orderCommitment);
       for (const note of lock.notes) {
-        note.locked_by_order = lock.orderCommitment;
+        note.locked_by_order = orderCommitment;
       }
     }
     return offlinePackage;
@@ -2488,6 +2499,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   function mergeRecoveredNote(remoteNote: LocalNoteRecord) {
     if (!remoteNote?.note_commitment || !remoteNote.note) return false;
     if (remoteNote.deployment_scope !== deploymentScope) return false;
+    if (remoteNote.locked_by_order) {
+      remoteNote.locked_by_order = normalizeFeltForComparison(remoteNote.locked_by_order);
+    }
     const existing = notes.find((note) => note.note_commitment === remoteNote.note_commitment);
     if (!existing) {
       notes.push(remoteNote);
@@ -3003,6 +3017,18 @@ function normalizeNoteCommitment(value: string | { value?: string }) {
   }
   const normalized = raw.trim().toLowerCase();
   return normalized.startsWith("0x") ? normalized : `0x${normalized}`;
+}
+
+function normalizeFeltForComparison(value: string | undefined | null) {
+  if (!value || typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    return `0x${BigInt(trimmed).toString(16)}`;
+  } catch {
+    const normalized = trimmed.toLowerCase();
+    return normalized.startsWith("0x") ? normalized.replace(/^0x0+/, "0x") : `0x${normalized.replace(/^0+/, "")}`;
+  }
 }
 
 function selectedDepositFundingRail(deployment: DeploymentConfig): DepositFundingRail {
