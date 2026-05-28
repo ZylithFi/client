@@ -20,6 +20,7 @@ type SubmissionTimingPreference = "fast" | "balanced" | "private";
 const DIRECT_ORDER_MODES = new Set<OrderMode>(["Limit", "Maker Curve"]);
 const STRATEGY_ORDER_MODES = new Set<OrderMode>(["TWAP", "VWAP", "Repeat", "Resting"]);
 const MAX_ORDER_FUNDING_INPUTS = 4;
+const DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS = 10;
 
 type WalletBalance = {
   asset: string;
@@ -773,7 +774,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         tokenAddresses,
         paymasterUrl,
         privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-        minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
+        minProvingDelayBlocks:
+          fundingRail.minProvingDelayBlocks ?? DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
       });
     } finally {
       privacyWarmupInFlight = false;
@@ -1060,7 +1062,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
       paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
       privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-      minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
+      minProvingDelayBlocks:
+        fundingRail.minProvingDelayBlocks ?? DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
       sdkRegistry,
       plan: {
         amount: totalDepositAmount,
@@ -1085,8 +1088,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     await saveNotes();
     await pushRecoverySnapshot(false);
-    await waitForStarknetTransaction(transactionHash, deployment, "Starknet Privacy deposit");
-    await refreshDepositConfirmations().catch(() => false);
+    void (async () => {
+      await waitForStarknetTransaction(transactionHash, deployment, "Starknet Privacy deposit");
+      await refreshDepositConfirmations().catch(() => false);
+    })().catch((error) => {
+      console.warn("Deposit confirmation polling failed", error);
+    });
     return {
       transaction_hash: transactionHash,
       note_commitment: noteCommitments[0] ?? "",
