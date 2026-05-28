@@ -179,7 +179,7 @@ export async function submitPrivacyBridgeDeposit(
     })
   );
   const discoveryProvider = new IndexerDiscoveryProvider(
-    input.discoveryUrl,
+    serviceBaseUrl(input.discoveryUrl),
     input.privacyPoolAddress,
   );
   await runFundingStage("Starknet Privacy discovery health check failed", async () => {
@@ -198,7 +198,7 @@ export async function submitPrivacyBridgeDeposit(
         () => provingBlock(rpcProvider, proofDelayBlocks),
       );
       const provingProvider = new ProvingServiceProofProvider(
-        input.provingUrl,
+        serviceBaseUrl(input.provingUrl),
         sdkChainId(input.chainId),
         {
           blockIdentifier: provingBlockId,
@@ -976,24 +976,28 @@ async function deriveFeltFromSeed(seedHex: string, label: string, modulus: bigin
 }
 
 function paymasterExecuteUrl(url: string) {
-  const trimmed = url.replace(/\/+$/, "");
+  const trimmed = serviceBaseUrl(url);
   return trimmed.endsWith("/execute-outside")
     ? trimmed
     : `${trimmed}/execute-outside`;
 }
 
 function paymasterPrivacySignerEnsureUrl(url: string) {
-  const trimmed = url.replace(/\/+$/, "");
+  const trimmed = serviceBaseUrl(url);
   return trimmed.endsWith("/execute-outside")
     ? `${trimmed.slice(0, -"/execute-outside".length)}/privacy-signer/ensure`
     : `${trimmed}/privacy-signer/ensure`;
 }
 
 function paymasterPrivacySignerRelayUrl(url: string) {
-  const trimmed = url.replace(/\/+$/, "");
+  const trimmed = serviceBaseUrl(url);
   return trimmed.endsWith("/execute-outside")
     ? `${trimmed.slice(0, -"/execute-outside".length)}/privacy-signer/relay`
     : `${trimmed}/privacy-signer/relay`;
+}
+
+function serviceBaseUrl(url: string) {
+  return url.replace(/\/+$/, "");
 }
 
 function transactionHashFromResult(result: unknown) {
