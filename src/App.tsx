@@ -104,8 +104,6 @@ const RELEASED_LOCK_STATUSES = new Set<LocalOrderStatus>([
   "rolled",
   "failed",
   "cancelled",
-  "proof_failed",
-  "stalled",
 ]);
 const ACTIVE_ORDER_STATUSES = new Set<LocalOrderStatus>([
   "queued",
@@ -123,6 +121,8 @@ const PRIVATE_REPORT_RECOVERY_STATUSES = new Set<LocalOrderStatus>([
   "proving",
   "settling",
   "settled_pending_output",
+  "filled",
+  "partial",
   "no_fill",
   "stalled",
 ]);
@@ -139,6 +139,8 @@ type PrivateExecutionReportForApp = {
   batch_id: string;
   pair_id: string;
   order_commitment: string;
+  funding_note_commitment?: string;
+  funding_note_commitments?: string[];
   filled_amount: string;
   unfilled_amount: string;
   execution_price?: string | null;
@@ -450,6 +452,8 @@ export default function App() {
     if (nextOwnerKey === orderOwnerKey) return;
     setOrderOwnerKey(nextOwnerKey);
     setOrders(loadOrders(nextOwnerKey));
+    privateReportRequestsInFlight.current.clear();
+    privateReportSyncedBatches.current.clear();
   }, [deployment, walletReady, runtimeStatus, orderOwnerKey]);
 
   useEffect(() => {
@@ -463,8 +467,13 @@ export default function App() {
         if (privateReportSyncedBatches.current.has(order.batchId)) return acc;
         if (privateReportRequestsInFlight.current.has(order.batchId)) return acc;
         const proofStatus = proofStatuses[order.batchId];
-        if (proofStatus?.state !== "confirmed-onchain") return acc;
-        if (proofStatus.matched_order_count === 0) return acc;
+        const hasSettlementSignal =
+          proofStatus?.state === "confirmed-onchain" ||
+          Boolean(settlementTranscripts[order.batchId]) ||
+          order.status === "filled" ||
+          order.status === "partial";
+        if (!hasSettlementSignal) return acc;
+        if (proofStatus?.state === "confirmed-onchain" && proofStatus.matched_order_count === 0) return acc;
         const existing = acc[order.batchId] ?? { batch_id: order.batchId, order_commitments: [] };
         existing.order_commitments.push(order.orderCommitment);
         acc[order.batchId] = existing;
@@ -549,13 +558,13 @@ export default function App() {
       if (changed) {
         saveAndSet(nextOrders);
         setBalanceTick(value => value + 1);
-      } else if (reports.some(report => report.output_recovery_records?.length)) {
+      } else if (reports.length > 0) {
         setBalanceTick(value => value + 1);
       }
     }
     void syncReports();
     return () => { cancelled = true; };
-  }, [orders, pairs, proofStatuses, saveAndSet, walletReady]);
+  }, [orders, pairs, proofStatuses, saveAndSet, settlementTranscripts, walletReady]);
 
   // Balance polling
   const [balanceTick, setBalanceTick] = useState(0);

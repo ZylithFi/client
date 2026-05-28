@@ -175,12 +175,17 @@ export function usePublicSettlementTranscripts(
   extraBatchIds: string[] = [],
 ): Record<string, PublicSettlementTranscript> {
   const [transcripts, setTranscripts] = useState<Record<string, PublicSettlementTranscript>>({});
-  const latestEpoch = batches.reduce((max, batch) => Math.max(max, batch.epoch_id ?? 0), 0);
+  const latestEpochByPair = batches.reduce<Record<string, number>>((acc, batch) => {
+    const pairId = batch.pair_id || "unknown";
+    acc[pairId] = Math.max(acc[pairId] ?? 0, batch.epoch_id ?? 0);
+    return acc;
+  }, {});
   const settledKey = batches
     .filter(b => {
-      if (b.status === "Settled") return true;
-      if (!["Closed", "Clearing", "Proving", "Settling"].includes(b.status)) return false;
-      return latestEpoch > 0 && latestEpoch - b.epoch_id <= 16;
+      const latestEpoch = latestEpochByPair[b.pair_id || "unknown"] ?? 0;
+      if (latestEpoch <= 0) return false;
+      if (!["Settled", "Closed", "Clearing", "Proving", "Settling"].includes(b.status)) return false;
+      return latestEpoch - b.epoch_id <= 16;
     })
     .map(b => b.batch_id)
     .sort()

@@ -340,6 +340,8 @@ type PrivateOrderExecutionReport = {
   batch_id: string;
   pair_id: string;
   order_commitment: string;
+  funding_note_commitment?: string;
+  funding_note_commitments?: string[];
   status: string;
   side: Side;
   submitted_amount: string;
@@ -1123,6 +1125,24 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       ).catch(() => null);
       if (!report) continue;
       reports.push(report);
+      for (const execution of report.order_execution_reports ?? []) {
+        if (BigInt(execution.filled_amount || "0") <= 0n) continue;
+        const fundingCommitments = uniqueStrings([
+          ...(execution.funding_note_commitments ?? []),
+          execution.funding_note_commitment,
+        ]);
+        if (fundingCommitments.length === 0) continue;
+        const normalizedCommitments = new Set(fundingCommitments.map(normalizeFeltForComparison));
+        notes = notes.map((note) => {
+          if (!normalizedCommitments.has(normalizeFeltForComparison(note.note_commitment))) return note;
+          notesChanged = true;
+          return {
+            ...note,
+            locked_by_order: undefined,
+            spent: true,
+          };
+        });
+      }
       for (const record of report.output_recovery_records ?? []) {
         try {
           const payload = JSON.parse(
