@@ -104,7 +104,27 @@ const RELEASED_LOCK_STATUSES = new Set<LocalOrderStatus>([
   "rolled",
   "failed",
   "cancelled",
-  "settlement_blocked",
+  "proof_failed",
+  "stalled",
+]);
+const ACTIVE_ORDER_STATUSES = new Set<LocalOrderStatus>([
+  "queued",
+  "in_batch",
+  "proving",
+  "settling",
+  "settled_pending_output",
+]);
+const PROOF_TRACKED_ORDER_STATUSES = new Set<LocalOrderStatus>([
+  ...ACTIVE_ORDER_STATUSES,
+  "no_fill",
+  "stalled",
+]);
+const PRIVATE_REPORT_RECOVERY_STATUSES = new Set<LocalOrderStatus>([
+  "proving",
+  "settling",
+  "settled_pending_output",
+  "no_fill",
+  "stalled",
 ]);
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const LAST_LIQUIDITY_ROUTE_KEY = "zylith.nav.last_liquidity_route";
@@ -389,7 +409,7 @@ export default function App() {
   const orderBatchIds = useMemo(
     () => Array.from(new Set(
       orders
-        .filter(order => ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status))
+        .filter(order => PROOF_TRACKED_ORDER_STATUSES.has(order.status))
         .map(order => order.batchId)
         .filter(Boolean),
     )),
@@ -404,7 +424,7 @@ export default function App() {
   const activeProofBatchIds = useMemo(
     () => Array.from(new Set(
       orders
-        .filter(order => ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status))
+        .filter(order => PROOF_TRACKED_ORDER_STATUSES.has(order.status))
         .map(order => order.batchId)
         .filter(Boolean),
     )),
@@ -439,11 +459,12 @@ export default function App() {
     const requests = Object.values(
       orders.reduce<Record<string, { batch_id: string; order_commitments: string[] }>>((acc, order) => {
         if (!order.batchId || !order.orderCommitment) return acc;
-        if (!["proving", "settling", "settled_pending_output", "no_fill"].includes(order.status)) return acc;
+        if (!PRIVATE_REPORT_RECOVERY_STATUSES.has(order.status)) return acc;
         if (privateReportSyncedBatches.current.has(order.batchId)) return acc;
         if (privateReportRequestsInFlight.current.has(order.batchId)) return acc;
         const proofStatus = proofStatuses[order.batchId];
         if (proofStatus?.state !== "confirmed-onchain") return acc;
+        if (proofStatus.matched_order_count === 0) return acc;
         const existing = acc[order.batchId] ?? { batch_id: order.batchId, order_commitments: [] };
         existing.order_commitments.push(order.orderCommitment);
         acc[order.batchId] = existing;
@@ -457,7 +478,23 @@ export default function App() {
       const reports = await w!.syncPrivateSettlementReports(requests)
         .catch(() => [] as PrivateSettlementReportForApp[]);
       if (cancelled) return;
-      const successfulBatchIds = new Set(reports.map(report => report.batch_id));
+      const requestedByBatch = new Map(
+        requests.map(request => [
+          request.batch_id,
+          new Set(request.order_commitments.map(normalizeFeltForComparison)),
+        ]),
+      );
+      const successfulBatchIds = new Set(
+        reports
+          .filter(report => {
+            const requested = requestedByBatch.get(report.batch_id);
+            if (!requested || requested.size === 0) return false;
+            return (report.order_execution_reports ?? []).some(execution =>
+              requested.has(normalizeFeltForComparison(execution.order_commitment)),
+            );
+          })
+          .map(report => report.batch_id),
+      );
       for (const batchId of successfulBatchIds) {
         privateReportSyncedBatches.current.add(batchId);
       }
@@ -690,7 +727,7 @@ export default function App() {
   }, [walletReady, strategies]);
 
   const activeOrders = orders.filter(o =>
-    ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(o.status),
+    ACTIVE_ORDER_STATUSES.has(o.status),
   );
 
   useEffect(() => {

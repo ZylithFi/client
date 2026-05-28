@@ -45,6 +45,7 @@ function ClaimSection({
     })
     .sort((a, b) => a.remainingMs - b.remainingMs || a.note.asset.localeCompare(b.note.asset));
   const hasReady = rows.some(row => row.readyAt !== null && row.remainingMs === 0);
+  const readyCount = rows.filter(row => row.readyAt !== null && row.remainingMs === 0).length;
 
   return (
     <div className={`right-section claim-section ${hasReady ? "ready" : ""}`}>
@@ -56,7 +57,7 @@ function ClaimSection({
       </div>
       {hasReady && (
         <div className="claim-ready-note">
-          {rows.filter(row => row.readyAt !== null && row.remainingMs === 0).length} output ready to withdraw
+          {readyCount} {readyCount === 1 ? "output" : "outputs"} ready to withdraw
         </div>
       )}
       {rows.length === 0 ? (

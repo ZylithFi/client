@@ -69,7 +69,7 @@ function childLifecycle({
     latestEpoch > 0 &&
     latestEpoch - child.epoch_id >= 10
   ) {
-    return { label: "Settlement blocked", tone: "danger", detail: "Proof or settlement did not finalize" };
+    return { label: "Stalled", tone: "warn", detail: "" };
   }
   if (batchStatus === "Settling") return { label: "Settling", tone: "info", detail: "Proof accepted; settlement pending" };
   if (batchStatus === "Closed") return { label: "Awaiting settlement", tone: "info", detail: "Batch closed" };
@@ -106,7 +106,7 @@ export function OrdersScreen({
   const [filter, setFilter] = useState<"active" | "history">("active");
 
   const activeStatuses: LocalOrderStatus[] = ["queued", "in_batch", "proving", "settling", "settled_pending_output"];
-  const historyStatuses: LocalOrderStatus[] = ["filled", "partial", "no_fill", "rolled", "cancelled", "failed", "settlement_blocked"];
+  const historyStatuses: LocalOrderStatus[] = ["filled", "partial", "no_fill", "rolled", "cancelled", "failed", "proof_failed", "stalled"];
   const displayed = filter === "active"
     ? orders.filter(o => activeStatuses.includes(o.status))
     : orders.filter(o => historyStatuses.includes(o.status));
@@ -149,7 +149,7 @@ export function OrdersScreen({
           <div className="empty-zone">
             <div className="empty-mark">—</div>
             <div className="empty-body">
-              Orders appear after you submit your first trade.
+              Orders appear after you submit a trade.
             </div>
           </div>
         ) : (

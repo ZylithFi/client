@@ -3,7 +3,7 @@ import type { MakerBandAttribution } from "./shieldedBalances";
 export type LocalOrderStatus =
   | "queued" | "in_batch" | "proving" | "settling" | "settled_pending_output"
   | "filled" | "partial" | "no_fill" | "rolled" | "cancelled" | "failed"
-  | "settlement_blocked";
+  | "proof_failed" | "stalled";
 
 export type LocalOrder = {
   ordRef: string;
@@ -122,6 +122,21 @@ export type OrderLifecycleOutputNote = {
 
 const LEGACY_SESSION_ORDERS_KEY = "zylith.session.orders";
 const ORDERS_KEY_PREFIX = "zylith.local.orders";
+const VALID_ORDER_STATUSES = new Set<LocalOrderStatus>([
+  "queued",
+  "in_batch",
+  "proving",
+  "settling",
+  "settled_pending_output",
+  "filled",
+  "partial",
+  "no_fill",
+  "rolled",
+  "cancelled",
+  "failed",
+  "proof_failed",
+  "stalled",
+]);
 
 export function statusLabel(s: LocalOrderStatus): string {
   const m: Record<LocalOrderStatus, string> = {
@@ -129,7 +144,7 @@ export function statusLabel(s: LocalOrderStatus): string {
     settling: "Settling", settled_pending_output: "Output pending",
     filled: "Filled", partial: "Partial",
     no_fill: "No fill", rolled: "Rolled", cancelled: "Cancelled", failed: "Failed",
-    settlement_blocked: "Settlement blocked",
+    proof_failed: "Proof failed", stalled: "Stalled",
   };
   return m[s];
 }
@@ -139,7 +154,8 @@ export function statusTone(s: LocalOrderStatus): string {
   if (s === "in_batch" || s === "proving" || s === "settling" || s === "settled_pending_output") return "info";
   if (s === "queued") return "muted";
   if (s === "rolled" || s === "no_fill") return "warn";
-  if (s === "settlement_blocked") return "danger";
+  if (s === "stalled") return "warn";
+  if (s === "proof_failed") return "danger";
   return "danger";
 }
 
@@ -149,7 +165,16 @@ function ordersKey(ownerKey: string): string {
 
 function normalizeOrders(raw: unknown): LocalOrder[] {
   return Array.isArray(raw)
-    ? raw.filter((order): order is LocalOrder => Boolean(order && typeof order === "object"))
+    ? raw.flatMap((order) => {
+        if (!order || typeof order !== "object") return [];
+        const rawStatus = (order as { status?: unknown }).status;
+        const status = rawStatus === "settlement_blocked"
+          ? "stalled"
+          : rawStatus;
+        if (!VALID_ORDER_STATUSES.has(status as LocalOrderStatus)) return [];
+        const candidate = order as LocalOrder;
+        return [{ ...candidate, status: status as LocalOrderStatus }];
+      })
     : [];
 }
 
@@ -244,12 +269,12 @@ export function reconcileOrderLifecycle({
     const proofStatus = proofStatuses?.[order.batchId];
     if (
       ["cancelled", "rolled", "failed"].includes(order.status) ||
-      (order.status === "settlement_blocked" && !transcript)
+      ((order.status === "proof_failed" || order.status === "stalled") && !transcript)
     ) {
       return order;
     }
     if (!transcript && proofStatus?.failure) {
-      return { ...order, status: "settlement_blocked" as LocalOrderStatus };
+      return { ...order, status: "proof_failed" as LocalOrderStatus };
     }
     if (!transcript && proofStatus?.state === "confirmed-onchain") {
       if (proofStatus.matched_order_count === 0) {
@@ -373,7 +398,7 @@ export function reconcileOrderLifecycle({
         Number.isFinite(batchEpoch) &&
         latestEpoch - batchEpoch >= settlementBlockedFallbackEpochs
       ) {
-        return { ...order, status: "settlement_blocked" as LocalOrderStatus };
+        return { ...order, status: "stalled" as LocalOrderStatus };
       }
       if (batch.status === "Closed") return { ...order, status: "settling" as LocalOrderStatus };
       return { ...order, status: "proving" as LocalOrderStatus };
@@ -388,7 +413,7 @@ export function reconcileOrderLifecycle({
         Number.isFinite(batchEpoch) &&
         latestEpoch - batchEpoch >= settlementBlockedFallbackEpochs
       ) {
-        return { ...order, status: "settlement_blocked" as LocalOrderStatus };
+        return { ...order, status: "stalled" as LocalOrderStatus };
       }
       return { ...order, status: "settling" as LocalOrderStatus };
     }

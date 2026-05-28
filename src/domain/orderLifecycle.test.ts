@@ -410,7 +410,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("no_fill");
   });
 
-  it("marks proof job failures as settlement_blocked without waiting for epoch aging", () => {
+  it("marks proof job failures as proof_failed without waiting for epoch aging", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
       batches: [
@@ -430,10 +430,10 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated[0].status).toBe("settlement_blocked");
+    expect(updated[0].status).toBe("proof_failed");
   });
 
-  it("marks unresolved old closed batches as settlement_blocked", () => {
+  it("marks unresolved old closed batches as stalled", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
       batches: [
@@ -446,6 +446,6 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated[0].status).toBe("settlement_blocked");
+    expect(updated[0].status).toBe("stalled");
   });
 });
