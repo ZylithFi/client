@@ -3,11 +3,12 @@ use wasm_bindgen::prelude::*;
 use zylith_core::{
     AssetId, BatchId, DepositIntent, DepositSubmissionPlan, EncryptedMakerAttributionArtifact,
     Note, OrderCommitment, OrderIntent, OrderSubmission, OutputCiphertextBundle,
-    OutputNoteMerkleProof, OutputNoteRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload,
-    RecoveryArtifact, RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
-    RenewalParentCancelSubmissionPlan, SettlementOutputWithdrawalPlanRequest,
-    SettlementOutputWithdrawalSubmissionPlan, SpendAuthorization, TrustedOrderIngressRequest,
-    WithdrawalSubmissionPlan, build_deposit_submission_plan, build_order_submission,
+    OutputNoteMerkleProof, OutputNoteRecord, OutputRecoveryRecord, PrivateExecutionKeyRegistry,
+    PrivateOrderPayload, RecoveryArtifact, RecoveryArtifactKind, RecoverySeed,
+    RenewalParentCancelPlanRequest, RenewalParentCancelSubmissionPlan,
+    SettlementOutputWithdrawalPlanRequest, SettlementOutputWithdrawalSubmissionPlan,
+    SpendAuthorization, TrustedOrderIngressRequest, WithdrawalSubmissionPlan,
+    build_deposit_submission_plan, build_order_submission,
     build_renewal_parent_cancel_submission_plan,
     build_settlement_output_withdrawal_submission_plan, build_withdrawal_submission_plan,
     create_recovery_artifact, decrypt_maker_attribution_artifact, decrypt_output_note_for_owner,
@@ -15,9 +16,9 @@ use zylith_core::{
     derive_order_cancellation_secret, derive_recovery_auth_tag, derive_user_keys,
     funding_input_set_commitment, funding_nullifier_set_commitment,
     note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
-    output_note_metadata_commitment, renewal_cancel_auth_key_felt_from_raw_key_hex,
-    renewal_cancel_authority_from_raw_key_hex, renewal_parent_commitment,
-    renewal_parent_secret_commitment, sign_order_authorization,
+    output_note_metadata_commitment, output_recovery_key_tag_for_spend_authority,
+    renewal_cancel_auth_key_felt_from_raw_key_hex, renewal_cancel_authority_from_raw_key_hex,
+    renewal_parent_commitment, renewal_parent_secret_commitment, sign_order_authorization,
     spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
     verify_output_note_membership, withdraw_auth_key_felt_from_raw_key_hex,
     withdraw_authority_from_raw_key_hex,
@@ -236,6 +237,62 @@ pub fn zylith_wallet_scan_output_bundle_with_root(
     expected_output_note_root: &str,
 ) -> Result<String, JsValue> {
     scan_output_bundle(seed_hex, bundle_json, Some(expected_output_note_root))
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_output_recovery_key_tags(
+    seed_hex: &str,
+    batch_id: &str,
+    max_output_count: u32,
+) -> Result<String, JsValue> {
+    let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let spend_authority =
+        spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key)).map_err(js_error)?;
+    let key_tags = (0..max_output_count as usize)
+        .map(|output_index| {
+            output_recovery_key_tag_for_spend_authority(&spend_authority, batch_id, output_index)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(js_error)?;
+    to_json(&OutputRecoveryKeyTagList { key_tags })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_decrypt_output_recovery_record(
+    seed_hex: &str,
+    batch_id: &str,
+    output_index: u32,
+    record_json: &str,
+    expected_output_note_root: &str,
+) -> Result<String, JsValue> {
+    let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let note_recognition_key_hex = hex::encode(keys.note_recognition_key);
+    let note_owner_public_key =
+        note_recognition_public_key_from_raw_key_hex(&note_recognition_key_hex)
+            .map_err(js_error)?;
+    let spend_authority =
+        spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key)).map_err(js_error)?;
+    let record: OutputRecoveryRecord = from_json(record_json)?;
+    let payload = decrypt_output_recovery_record(
+        &spend_authority,
+        &note_owner_public_key,
+        &BatchId(batch_id.into()),
+        output_index as usize,
+        &record,
+    )
+    .map_err(js_error)?
+    .ok_or_else(|| js_error("output recovery record does not belong to this wallet"))?;
+    if !expected_output_note_root.trim().is_empty() {
+        verify_output_note_membership(
+            &payload.output_note,
+            &payload.output_proof,
+            expected_output_note_root,
+        )
+        .map_err(js_error)?;
+    }
+    to_json(&payload)
 }
 
 fn scan_output_bundle(
@@ -554,6 +611,11 @@ pub struct ScannedNote {
 #[derive(Clone, Debug, Serialize)]
 pub struct ScannedNoteList {
     pub notes: Vec<ScannedNote>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OutputRecoveryKeyTagList {
+    pub key_tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

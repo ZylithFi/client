@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./globals.css";
 import {
   type LocalOrder,
@@ -49,8 +49,6 @@ import { type AppTab, type LiquidityTab, type Workspace, TopNav } from "./compon
 import { DepositSlide, RecoverySlide, WalletSlide, WithdrawSlide } from "./components/WalletSlides";
 import { AssetsScreen } from "./screens/AssetsScreen";
 import { OrdersScreen } from "./screens/OrdersScreen";
-import { ReportsScreen } from "./screens/ReportsScreen";
-import { LiquidityWorkspace } from "./screens/LiquidityScreens";
 import {
   loadUserPreferences,
   saveUserPreferences,
@@ -65,6 +63,13 @@ import {
   fetchManagedRenewalPackageResults,
   submitManagedRenewalPackage,
 } from "./domain/managedRenewalRelay";
+
+const ReportsScreen = lazy(() =>
+  import("./screens/ReportsScreen").then(module => ({ default: module.ReportsScreen })),
+);
+const LiquidityWorkspace = lazy(() =>
+  import("./screens/LiquidityScreens").then(module => ({ default: module.LiquidityWorkspace })),
+);
 
 function genRef(): string {
   return `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -108,6 +113,25 @@ type ArrivalReferenceSnapshot = {
   price?: string;
   source?: "last_clearing";
   observedAt?: number;
+};
+
+type PrivateExecutionReportForApp = {
+  batch_id: string;
+  pair_id: string;
+  order_commitment: string;
+  filled_amount: string;
+  unfilled_amount: string;
+  execution_price?: string | null;
+};
+
+type PrivateSettlementReportForApp = {
+  batch_id: string;
+  pair_id: string;
+  batch_epoch: number;
+  clearing_price: string;
+  price_base_scale?: string;
+  output_recovery_records?: unknown[];
+  order_execution_reports?: PrivateExecutionReportForApp[];
 };
 
 function lastClearingReference(
@@ -166,6 +190,16 @@ function sessionSet(key: string, value: string): void {
     sessionStorage.setItem(key, value);
   } catch {
     // Storage can be disabled; route memory is convenience only.
+  }
+}
+
+function normalizeFeltForComparison(value: string | undefined | null): string {
+  if (!value) return "";
+  try {
+    return `0x${BigInt(value).toString(16)}`;
+  } catch {
+    const hex = value.trim().toLowerCase().replace(/^0x/, "").replace(/^0+/, "");
+    return `0x${hex || "0"}`;
   }
 }
 
@@ -353,7 +387,12 @@ export default function App() {
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() => walletOrderOwnerKey(null));
   const [orders, setOrders] = useState<LocalOrder[]>(() => loadOrders(orderOwnerKey));
   const orderBatchIds = useMemo(
-    () => Array.from(new Set(orders.map(order => order.batchId).filter(Boolean))),
+    () => Array.from(new Set(
+      orders
+        .filter(order => ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status))
+        .map(order => order.batchId)
+        .filter(Boolean),
+    )),
     [orders],
   );
   const orderSettlementTranscripts = usePublicSettlementTranscripts([], orderBatchIds);
@@ -372,6 +411,8 @@ export default function App() {
     [orders],
   );
   const proofStatuses = usePublicProofJobStatuses(activeProofBatchIds);
+  const privateReportRequestsInFlight = useRef<Set<string>>(new Set());
+  const privateReportSyncedBatches = useRef<Set<string>>(new Set());
   const saveAndSet = useCallback((next: LocalOrder[]) => {
     setOrders(next);
     saveOrders(next, orderOwnerKey ?? walletOrderOwnerKey(deployment));
@@ -391,20 +432,122 @@ export default function App() {
     setOrders(loadOrders(nextOwnerKey));
   }, [deployment, walletReady, runtimeStatus, orderOwnerKey]);
 
+  useEffect(() => {
+    if (!walletReady || orders.length === 0 || pairs.length === 0) return;
+    const w = walletRuntime();
+    if (!w?.isReady() || !w.syncPrivateSettlementReports) return;
+    const requests = Object.values(
+      orders.reduce<Record<string, { batch_id: string; order_commitments: string[] }>>((acc, order) => {
+        if (!order.batchId || !order.orderCommitment) return acc;
+        if (!["proving", "settling", "settled_pending_output", "no_fill"].includes(order.status)) return acc;
+        if (privateReportSyncedBatches.current.has(order.batchId)) return acc;
+        if (privateReportRequestsInFlight.current.has(order.batchId)) return acc;
+        const proofStatus = proofStatuses[order.batchId];
+        if (proofStatus?.state !== "confirmed-onchain") return acc;
+        const existing = acc[order.batchId] ?? { batch_id: order.batchId, order_commitments: [] };
+        existing.order_commitments.push(order.orderCommitment);
+        acc[order.batchId] = existing;
+        return acc;
+      }, {}),
+    );
+    if (requests.length === 0) return;
+    requests.forEach(request => privateReportRequestsInFlight.current.add(request.batch_id));
+    let cancelled = false;
+    async function syncReports() {
+      const reports = await w!.syncPrivateSettlementReports(requests)
+        .catch(() => [] as PrivateSettlementReportForApp[]);
+      if (cancelled) return;
+      const successfulBatchIds = new Set(reports.map(report => report.batch_id));
+      for (const batchId of successfulBatchIds) {
+        privateReportSyncedBatches.current.add(batchId);
+      }
+      requests.forEach(request => {
+        if (!successfulBatchIds.has(request.batch_id)) {
+          privateReportRequestsInFlight.current.delete(request.batch_id);
+        }
+      });
+      if (reports.length === 0) return;
+      const reportByOrder = new Map<string, { report: PrivateSettlementReportForApp; execution: PrivateExecutionReportForApp }>();
+      for (const report of reports as PrivateSettlementReportForApp[]) {
+        for (const execution of report.order_execution_reports ?? []) {
+          reportByOrder.set(normalizeFeltForComparison(execution.order_commitment), { report, execution });
+        }
+      }
+      let changed = false;
+      const nextOrders = orders.map(order => {
+        const matched = reportByOrder.get(normalizeFeltForComparison(order.orderCommitment));
+        if (!matched) return order;
+        const pair = pairs.find(candidate => candidate.pair_id === matched.report.pair_id);
+        if (!pair) return order;
+        const filledAtomic = BigInt(matched.execution.filled_amount || "0");
+        const unfilledAtomic = BigInt(matched.execution.unfilled_amount || "0");
+        const clearingPrice = formatClearingPrice({
+          batchId: matched.report.batch_id,
+          epochId: matched.report.batch_epoch,
+          clearingPrice: matched.execution.execution_price || matched.report.clearing_price,
+          priceBaseScale: matched.report.price_base_scale,
+        }, pair);
+        if (filledAtomic <= 0n) {
+          if (order.status === "no_fill" && order.clearingPrice === clearingPrice) return order;
+          changed = true;
+          return { ...order, status: "no_fill" as LocalOrderStatus, clearingPrice };
+        }
+        const nextStatus: LocalOrderStatus = unfilledAtomic > 0n ? "partial" : "filled";
+        const filledAmount = fromAtomicStr(filledAtomic.toString(), pair.base_asset_id);
+        if (
+          order.status === nextStatus &&
+          order.clearingPrice === clearingPrice &&
+          order.filledAmount === filledAmount
+        ) {
+          return order;
+        }
+        changed = true;
+        return {
+          ...order,
+          status: nextStatus,
+          clearingPrice,
+          filledAmount,
+        };
+      });
+      if (changed) {
+        saveAndSet(nextOrders);
+        setBalanceTick(value => value + 1);
+      } else if (reports.some(report => report.output_recovery_records?.length)) {
+        setBalanceTick(value => value + 1);
+      }
+    }
+    void syncReports();
+    return () => { cancelled = true; };
+  }, [orders, pairs, proofStatuses, saveAndSet, walletReady]);
+
   // Balance polling
   const [balanceTick, setBalanceTick] = useState(0);
   useEffect(() => {
     if (!walletReady) return;
-    const refresh = async () => {
+    let cancelled = false;
+    const refreshDeposits = async () => {
       const w = walletRuntime();
       if (w?.isReady()) {
-        await w.refreshPrivateState?.().catch(() => undefined);
+        const changed = await w.refreshDepositState?.().catch(() => false);
+        if (!cancelled && changed) setBalanceTick(v => v + 1);
       }
-      setBalanceTick(v => v + 1);
     };
-    void refresh();
-    const t = setInterval(() => { void refresh(); }, 5000);
-    return () => clearInterval(t);
+    const refreshSettlementOutputs = async () => {
+      const w = walletRuntime();
+      if (w?.isReady()) {
+        const changed = await w.syncSettlementOutputs?.().catch(() => false);
+        if (!cancelled && changed) setBalanceTick(v => v + 1);
+      }
+    };
+    void refreshDeposits();
+    void refreshSettlementOutputs();
+    const depositTimer = setInterval(() => { void refreshDeposits(); }, 5_000);
+    const settlementTimer = setInterval(() => { void refreshSettlementOutputs(); }, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(depositTimer);
+      clearInterval(settlementTimer);
+    };
   }, [walletReady]);
 
   const wallet = walletRuntime();
@@ -1040,47 +1183,51 @@ export default function App() {
         )}
 
         {workspace === "taker" && tab === "reports" && (
-          <ReportsScreen
-            orders={orders}
-            strategies={strategies}
-            walletReady={walletReady}
-            activeEpochId={activeBatch?.epoch_id ?? null}
-            batchWindowMs={coordinatorStatus?.batch_window_ms ?? null}
-          />
+          <Suspense fallback={<div className="empty-zone"><div className="empty-mark">—</div><div className="empty-body">Loading reports</div></div>}>
+            <ReportsScreen
+              orders={orders}
+              strategies={strategies}
+              walletReady={walletReady}
+              activeEpochId={activeBatch?.epoch_id ?? null}
+              batchWindowMs={coordinatorStatus?.batch_window_ms ?? null}
+            />
+          </Suspense>
         )}
 
         {workspace === "liquidity" && (
-          <LiquidityWorkspace
-            tab={liquidityTab}
-            pairs={pairs}
-            activePairId={liquidityPairId}
-            setActivePairId={setLiquidityPairId}
-            orders={orders}
-            strategies={strategies}
-            batches={batches}
-            balances={balances}
-            pendingDeposits={pendingDeposits}
-            withdrawableNotes={withdrawableNotes}
-            settlementTranscripts={settlementTranscripts}
-            walletReady={walletReady}
-            submitting={submitting}
-            submitError={submitError}
-            onPreviewFunding={handleFundingPreview}
-            onSubmitCurve={handleSubmit}
-            onCancelOrder={order => { void handleCancelOrder(order); }}
-            onPauseStrategy={handlePauseStrategy}
-            onResumeStrategy={handleResumeStrategy}
-            onRefreshStrategyPackage={handleRefreshStrategyPackage}
-            onDeposit={(asset) => {
-              if (asset) setSlideAsset(asset);
-              setOpenSlide("deposit");
-            }}
-            onWithdraw={(asset) => {
-              if (asset) setSlideAsset(asset);
-              setOpenSlide("withdraw");
-            }}
-            onNavigateCurves={() => changeLiquidityTab("curves")}
-          />
+          <Suspense fallback={<div className="empty-zone"><div className="empty-mark">—</div><div className="empty-body">Loading liquidity</div></div>}>
+            <LiquidityWorkspace
+              tab={liquidityTab}
+              pairs={pairs}
+              activePairId={liquidityPairId}
+              setActivePairId={setLiquidityPairId}
+              orders={orders}
+              strategies={strategies}
+              batches={batches}
+              balances={balances}
+              pendingDeposits={pendingDeposits}
+              withdrawableNotes={withdrawableNotes}
+              settlementTranscripts={settlementTranscripts}
+              walletReady={walletReady}
+              submitting={submitting}
+              submitError={submitError}
+              onPreviewFunding={handleFundingPreview}
+              onSubmitCurve={handleSubmit}
+              onCancelOrder={order => { void handleCancelOrder(order); }}
+              onPauseStrategy={handlePauseStrategy}
+              onResumeStrategy={handleResumeStrategy}
+              onRefreshStrategyPackage={handleRefreshStrategyPackage}
+              onDeposit={(asset) => {
+                if (asset) setSlideAsset(asset);
+                setOpenSlide("deposit");
+              }}
+              onWithdraw={(asset) => {
+                if (asset) setSlideAsset(asset);
+                setOpenSlide("withdraw");
+              }}
+              onNavigateCurves={() => changeLiquidityTab("curves")}
+            />
+          </Suspense>
         )}
       </main>
 

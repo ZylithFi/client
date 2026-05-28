@@ -19,6 +19,8 @@ export function zylith_wallet_create_recovery_snapshot(input_json: string): stri
 
 export function zylith_wallet_decrypt_maker_attribution_artifact(seed_hex: string, artifact_json: string): string;
 
+export function zylith_wallet_decrypt_output_recovery_record(seed_hex: string, batch_id: string, output_index: number, record_json: string, expected_output_note_root: string): string;
+
 export function zylith_wallet_decrypt_recovery_artifact(seed_hex: string, artifact_json: string): string;
 
 export function zylith_wallet_derive_public_config(seed_hex: string): string;
@@ -28,6 +30,8 @@ export function zylith_wallet_generate_mnemonic(): string;
 export function zylith_wallet_generate_seed_hex(): string;
 
 export function zylith_wallet_mnemonic_to_seed_hex(phrase: string): string;
+
+export function zylith_wallet_output_recovery_key_tags(seed_hex: string, batch_id: string, max_output_count: number): string;
 
 export function zylith_wallet_recovery_auth_tag(seed_hex: string): string;
 
@@ -49,11 +53,13 @@ export interface InitOutput {
     readonly zylith_wallet_build_withdrawal_submission_plan: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_create_recovery_snapshot: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_decrypt_maker_attribution_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly zylith_wallet_decrypt_output_recovery_record: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly zylith_wallet_decrypt_recovery_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly zylith_wallet_derive_public_config: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_generate_mnemonic: () => [number, number, number, number];
     readonly zylith_wallet_generate_seed_hex: () => [number, number];
     readonly zylith_wallet_mnemonic_to_seed_hex: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_output_recovery_key_tags: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly zylith_wallet_recovery_auth_tag: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_scan_output_bundle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly zylith_wallet_scan_output_bundle_with_root: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

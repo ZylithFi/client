@@ -9,9 +9,9 @@ import "@fontsource/ibm-plex-mono/500.css";
 import App from "./App";
 import "./globals.css";
 import { installOfflineRenewalOperatorRuntime } from "./offlineRenewalOperator";
-import { installConfiguredZylithWalletRuntime } from "./zylithWalletRuntime";
 
-void installConfiguredZylithWalletRuntime();
+void import("./zylithWalletRuntime")
+  .then(module => module.installConfiguredZylithWalletRuntime());
 installOfflineRenewalOperatorRuntime();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

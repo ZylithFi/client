@@ -95,6 +95,9 @@ type WalletRuntime = {
   previewFundingNotes: (order: PrivateOrderDraft) => FundingPreview;
   scanNotes: () => Promise<void>;
   refreshPrivateState: () => Promise<void>;
+  refreshDepositState: () => Promise<boolean>;
+  syncSettlementOutputs: () => Promise<boolean>;
+  syncPrivateSettlementReports: (requests: PrivateSettlementReportRequest[]) => Promise<PrivateSettlementReport[]>;
   submitDepositViaWallet: (asset: string, amount: string) => Promise<{
     transaction_hash: string;
     note_commitment: string;
@@ -167,6 +170,18 @@ type WalletWasmModule = {
   zylith_wallet_scan_output_bundle_with_root: (
     seedHex: string,
     bundleJson: string,
+    expectedOutputNoteRoot: string,
+  ) => string;
+  zylith_wallet_output_recovery_key_tags: (
+    seedHex: string,
+    batchId: string,
+    maxOutputCount: number,
+  ) => string;
+  zylith_wallet_decrypt_output_recovery_record: (
+    seedHex: string,
+    batchId: string,
+    outputIndex: number,
+    recordJson: string,
     expectedOutputNoteRoot: string,
   ) => string;
   zylith_wallet_recovery_auth_tag: (seedHex: string) => string;
@@ -308,6 +323,77 @@ type PublishedBatchArtifactList = {
     published_at_unix_ms?: number;
     settled_at_unix_ms?: number | null;
   }>;
+};
+
+type ProofJobStatus = {
+  batch_id: string;
+  state?: string;
+  failure?: string | null;
+};
+
+type PrivateSettlementReportRequest = {
+  batch_id: string;
+  order_commitments?: string[];
+};
+
+type PrivateOrderExecutionReport = {
+  batch_id: string;
+  pair_id: string;
+  order_commitment: string;
+  status: string;
+  side: Side;
+  submitted_amount: string;
+  filled_amount: string;
+  unfilled_amount: string;
+  limit_price: string;
+  execution_price?: string | null;
+  fee_amount: string;
+  output_note_commitment?: string | null;
+  output_asset_id?: string | null;
+  output_amount: string;
+  residual_note_commitment?: string | null;
+  residual_asset_id?: string | null;
+  residual_amount: string;
+};
+
+type PrivateSettlementReport = {
+  batch_id: string;
+  pair_id: string;
+  batch_epoch: number;
+  settled_at_unix_ms: number;
+  output_note_root: string;
+  clearing_price: string;
+  price_base_scale: string;
+  matched_order_count: number;
+  output_recovery_records: Array<{
+    output_index: number;
+    recovery: unknown;
+  }>;
+  order_execution_reports: PrivateOrderExecutionReport[];
+};
+
+type OutputRecoveryKeyTagList = {
+  key_tags: string[];
+};
+
+type OwnedOutputNotePayload = {
+  version: number;
+  batch_id: string;
+  output_index: number;
+  note: LocalNoteRecord["note"];
+  output_note: {
+    note_commitment?: string;
+    asset_id?: string;
+    amount?: string;
+    withdraw_authority?: string;
+  };
+  output_proof?: unknown;
+};
+
+type WalletScanState = {
+  version: 1;
+  scanned_artifact_ids: string[];
+  private_report_batch_ids: string[];
 };
 
 type IngressResponse = {
@@ -591,10 +677,18 @@ const PBKDF2_ITERATIONS = 310_000;
 const VAULT_KEY = "zylith.wallet.vault.v1";
 const NOTES_PREFIX = "zylith.wallet.notes.v1:";
 const STRATEGIES_PREFIX = "zylith.wallet.strategies.v1:";
+const SCAN_STATE_PREFIX = "zylith.wallet.scan-state.v1:";
 const STARKNET_PRIVACY_REGISTRY_PREFIX = "zylith.wallet.starknet-privacy-registry.v1:";
 const STRATEGY_WORKER_INTERVAL_MS = 12_000;
 const PRIVATE_SUBMISSION_MAX_DELAY_MS = 7_000;
 const BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
+const LATEST_EPOCH_CACHE_TTL_MS = 15_000;
+const PRIVATE_REPORT_OUTPUT_TAG_COUNT = boundedInteger(
+  import.meta.env.VITE_ZYLITH_PRIVATE_REPORT_OUTPUT_TAG_COUNT,
+  128,
+  8,
+  512,
+);
 const MAX_STRATEGY_CHILDREN = boundedInteger(
   import.meta.env.VITE_ZYLITH_MAX_STRATEGY_CHILDREN,
   86_400,
@@ -638,6 +732,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   let recoverySyncInFlight = false;
   let privacyWarmupInFlight = false;
   let lastRecoverySnapshotAtUnixMs = 0;
+  let scanState: WalletScanState = {
+    version: 1,
+    scanned_artifact_ids: [],
+    private_report_batch_ids: [],
+  };
+  let latestEpochCache: { value: number | null; expiresAt: number } | null = null;
 
   function requireUnlocked() {
     if (!seedHex || !publicConfig) {
@@ -713,6 +813,41 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     localStorage.setItem(`${STRATEGIES_PREFIX}${localStateScope()}`, JSON.stringify(encrypted));
   }
 
+  async function loadScanState() {
+    if (!seedHex || !publicConfig) {
+      scanState = { version: 1, scanned_artifact_ids: [], private_report_batch_ids: [] };
+      return;
+    }
+    const key = `${SCAN_STATE_PREFIX}${localStateScope()}`;
+    const stored = readJson<EncryptedLocalStore>(key);
+    if (!stored) {
+      scanState = { version: 1, scanned_artifact_ids: [], private_report_batch_ids: [] };
+      return;
+    }
+    try {
+      const decoded = await decryptLocalStore<Partial<WalletScanState>>(
+        stored,
+        seedHex,
+        publicConfig.account_id,
+        "scan-state",
+      );
+      scanState = {
+        version: 1,
+        scanned_artifact_ids: uniqueStrings(decoded.scanned_artifact_ids),
+        private_report_batch_ids: uniqueStrings(decoded.private_report_batch_ids),
+      };
+    } catch {
+      quarantineLocalStore(key);
+      scanState = { version: 1, scanned_artifact_ids: [], private_report_batch_ids: [] };
+    }
+  }
+
+  async function saveScanState() {
+    if (!seedHex || !publicConfig) return;
+    const encrypted = await encryptLocalStore(scanState, seedHex, publicConfig.account_id, "scan-state");
+    localStorage.setItem(`${SCAN_STATE_PREFIX}${localStateScope()}`, JSON.stringify(encrypted));
+  }
+
   async function loadStarknetPrivacySdkRegistry(): Promise<PrivateRegistry | undefined> {
     const unlocked = requireUnlocked();
     const key = `${STARKNET_PRIVACY_REGISTRY_PREFIX}${localStateScope()}`;
@@ -749,6 +884,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     deploymentScope = await resolveDeploymentScope();
     await loadNotes();
     await loadStrategies();
+    await loadScanState();
     void warmUpStarknetPrivacyFundingForDeployment().catch(() => undefined);
     await refreshDepositConfirmations().catch(() => false);
     await syncRecoveryArtifacts({ pushSnapshot: false }).catch(() => false);
@@ -877,14 +1013,20 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     deploymentScope = "unbound";
     notes = [];
     strategies = [];
+    scanState = { version: 1, scanned_artifact_ids: [], private_report_batch_ids: [] };
+    latestEpochCache = null;
   }
 
   async function scanNotes() {
     const { seedHex: unlockedSeed } = requireUnlocked();
     if (!indexerUrl) return;
     const artifacts = await fetchVisibleArtifacts();
+    let notesChanged = false;
+    let scanStateChanged = false;
+    const scannedArtifactIds = new Set(scanState.scanned_artifact_ids);
     for (const artifact of artifacts) {
       if (!artifact.settled_at_unix_ms) continue;
+      if (scannedArtifactIds.has(artifact.batch_id)) continue;
       const bundle = await fetchOutputBundle(artifact.batch_id);
       if (!bundle) continue;
       const scanned = JSON.parse(
@@ -923,16 +1065,108 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           output_proof: scannedNote.output_proof,
           maker_attribution: attributionByOutput.get(scannedNote.note_commitment),
         });
+        notesChanged = true;
       }
+      scannedArtifactIds.add(artifact.batch_id);
+      scanStateChanged = true;
     }
-    await saveNotes();
-    await pushRecoverySnapshot(false);
+    if (scanStateChanged) {
+      scanState.scanned_artifact_ids = [...scannedArtifactIds].slice(-512);
+      await saveScanState();
+    }
+    if (notesChanged) {
+      await saveNotes();
+      await pushRecoverySnapshot(false);
+    }
   }
 
   async function refreshPrivateState() {
-    await refreshDepositConfirmations().catch(() => false);
-    await pruneUnsettledSettlementOutputs().catch(() => false);
+    await refreshDepositState();
+    await syncSettlementOutputs();
+  }
+
+  async function refreshDepositState() {
+    return refreshDepositConfirmations().catch(() => false);
+  }
+
+  async function syncSettlementOutputs() {
+    const pruned = await pruneUnsettledSettlementOutputs().catch(() => false);
     await scanNotes();
+    return pruned;
+  }
+
+  async function syncPrivateSettlementReports(requests: PrivateSettlementReportRequest[]) {
+    const { seedHex: unlockedSeed, publicConfig: unlockedConfig } = requireUnlocked();
+    if (!coordinatorUrl || requests.length === 0) return [];
+    const reports: PrivateSettlementReport[] = [];
+    let notesChanged = false;
+    let scanStateChanged = false;
+    const syncedBatchIds = new Set(scanState.private_report_batch_ids);
+    for (const request of requests) {
+      const batchId = request.batch_id?.trim();
+      if (!batchId) continue;
+      const keyTags = JSON.parse(
+        core.zylith_wallet_output_recovery_key_tags(
+          unlockedSeed,
+          batchId,
+          PRIVATE_REPORT_OUTPUT_TAG_COUNT,
+        ),
+      ) as OutputRecoveryKeyTagList;
+      const report = await postJson<PrivateSettlementReport>(
+        coordinatorUrl,
+        `/api/recovery/${encodeURIComponent(unlockedConfig.account_id)}/settlement-reports/${encodeURIComponent(batchId)}`,
+        {
+          output_recovery_key_tags: keyTags.key_tags,
+          order_commitments: uniqueStrings(request.order_commitments),
+        },
+        recoveryHeaders(unlockedSeed),
+      ).catch(() => null);
+      if (!report) continue;
+      reports.push(report);
+      for (const record of report.output_recovery_records ?? []) {
+        try {
+          const payload = JSON.parse(
+            core.zylith_wallet_decrypt_output_recovery_record(
+              unlockedSeed,
+              report.batch_id,
+              record.output_index,
+              JSON.stringify(record.recovery),
+              report.output_note_root,
+            ),
+          ) as OwnedOutputNotePayload;
+          if (!payload.output_note?.note_commitment) continue;
+          const noteCommitment = normalizeNoteCommitment(payload.output_note.note_commitment);
+          if (notes.some((note) => normalizeFeltForComparison(note.note_commitment) === normalizeFeltForComparison(noteCommitment))) {
+            continue;
+          }
+          notes.push({
+            note_commitment: noteCommitment,
+            deployment_scope: deploymentScope,
+            batch_id: report.batch_id,
+            source: "settlement_output",
+            note: payload.note,
+            output_note: payload.output_note,
+            output_proof: payload.output_proof,
+          });
+          notesChanged = true;
+        } catch {
+          // A report may include recovery slots that do not decrypt under the current wallet after rotation.
+        }
+      }
+      if (!syncedBatchIds.has(report.batch_id)) {
+        syncedBatchIds.add(report.batch_id);
+        scanStateChanged = true;
+      }
+    }
+    if (scanStateChanged) {
+      scanState.private_report_batch_ids = [...syncedBatchIds].slice(-512);
+      await saveScanState();
+    }
+    if (notesChanged) {
+      await saveNotes();
+      await pushRecoverySnapshot(false);
+    }
+    return reports;
   }
 
   async function syncRecoveryArtifacts(options: { pushSnapshot?: boolean } = {}) {
@@ -1361,7 +1595,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         if (leftAmount > rightAmount) return 1;
         return left.note_commitment.localeCompare(right.note_commitment);
       });
-    const selected = smallestSufficientNoteSet(candidates, required);
+    const selected = smallestSufficientNoteSet(candidates, required, "balanced");
     if (selected.length === 0) return false;
     for (const note of selected) {
       note.spent = true;
@@ -2370,6 +2604,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     previewFundingNotes,
     scanNotes,
     refreshPrivateState,
+    refreshDepositState,
+    syncSettlementOutputs,
+    syncPrivateSettlementReports,
     submitDepositViaWallet,
     submitPrivateOrder,
     cancelPrivateOrder,
@@ -2424,16 +2661,31 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function pruneUnsettledSettlementOutputs() {
-    if (!indexerUrl || notes.length === 0) return false;
-    const artifacts = await fetchAllVisibleArtifacts();
-    const settledBatchIds = new Set(
-      artifacts
-        .filter(artifact => artifact.settled_at_unix_ms)
-        .map(artifact => artifact.batch_id),
+    if (notes.length === 0) return false;
+    const pendingSettlementBatchIds = uniqueStrings(
+      notes
+        .filter(record => record.source === "settlement_output" && record.batch_id)
+        .map(record => record.batch_id),
     );
+    if (pendingSettlementBatchIds.length === 0) return false;
+    const syncedBatchIds = new Set(scanState.private_report_batch_ids);
+    const removableBatchIds = new Set<string>();
+    await Promise.all(
+      pendingSettlementBatchIds.map(async (batchId) => {
+        if (syncedBatchIds.has(batchId)) return;
+        const status = await fetchJson<ProofJobStatus>(
+          proverUrl,
+          `/api/public/proof-jobs/${encodeURIComponent(batchId)}`,
+        ).catch(() => null);
+        if (!status?.failure) return;
+        removableBatchIds.add(batchId);
+      }),
+    );
+    if (removableBatchIds.size === 0) return false;
     const nextNotes = notes.filter(record =>
       record.source !== "settlement_output" ||
-      (record.batch_id !== undefined && settledBatchIds.has(record.batch_id)),
+      !record.batch_id ||
+      !removableBatchIds.has(record.batch_id),
     );
     if (nextNotes.length === notes.length) return false;
     notes = nextNotes;
@@ -2443,6 +2695,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function fetchLatestEpoch() {
+    const now = Date.now();
+    if (latestEpochCache && latestEpochCache.expiresAt > now) {
+      return latestEpochCache.value;
+    }
     const pairIds = await enabledPairIds();
     const batches = await Promise.all(
       pairIds.map(fetchCurrentPairBatch),
@@ -2450,7 +2706,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const epochs = batches
       .map((batch) => batch?.epoch_id)
       .filter((epoch): epoch is number => typeof epoch === "number");
-    return epochs.length > 0 ? Math.max(...epochs) : null;
+    const value = epochs.length > 0 ? Math.max(...epochs) : null;
+    latestEpochCache = { value, expiresAt: now + LATEST_EPOCH_CACHE_TTL_MS };
+    return value;
   }
 
   async function fetchCurrentPairBatch(pair: string) {
@@ -2672,7 +2930,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         if (leftAmount > rightAmount) return 1;
         return left.note_commitment.localeCompare(right.note_commitment);
       });
-    const selected = smallestSufficientNoteSet(candidates, required);
+    const selected = smallestSufficientNoteSet(
+      candidates,
+      required,
+      draft.submissionTimingPreference ?? "balanced",
+    );
     if (selected.length === 0) {
       throw new Error(`No unlocked ${asset} note can fund this order`);
     }
@@ -2804,7 +3066,11 @@ function fundingRequirement(draft: PrivateOrderDraft) {
   return quoteAmountForBase(amount, parseRawAmount(draft.limitPrice, "limit price"), priceBaseScale);
 }
 
-function smallestSufficientNoteSet(candidates: LocalNoteRecord[], required: bigint) {
+function smallestSufficientNoteSet(
+  candidates: LocalNoteRecord[],
+  required: bigint,
+  preference: SubmissionTimingPreference = "balanced",
+) {
   if (required <= 0n) return [];
   const boundedCandidates = candidates.slice(0, 32);
   let best: LocalNoteRecord[] = [];
@@ -2814,12 +3080,16 @@ function smallestSufficientNoteSet(candidates: LocalNoteRecord[], required: bigi
   function consider(selection: LocalNoteRecord[], total: bigint) {
     if (total < required) return;
     const nonStandardCount = selection.filter(record => !isStandardNoteAmount(record)).length;
-    if (
-      bestTotal === null ||
-      total < bestTotal ||
-      (total === bestTotal && selection.length < best.length) ||
-      (total === bestTotal && selection.length === best.length && nonStandardCount > bestNonStandardCount)
-    ) {
+    const shouldReplace = preference === "fast"
+      ? bestTotal === null ||
+        selection.length < best.length ||
+        (selection.length === best.length && total < bestTotal) ||
+        (selection.length === best.length && total === bestTotal && nonStandardCount > bestNonStandardCount)
+      : bestTotal === null ||
+        total < bestTotal ||
+        (total === bestTotal && selection.length < best.length) ||
+        (total === bestTotal && selection.length === best.length && nonStandardCount > bestNonStandardCount);
+    if (shouldReplace) {
       best = [...selection];
       bestTotal = total;
       bestNonStandardCount = nonStandardCount;
@@ -2829,7 +3099,10 @@ function smallestSufficientNoteSet(candidates: LocalNoteRecord[], required: bigi
   function search(start: number, selection: LocalNoteRecord[], total: bigint) {
     consider(selection, total);
     if (selection.length >= MAX_ORDER_FUNDING_INPUTS || start >= boundedCandidates.length) return;
-    if (bestTotal !== null && total >= bestTotal) return;
+    if (bestTotal !== null && preference !== "fast" && total >= bestTotal) return;
+    if (bestTotal !== null && preference === "fast" && selection.length >= best.length && total >= bestTotal) {
+      return;
+    }
     for (let index = start; index < boundedCandidates.length; index += 1) {
       const note = boundedCandidates[index];
       search(index + 1, [...selection, note], total + BigInt(note.note.amount));
@@ -3127,6 +3400,16 @@ function normalizeFeltForComparison(value: string | undefined | null) {
     const hex = normalized.startsWith("0x") ? normalized.slice(2) : normalized;
     return `0x${hex.replace(/^0+/, "") || "0"}`;
   }
+}
+
+function uniqueStrings(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(
+    values
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  )];
 }
 
 function selectedDepositFundingRail(deployment: DeploymentConfig): DepositFundingRail {
