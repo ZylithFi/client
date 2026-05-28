@@ -58,6 +58,22 @@ export type SubmitPrivacyBridgeDepositInput = {
   plan: PrivacyBridgeDepositPlan;
 };
 
+export type WarmUpStarknetPrivacyFundingInput = {
+  seedHex: string;
+  chainId: string;
+  rpcUrl: string;
+  privacyPoolAddress: string;
+  tokenAddresses: string[];
+  paymasterUrl?: string;
+  privacyProofSignerClassHash?: string;
+  minProvingDelayBlocks: number;
+};
+
+export type WarmUpStarknetPrivacyFundingResult = {
+  signerAddress: string;
+  approvalTransactionHashes: string[];
+};
+
 export type SubmitPrivacyBridgeDepositResult = {
   transactionHash: string;
   sdkRegistry: PrivateRegistry;
@@ -77,11 +93,51 @@ export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
 const STARK_FIELD_PRIME =
   3618502788666131213697322783095070105623107215331596699973092056135872020481n;
 const STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS = 10;
-const STARKNET_PRIVACY_MIN_PROOF_DELAY_BLOCKS = 20;
+const STARKNET_PRIVACY_ADAPTIVE_PROOF_DELAY_START_BLOCKS = 8;
 const STARKNET_PRIVACY_PROOF_DELAY_RETRY_BLOCKS = 8;
 const STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS = 3;
 const STARKNET_PRIVACY_REPLAY_GUARD_ATOMS = 1n;
 const STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT = (1n << 128n) - 1n;
+
+export async function warmUpStarknetPrivacyFunding(
+  input: WarmUpStarknetPrivacyFundingInput,
+): Promise<WarmUpStarknetPrivacyFundingResult> {
+  if (!input.paymasterUrl || !input.privacyProofSignerClassHash) {
+    throw new Error("Starknet Privacy signer warmup is not configured");
+  }
+  const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
+  const delayBlocks = Math.max(
+    input.minProvingDelayBlocks,
+    STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS,
+  );
+  const account = await createEmbeddedPrivacyProofAccount({
+    seedHex: input.seedHex,
+    rpcProvider,
+    paymasterUrl: input.paymasterUrl,
+    privacyProofSignerClassHash: input.privacyProofSignerClassHash,
+    minProvingDelayBlocks: delayBlocks,
+  });
+  const approvalTransactionHashes: string[] = [];
+  for (const tokenAddress of [...new Set(input.tokenAddresses.map(normalizeAddress).filter(Boolean))]) {
+    const txHash = await ensureReusablePrivacyPoolApproval({
+      rpcProvider,
+      account,
+      chainId: input.chainId,
+      tokenAddress,
+      privacyPoolAddress: input.privacyPoolAddress,
+      paymasterUrl: input.paymasterUrl,
+      allowanceThreshold: STARKNET_PRIVACY_REPLAY_GUARD_ATOMS,
+    });
+    if (txHash) approvalTransactionHashes.push(txHash);
+  }
+  if (approvalTransactionHashes.length > 0) {
+    await waitForTransactionsAndProvingDelay(rpcProvider, approvalTransactionHashes, delayBlocks);
+  }
+  return {
+    signerAddress: account.address,
+    approvalTransactionHashes,
+  };
+}
 
 export async function submitPrivacyBridgeDeposit(
   input: SubmitPrivacyBridgeDepositInput,
@@ -95,10 +151,7 @@ export async function submitPrivacyBridgeDeposit(
     input.minProvingDelayBlocks,
     STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS,
   );
-  const baseProofDelayBlocks = Math.max(
-    input.minProvingDelayBlocks,
-    STARKNET_PRIVACY_MIN_PROOF_DELAY_BLOCKS,
-  );
+  const baseProofDelayBlocks = STARKNET_PRIVACY_ADAPTIVE_PROOF_DELAY_START_BLOCKS;
   const sdkDepositAmount = input.plan.amount + STARKNET_PRIVACY_REPLAY_GUARD_ATOMS;
   const account = await runFundingStage(
     "Starknet Privacy signer setup failed",
@@ -390,49 +443,15 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     )
   );
   if (allowance < input.amount) {
-    if (!input.paymasterUrl) {
-      throw new Error("Starknet Privacy paymaster is required for proof signer approval");
-    }
-    const paymasterUrl = input.paymasterUrl;
-    const approveCall: Call = {
-      contractAddress: input.tokenAddress,
-      entrypoint: "approve",
-      calldata: [input.privacyPoolAddress, ...u256Calldata(STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT)],
-    };
-    const nonce = randomFelt();
-    const relayHash = privacyProofSignerRelayHash(
-      input.chainId,
-      input.account.address,
-      [approveCall],
-      nonce,
-    );
-    const signature = ec.starkCurve.sign(relayHash, input.account.privateKey);
-    const response = await withFundingSetupStep("requesting embedded signer approval relay", () =>
-      fetch(paymasterPrivacySignerRelayUrl(paymasterUrl), {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          account_address: input.account.address,
-          calls: [{
-            contract_address: approveCall.contractAddress,
-            entrypoint: approveCall.entrypoint,
-            calldata: approveCall.calldata ?? [],
-          }],
-          nonce,
-          signature_r: `0x${signature.r.toString(16)}`,
-          signature_s: `0x${signature.s.toString(16)}`,
-        }),
-      })
-    );
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(text || `Privacy paymaster rejected signer approval with HTTP ${response.status}`);
-    }
-    const json = await response.json() as { transaction_hash?: string; transactionHash?: string };
-    const txHash = json.transaction_hash ?? json.transactionHash;
+    const txHash = await ensureReusablePrivacyPoolApproval({
+      rpcProvider: input.rpcProvider,
+      account: input.account,
+      chainId: input.chainId,
+      tokenAddress: input.tokenAddress,
+      privacyPoolAddress: input.privacyPoolAddress,
+      paymasterUrl: input.paymasterUrl,
+      allowanceThreshold: input.amount,
+    });
     if (!txHash) {
       throw new Error("Privacy paymaster did not return an approval transaction hash");
     }
@@ -450,6 +469,71 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
         ),
     );
   }
+}
+
+async function ensureReusablePrivacyPoolApproval(input: {
+  rpcProvider: RpcProvider;
+  account: EmbeddedPrivacyProofAccount;
+  chainId: string;
+  tokenAddress: string;
+  privacyPoolAddress: string;
+  paymasterUrl?: string;
+  allowanceThreshold: bigint;
+}) {
+  if (!input.paymasterUrl) {
+    throw new Error("Starknet Privacy paymaster is required for proof signer approval");
+  }
+  const allowance = await readTokenAllowance(
+    input.rpcProvider,
+    input.tokenAddress,
+    input.account.address,
+    input.privacyPoolAddress,
+  );
+  if (allowance >= input.allowanceThreshold) return null;
+  const approveCall: Call = {
+    contractAddress: input.tokenAddress,
+    entrypoint: "approve",
+    calldata: [
+      input.privacyPoolAddress,
+      ...u256Calldata(STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT),
+    ],
+  };
+  const nonce = randomFelt();
+  const relayHash = privacyProofSignerRelayHash(
+    input.chainId,
+    input.account.address,
+    [approveCall],
+    nonce,
+  );
+  const signature = ec.starkCurve.sign(relayHash, input.account.privateKey);
+  const response = await fetch(paymasterPrivacySignerRelayUrl(input.paymasterUrl), {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      account_address: input.account.address,
+      calls: [{
+        contract_address: approveCall.contractAddress,
+        entrypoint: approveCall.entrypoint,
+        calldata: approveCall.calldata ?? [],
+      }],
+      nonce,
+      signature_r: `0x${signature.r.toString(16)}`,
+      signature_s: `0x${signature.s.toString(16)}`,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `Privacy paymaster rejected signer approval with HTTP ${response.status}`);
+  }
+  const json = await response.json() as { transaction_hash?: string; transactionHash?: string };
+  const txHash = json.transaction_hash ?? json.transactionHash;
+  if (!txHash) {
+    throw new Error("Privacy paymaster did not return an approval transaction hash");
+  }
+  return txHash;
 }
 
 async function withFundingSetupStep<T>(step: string, operation: () => Promise<T>): Promise<T> {

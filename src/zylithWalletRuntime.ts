@@ -4,8 +4,15 @@ import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import type { MakerBandAttribution } from "./domain/shieldedBalances";
 import {
   submitPrivacyBridgeDeposit,
+  warmUpStarknetPrivacyFunding,
   type SubmitPrivacyBridgeDepositResult,
 } from "./integrations/starknetPrivacyFunding";
+import {
+  deserializeStarknetPrivacyRegistry,
+  serializeStarknetPrivacyRegistry,
+  type SerializedStarknetPrivacyRegistry,
+} from "./integrations/starknetPrivacyRegistry";
+import type { PrivateRegistry } from "@starkware-libs/starknet-privacy-sdk";
 
 type Side = "Buy" | "Sell";
 type OrderMode = "Limit" | "Maker Curve" | "TWAP" | "VWAP" | "Repeat" | "Resting";
@@ -574,6 +581,7 @@ const PBKDF2_ITERATIONS = 310_000;
 const VAULT_KEY = "zylith.wallet.vault.v1";
 const NOTES_PREFIX = "zylith.wallet.notes.v1:";
 const STRATEGIES_PREFIX = "zylith.wallet.strategies.v1:";
+const STARKNET_PRIVACY_REGISTRY_PREFIX = "zylith.wallet.starknet-privacy-registry.v1:";
 const STRATEGY_WORKER_INTERVAL_MS = 12_000;
 const PRIVATE_SUBMISSION_MAX_DELAY_MS = 7_000;
 const BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
@@ -618,6 +626,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   let strategyTimer: number | null = null;
   let strategyWorkerInFlight = false;
   let recoverySyncInFlight = false;
+  let privacyWarmupInFlight = false;
   let lastRecoverySnapshotAtUnixMs = 0;
 
   function requireUnlocked() {
@@ -694,12 +703,43 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     localStorage.setItem(`${STRATEGIES_PREFIX}${localStateScope()}`, JSON.stringify(encrypted));
   }
 
+  async function loadStarknetPrivacySdkRegistry(): Promise<PrivateRegistry | undefined> {
+    const unlocked = requireUnlocked();
+    const key = `${STARKNET_PRIVACY_REGISTRY_PREFIX}${localStateScope()}`;
+    const stored = readJson<EncryptedLocalStore>(key);
+    if (!stored) return undefined;
+    try {
+      const serialized = await decryptLocalStore<SerializedStarknetPrivacyRegistry>(
+        stored,
+        unlocked.seedHex,
+        unlocked.publicConfig.account_id,
+        "starknet-privacy-registry",
+      );
+      return deserializeStarknetPrivacyRegistry(serialized);
+    } catch {
+      quarantineLocalStore(key);
+      return undefined;
+    }
+  }
+
+  async function saveStarknetPrivacySdkRegistry(registry: PrivateRegistry) {
+    if (!seedHex || !publicConfig) return;
+    const encrypted = await encryptLocalStore(
+      serializeStarknetPrivacyRegistry(registry),
+      seedHex,
+      publicConfig.account_id,
+      "starknet-privacy-registry",
+    );
+    localStorage.setItem(`${STARKNET_PRIVACY_REGISTRY_PREFIX}${localStateScope()}`, JSON.stringify(encrypted));
+  }
+
   async function hydrateFromSeed(nextSeedHex: string) {
     seedHex = normalizeRecoverySeed(nextSeedHex);
     publicConfig = JSON.parse(core.zylith_wallet_derive_public_config(seedHex)) as WalletPublicConfig;
     deploymentScope = await resolveDeploymentScope();
     await loadNotes();
     await loadStrategies();
+    void warmUpStarknetPrivacyFundingForDeployment().catch(() => undefined);
     await refreshDepositConfirmations().catch(() => false);
     await syncRecoveryArtifacts({ pushSnapshot: false }).catch(() => false);
     await pruneUnsettledSettlementOutputs().catch(() => false);
@@ -707,6 +747,37 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     await pushRecoverySnapshot(false).catch(() => undefined);
     startStrategyWorker();
     return true;
+  }
+
+  async function warmUpStarknetPrivacyFundingForDeployment() {
+    if (privacyWarmupInFlight || !seedHex) return;
+    privacyWarmupInFlight = true;
+    try {
+      const deployment = await loadDeploymentConfig();
+      const fundingRail = selectedDepositFundingRail(deployment);
+      const privacyPoolAddress = requiredNonZeroFelt(fundingRail.privacyPool, "privacy_pool_address");
+      const chainId = requiredString(configuredChainId || deployment.chain_id, "chain_id");
+      const rpcUrl = requiredString(deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL, "rpc_url");
+      const paymasterUrl = fundingRail.paymasterUrl || configuredPaymasterUrl;
+      const tokenAddresses = Object.values(deployment.token_addresses ?? {})
+        .map((address) => normalizeText(address))
+        .filter((address): address is string => Boolean(address));
+      if (!paymasterUrl || !fundingRail.privacyProofSignerClassHash || tokenAddresses.length === 0) {
+        return;
+      }
+      await warmUpStarknetPrivacyFunding({
+        seedHex,
+        chainId,
+        rpcUrl,
+        privacyPoolAddress,
+        tokenAddresses,
+        paymasterUrl,
+        privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
+        minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
+      });
+    } finally {
+      privacyWarmupInFlight = false;
+    }
   }
 
   function parseRecoverySeedInput(value: string) {
@@ -975,6 +1046,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     await saveNotes();
     await pushRecoverySnapshot(true);
+    const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(() => undefined);
     const depositResult: SubmitPrivacyBridgeDepositResult = await submitPrivacyBridgeDeposit({
       provider: provider as never,
       seedHex: unlockedSeed,
@@ -989,6 +1061,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
       privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
       minProvingDelayBlocks: fundingRail.minProvingDelayBlocks ?? 20,
+      sdkRegistry,
       plan: {
         amount: totalDepositAmount,
         encodedArgs: {
@@ -1001,6 +1074,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         },
       },
     });
+    await saveStarknetPrivacySdkRegistry(depositResult.sdkRegistry).catch(() => undefined);
     const transactionHash = depositResult.transactionHash;
     for (const noteCommitment of noteCommitments) {
       const record = notes.find((entry) => entry.note_commitment === noteCommitment);

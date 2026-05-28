@@ -64,6 +64,11 @@ describe("deposit splitting", () => {
     expect(chunks.reduce((sum, chunk) => sum + chunk, 0n)).toBe(137n * USDC);
   });
 
+  it("keeps tiny deposits compact instead of fragmenting dust notes", () => {
+    expect(splitDepositAmount(2n * USDC, "USDC", 6)).toEqual([2n * USDC]);
+    expect(splitDepositAmount(4n * USDC, "USDC", 6)).toEqual([4n * USDC]);
+  });
+
   it("uses BTC-scale denominations for strkBTC", () => {
     const chunks = splitDepositAmount(BTC / 10n, "strkBTC", 8);
     expect(chunks).toEqual([
