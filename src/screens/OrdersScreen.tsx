@@ -4,6 +4,7 @@ import {
   type LocalOrderStatus,
   type PrivateStrategyChildSummary,
   type PrivateStrategySummary,
+  sameFelt,
   statusLabel,
   statusTone,
 } from "../domain/orderLifecycle";
@@ -49,7 +50,7 @@ function childLifecycle({
     ? withdrawableNotes.find(note =>
         note.source === "settlement_output" &&
         note.batch_id === child.batch_id &&
-        note.metadata_commitment === child.expected_output_metadata_commitment,
+        sameFelt(note.metadata_commitment, child.expected_output_metadata_commitment),
       )
     : null;
 

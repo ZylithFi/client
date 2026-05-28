@@ -115,6 +115,35 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("filled");
   });
 
+  it("matches output metadata commitments after felt normalization", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({
+        ordRef: "ORD-normalized",
+        status: "no_fill",
+        expectedOutputMetadataCommitment: "0x000abc",
+      })],
+      batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
+      settlementTranscripts: {
+        "batch-1": {
+          batch_id: "batch-1",
+          batch_epoch: 10,
+          clearing_price: "250000",
+          price_base_scale: "1000000000000000000",
+        },
+      },
+      withdrawableNotes: [{
+        source: "settlement_output",
+        batch_id: "batch-1",
+        asset: "STRK",
+        amount: "10000000000000000000",
+        metadata_commitment: "0xabc",
+      }],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("filled");
+  });
+
   it("fails old orders closed for many epochs into no_fill instead of leaving them settling", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ expectedOutputMetadataCommitment: undefined })],

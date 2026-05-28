@@ -172,6 +172,7 @@ export function useBatches(): { batches: BatchSummary[]; online: boolean | null 
 
 export function usePublicSettlementTranscripts(
   batches: BatchSummary[],
+  extraBatchIds: string[] = [],
 ): Record<string, PublicSettlementTranscript> {
   const [transcripts, setTranscripts] = useState<Record<string, PublicSettlementTranscript>>({});
   const latestEpoch = batches.reduce((max, batch) => Math.max(max, batch.epoch_id ?? 0), 0);
@@ -184,13 +185,17 @@ export function usePublicSettlementTranscripts(
     .map(b => b.batch_id)
     .sort()
     .join("|");
+  const extraKey = [...new Set(extraBatchIds)].filter(Boolean).sort().join("|");
 
   useEffect(() => {
-    if (!settledKey) return;
+    if (!settledKey && !extraKey) return;
     let cancelled = false;
 
     async function loadSettledTranscripts() {
-      const settledIds = settledKey.split("|").filter(Boolean);
+      const settledIds = [...new Set([
+        ...settledKey.split("|").filter(Boolean),
+        ...extraKey.split("|").filter(Boolean),
+      ])];
       if (settledIds.length === 0) return;
 
       const loaded = await Promise.all(
@@ -219,7 +224,7 @@ export function usePublicSettlementTranscripts(
     void loadSettledTranscripts();
     const t = setInterval(() => { void loadSettledTranscripts(); }, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [settledKey]);
+  }, [settledKey, extraKey]);
 
   return transcripts;
 }

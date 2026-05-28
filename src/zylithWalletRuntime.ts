@@ -139,6 +139,11 @@ type WalletRuntime = {
   settlePrivateOrderLock: (
     orderCommitment: string,
     outcome: "released" | "spent",
+    fundingFallback?: {
+      asset?: string;
+      amount?: string;
+      batchId?: string;
+    },
   ) => Promise<boolean>;
   createOfflineRenewalPackage: (order: PrivateOrderDraft) => Promise<OfflineRenewalPackage>;
   getOfflineRenewalPackages: () => OfflineRenewalPackage[];
@@ -1289,7 +1294,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return accepted;
   }
 
-  async function settlePrivateOrderLock(orderCommitment: string, outcome: "released" | "spent") {
+  async function settlePrivateOrderLock(
+    orderCommitment: string,
+    outcome: "released" | "spent",
+    fundingFallback?: { asset?: string; amount?: string; batchId?: string },
+  ) {
     requireUnlocked();
     const expectedOrderCommitment = normalizeFeltForComparison(orderCommitment);
     let changed = false;
@@ -1302,10 +1311,64 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         spent: outcome === "spent" ? true : note.spent,
       };
     });
+    if (!changed && outcome === "spent" && !spentFallbackAlreadyApplied(expectedOrderCommitment)) {
+      changed = markSpentByFundingFallback(fundingFallback);
+      if (changed) markSpentFallbackApplied(expectedOrderCommitment);
+    }
     if (!changed) return false;
     await saveNotes();
     await pushRecoverySnapshot(false);
     return true;
+  }
+
+  function markSpentByFundingFallback(fundingFallback?: { asset?: string; amount?: string; batchId?: string }) {
+    const asset = fundingFallback?.asset?.trim();
+    const amount = fundingFallback?.amount?.trim();
+    if (!asset || !amount) return false;
+    const required = parseHumanAmount(amount, asset);
+    if (required <= 0n) return false;
+    const candidates = notes
+      .filter((record) =>
+        !record.spent &&
+        !record.locked_by_order &&
+        record.note.asset_id === asset &&
+        (record.source !== "deposit" || record.deposit_confirmed === true) &&
+        !(record.source === "settlement_output" && record.batch_id === fundingFallback?.batchId),
+      )
+      .sort((left, right) => {
+        const leftAmount = BigInt(left.note.amount);
+        const rightAmount = BigInt(right.note.amount);
+        if (leftAmount < rightAmount) return -1;
+        if (leftAmount > rightAmount) return 1;
+        return left.note_commitment.localeCompare(right.note_commitment);
+      });
+    const selected = smallestSufficientNoteSet(candidates, required);
+    if (selected.length === 0) return false;
+    for (const note of selected) {
+      note.spent = true;
+      note.locked_by_order = undefined;
+    }
+    return true;
+  }
+
+  function spentFallbackKey(orderCommitment: string) {
+    return `zylith.spent-fallback.${localStateScope()}.${orderCommitment}`;
+  }
+
+  function spentFallbackAlreadyApplied(orderCommitment: string) {
+    try {
+      return localStorage.getItem(spentFallbackKey(orderCommitment)) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function markSpentFallbackApplied(orderCommitment: string) {
+    try {
+      localStorage.setItem(spentFallbackKey(orderCommitment), "1");
+    } catch {
+      /* noop */
+    }
   }
 
   async function submitRenewalParentCancelMarker(strategy: PrivateStrategyRecord) {
@@ -2988,6 +3051,15 @@ function parseOptionalRawAmount(value: string | undefined, label: string) {
   return parseRawAmount(value, label);
 }
 
+function parseHumanAmount(value: string, asset: string) {
+  const trimmed = value.trim();
+  if (!trimmed || !/^\d*(\.\d*)?$/.test(trimmed) || trimmed === ".") return 0n;
+  const decimals = assetDecimals(asset);
+  const [whole = "0", fractional = ""] = trimmed.split(".");
+  const fractionalAtomic = fractional.padEnd(decimals, "0").slice(0, decimals) || "0";
+  return (BigInt(whole || "0") * 10n ** BigInt(decimals)) + BigInt(fractionalAtomic);
+}
+
 function normalizeRecoverySeed(value: string) {
   const normalized = value.trim().replace(/^0x/i, "").replace(/\s+/g, "").toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(normalized)) {
@@ -3027,7 +3099,8 @@ function normalizeFeltForComparison(value: string | undefined | null) {
     return `0x${BigInt(trimmed).toString(16)}`;
   } catch {
     const normalized = trimmed.toLowerCase();
-    return normalized.startsWith("0x") ? normalized.replace(/^0x0+/, "0x") : `0x${normalized.replace(/^0+/, "")}`;
+    const hex = normalized.startsWith("0x") ? normalized.slice(2) : normalized;
+    return `0x${hex.replace(/^0+/, "") || "0"}`;
   }
 }
 

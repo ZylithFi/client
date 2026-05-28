@@ -266,7 +266,7 @@ export function reconcileOrderLifecycle({
       const exactOutput = order.expectedOutputMetadataCommitment
         ? (settlementOutputs.get(order.batchId) ?? [])
             .find(note =>
-              note.metadata_commitment === order.expectedOutputMetadataCommitment &&
+              sameFelt(note.metadata_commitment, order.expectedOutputMetadataCommitment) &&
               (!expectedOutputAsset || note.asset === expectedOutputAsset)
             )
         : null;
@@ -366,4 +366,21 @@ export function reconcileOrderLifecycle({
     }
     return order;
   });
+}
+
+export function sameFelt(left: string | undefined, right: string | undefined): boolean {
+  return normalizeFelt(left) === normalizeFelt(right);
+}
+
+function normalizeFelt(value: string | undefined): string {
+  if (!value) return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    return `0x${BigInt(trimmed).toString(16)}`;
+  } catch {
+    const normalized = trimmed.toLowerCase();
+    if (!normalized.startsWith("0x")) return `0x${normalized.replace(/^0+/, "") || "0"}`;
+    return `0x${normalized.slice(2).replace(/^0+/, "") || "0"}`;
+  }
 }

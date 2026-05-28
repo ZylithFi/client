@@ -205,7 +205,7 @@ export default function App() {
   const deployment = useDeployment();
   const coordinatorStatus = useCoordinatorStatus();
   const { batches, online } = useBatches();
-  const settlementTranscripts = usePublicSettlementTranscripts(batches);
+  const recentSettlementTranscripts = usePublicSettlementTranscripts(batches);
   const { runtimeStatus, walletReady, hasVault } = useWalletState();
 
   const pairs = useMemo(
@@ -227,8 +227,6 @@ export default function App() {
     }
     return acc;
   }, {});
-  const lastClearingPrices = lastClearingByPair(settlementTranscripts);
-
   useEffect(() => {
     configureAssetDecimals(deployment);
   }, [deployment]);
@@ -354,6 +352,16 @@ export default function App() {
   // Orders
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() => walletOrderOwnerKey(null));
   const [orders, setOrders] = useState<LocalOrder[]>(() => loadOrders(orderOwnerKey));
+  const orderBatchIds = useMemo(
+    () => Array.from(new Set(orders.map(order => order.batchId).filter(Boolean))),
+    [orders],
+  );
+  const orderSettlementTranscripts = usePublicSettlementTranscripts([], orderBatchIds);
+  const settlementTranscripts = useMemo(
+    () => ({ ...recentSettlementTranscripts, ...orderSettlementTranscripts }),
+    [orderSettlementTranscripts, recentSettlementTranscripts],
+  );
+  const lastClearingPrices = lastClearingByPair(settlementTranscripts);
   const activeProofBatchIds = useMemo(
     () => Array.from(new Set(
       orders
@@ -431,8 +439,13 @@ export default function App() {
       for (const next of updated) {
         const previous = orders.find(order => order.ordRef === next.ordRef);
         if (!previous || previous.status === next.status || !next.orderCommitment) continue;
+        const fundingFallback = {
+          asset: next.fundingAsset,
+          amount: next.fundingAmount,
+          batchId: next.batchId,
+        };
         if (SPENT_LOCK_STATUSES.has(next.status)) {
-          void w?.settlePrivateOrderLock?.(next.orderCommitment, "spent")
+          void w?.settlePrivateOrderLock?.(next.orderCommitment, "spent", fundingFallback)
             .finally(() => setBalanceTick(v => v + 1));
         }
         if (RELEASED_LOCK_STATUSES.has(next.status)) {
@@ -459,7 +472,11 @@ export default function App() {
       let changed = false;
       for (const order of terminalOrders) {
         const outcome = SPENT_LOCK_STATUSES.has(order.status) ? "spent" : "released";
-        changed = await w!.settlePrivateOrderLock(order.orderCommitment, outcome).catch(() => false) || changed;
+        changed = await w!.settlePrivateOrderLock(order.orderCommitment, outcome, {
+          asset: order.fundingAsset,
+          amount: order.fundingAmount,
+          batchId: order.batchId,
+        }).catch(() => false) || changed;
       }
       if (!cancelled && changed) setBalanceTick(v => v + 1);
     }
