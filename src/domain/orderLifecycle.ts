@@ -159,6 +159,10 @@ export function statusTone(s: LocalOrderStatus): string {
   return "danger";
 }
 
+function isPrivateReportTerminalStatus(status: LocalOrderStatus): boolean {
+  return status === "filled" || status === "partial" || status === "no_fill";
+}
+
 function ordersKey(ownerKey: string): string {
   return `${ORDERS_KEY_PREFIX}.${ownerKey}`;
 }
@@ -267,14 +271,17 @@ export function reconcileOrderLifecycle({
   return orders.map((order) => {
     const transcript = settlementTranscripts[order.batchId];
     const proofStatus = proofStatuses?.[order.batchId];
-    if (
-      ["cancelled", "rolled", "failed"].includes(order.status) ||
-      ((order.status === "proof_failed" || order.status === "stalled") && !transcript)
-    ) {
+    if (["cancelled", "rolled", "failed"].includes(order.status)) {
+      return order;
+    }
+    if ((order.status === "proof_failed" || order.status === "stalled") && !transcript && !proofStatus) {
       return order;
     }
     if (!transcript && proofStatus?.failure) {
       return { ...order, status: "proof_failed" as LocalOrderStatus };
+    }
+    if (!transcript && isPrivateReportTerminalStatus(order.status)) {
+      return order;
     }
     if (!transcript && proofStatus?.state === "confirmed-onchain") {
       if (proofStatus.matched_order_count === 0) {

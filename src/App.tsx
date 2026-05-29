@@ -35,6 +35,7 @@ import {
 import {
   type BatchSummary,
   type DeploymentConfig,
+  type PublicSettlementTranscript,
   apiCurrentPairBatch,
   lastClearingByPair,
   useBatches,
@@ -115,6 +116,7 @@ const ACTIVE_ORDER_STATUSES = new Set<LocalOrderStatus>([
 const PROOF_TRACKED_ORDER_STATUSES = new Set<LocalOrderStatus>([
   ...ACTIVE_ORDER_STATUSES,
   "no_fill",
+  "proof_failed",
   "stalled",
 ]);
 const PRIVATE_REPORT_RECOVERY_STATUSES = new Set<LocalOrderStatus>([
@@ -124,7 +126,14 @@ const PRIVATE_REPORT_RECOVERY_STATUSES = new Set<LocalOrderStatus>([
   "filled",
   "partial",
   "no_fill",
+  "proof_failed",
   "stalled",
+]);
+const PRIVATE_REPORT_RETRY_MS = 8_000;
+const PRIVATE_REPORT_READY_STATUSES = new Set<LocalOrderStatus>([
+  "settled_pending_output",
+  "filled",
+  "partial",
 ]);
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const LAST_LIQUIDITY_ROUTE_KEY = "zylith.nav.last_liquidity_route";
@@ -150,6 +159,7 @@ type PrivateSettlementReportForApp = {
   batch_id: string;
   pair_id: string;
   batch_epoch: number;
+  settled_at_unix_ms?: number;
   clearing_price: string;
   price_base_scale?: string;
   output_recovery_records?: unknown[];
@@ -223,6 +233,13 @@ function normalizeFeltForComparison(value: string | undefined | null): string {
     const hex = value.trim().toLowerCase().replace(/^0x/, "").replace(/^0+/, "");
     return `0x${hex || "0"}`;
   }
+}
+
+function privateReportOrderSyncKey(batchId: string | undefined | null, orderCommitment: string | undefined | null): string {
+  if (!batchId) return "";
+  const normalizedCommitment = normalizeFeltForComparison(orderCommitment);
+  if (!normalizedCommitment || normalizedCommitment === "0x0") return "";
+  return `${batchId}:${normalizedCommitment}`;
 }
 
 function useWalletState(): {
@@ -408,6 +425,10 @@ export default function App() {
   // Orders
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() => walletOrderOwnerKey(null));
   const [orders, setOrders] = useState<LocalOrder[]>(() => loadOrders(orderOwnerKey));
+  const ordersRef = useRef(orders);
+  useEffect(() => {
+    ordersRef.current = orders;
+  }, [orders]);
   const orderBatchIds = useMemo(
     () => Array.from(new Set(
       orders
@@ -418,9 +439,14 @@ export default function App() {
     [orders],
   );
   const orderSettlementTranscripts = usePublicSettlementTranscripts([], orderBatchIds);
-  const settlementTranscripts = useMemo(
+  const publicSettlementTranscripts = useMemo(
     () => ({ ...recentSettlementTranscripts, ...orderSettlementTranscripts }),
     [orderSettlementTranscripts, recentSettlementTranscripts],
+  );
+  const [privateSettlementTranscripts, setPrivateSettlementTranscripts] = useState<Record<string, PublicSettlementTranscript>>({});
+  const settlementTranscripts = useMemo(
+    () => ({ ...privateSettlementTranscripts, ...publicSettlementTranscripts }),
+    [privateSettlementTranscripts, publicSettlementTranscripts],
   );
   const lastClearingPrices = lastClearingByPair(settlementTranscripts);
   const activeProofBatchIds = useMemo(
@@ -434,14 +460,18 @@ export default function App() {
   );
   const proofStatuses = usePublicProofJobStatuses(activeProofBatchIds);
   const privateReportRequestsInFlight = useRef<Set<string>>(new Set());
-  const privateReportSyncedBatches = useRef<Set<string>>(new Set());
+  const privateReportSyncedOrders = useRef<Set<string>>(new Set());
+  const privateReportLastAttemptAt = useRef<Map<string, number>>(new Map());
+  const [privateReportRetryTick, setPrivateReportRetryTick] = useState(0);
   const saveAndSet = useCallback((next: LocalOrder[]) => {
+    ordersRef.current = next;
     setOrders(next);
     saveOrders(next, orderOwnerKey ?? walletOrderOwnerKey(deployment));
   }, [deployment, orderOwnerKey]);
   const prependAndSaveOrder = useCallback((order: LocalOrder) => {
     setOrders(previous => {
       const next = [order, ...previous];
+      ordersRef.current = next;
       saveOrders(next, orderOwnerKey ?? walletOrderOwnerKey(deployment));
       return next;
     });
@@ -451,41 +481,62 @@ export default function App() {
     const nextOwnerKey = walletReady ? walletOrderOwnerKey(deployment) : null;
     if (nextOwnerKey === orderOwnerKey) return;
     setOrderOwnerKey(nextOwnerKey);
-    setOrders(loadOrders(nextOwnerKey));
+    const loadedOrders = loadOrders(nextOwnerKey);
+    ordersRef.current = loadedOrders;
+    setOrders(loadedOrders);
     privateReportRequestsInFlight.current.clear();
-    privateReportSyncedBatches.current.clear();
+    privateReportSyncedOrders.current.clear();
+    privateReportLastAttemptAt.current.clear();
+    setPrivateSettlementTranscripts({});
   }, [deployment, walletReady, runtimeStatus, orderOwnerKey]);
 
   useEffect(() => {
     if (!walletReady || orders.length === 0 || pairs.length === 0) return;
     const w = walletRuntime();
     if (!w?.isReady() || !w.syncPrivateSettlementReports) return;
+    const reportAttemptNow = Date.now();
     const requests = Object.values(
       orders.reduce<Record<string, { batch_id: string; order_commitments: string[] }>>((acc, order) => {
         if (!order.batchId || !order.orderCommitment) return acc;
         if (!PRIVATE_REPORT_RECOVERY_STATUSES.has(order.status)) return acc;
-        if (privateReportSyncedBatches.current.has(order.batchId)) return acc;
+        const syncKey = privateReportOrderSyncKey(order.batchId, order.orderCommitment);
+        if (!syncKey || privateReportSyncedOrders.current.has(syncKey)) return acc;
         if (privateReportRequestsInFlight.current.has(order.batchId)) return acc;
+        const lastAttemptAt = privateReportLastAttemptAt.current.get(syncKey) ?? 0;
+        if (reportAttemptNow - lastAttemptAt < PRIVATE_REPORT_RETRY_MS) return acc;
         const proofStatus = proofStatuses[order.batchId];
+        const hasProofReportSignal = Boolean(
+          proofStatus?.state === "confirmed-onchain",
+        );
         const hasSettlementSignal =
-          proofStatus?.state === "confirmed-onchain" ||
+          hasProofReportSignal ||
           Boolean(settlementTranscripts[order.batchId]) ||
-          order.status === "filled" ||
-          order.status === "partial";
+          PRIVATE_REPORT_READY_STATUSES.has(order.status);
         if (!hasSettlementSignal) return acc;
         if (proofStatus?.state === "confirmed-onchain" && proofStatus.matched_order_count === 0) return acc;
         const existing = acc[order.batchId] ?? { batch_id: order.batchId, order_commitments: [] };
-        existing.order_commitments.push(order.orderCommitment);
+        if (!existing.order_commitments.some(commitment =>
+          normalizeFeltForComparison(commitment) === normalizeFeltForComparison(order.orderCommitment)
+        )) {
+          existing.order_commitments.push(order.orderCommitment);
+        }
         acc[order.batchId] = existing;
         return acc;
       }, {}),
     );
     if (requests.length === 0) return;
-    requests.forEach(request => privateReportRequestsInFlight.current.add(request.batch_id));
+    requests.forEach(request => {
+      privateReportRequestsInFlight.current.add(request.batch_id);
+      request.order_commitments.forEach(commitment => {
+        const syncKey = privateReportOrderSyncKey(request.batch_id, commitment);
+        if (syncKey) privateReportLastAttemptAt.current.set(syncKey, reportAttemptNow);
+      });
+    });
     let cancelled = false;
     async function syncReports() {
       const reports = await w!.syncPrivateSettlementReports(requests)
         .catch(() => [] as PrivateSettlementReportForApp[]);
+      requests.forEach(request => privateReportRequestsInFlight.current.delete(request.batch_id));
       if (cancelled) return;
       const requestedByBatch = new Map(
         requests.map(request => [
@@ -493,26 +544,45 @@ export default function App() {
           new Set(request.order_commitments.map(normalizeFeltForComparison)),
         ]),
       );
-      const successfulBatchIds = new Set(
-        reports
-          .filter(report => {
-            const requested = requestedByBatch.get(report.batch_id);
-            if (!requested || requested.size === 0) return false;
-            return (report.order_execution_reports ?? []).some(execution =>
-              requested.has(normalizeFeltForComparison(execution.order_commitment)),
-            );
-          })
-          .map(report => report.batch_id),
-      );
-      for (const batchId of successfulBatchIds) {
-        privateReportSyncedBatches.current.add(batchId);
-      }
-      requests.forEach(request => {
-        if (!successfulBatchIds.has(request.batch_id)) {
-          privateReportRequestsInFlight.current.delete(request.batch_id);
+      const successfulOrderKeys = new Set<string>();
+      for (const report of reports as PrivateSettlementReportForApp[]) {
+        const requested = requestedByBatch.get(report.batch_id);
+        if (!requested || requested.size === 0) continue;
+        for (const execution of report.order_execution_reports ?? []) {
+          const commitment = normalizeFeltForComparison(execution.order_commitment);
+          if (!requested.has(commitment)) continue;
+          const syncKey = privateReportOrderSyncKey(report.batch_id, execution.order_commitment);
+          if (syncKey) successfulOrderKeys.add(syncKey);
         }
-      });
+      }
+      successfulOrderKeys.forEach(syncKey => privateReportSyncedOrders.current.add(syncKey));
       if (reports.length === 0) return;
+      setPrivateSettlementTranscripts(prev => {
+        let changed = false;
+        const next = { ...prev };
+        for (const report of reports as PrivateSettlementReportForApp[]) {
+          const candidate: PublicSettlementTranscript = {
+            batch_id: report.batch_id,
+            pair_id: report.pair_id,
+            batch_epoch: report.batch_epoch,
+            clearing_price: report.clearing_price,
+            price_base_scale: report.price_base_scale,
+            settled_at_unix_ms: report.settled_at_unix_ms,
+            loaded_at_unix_ms: Date.now(),
+          };
+          const existing = next[report.batch_id];
+          if (
+            existing?.clearing_price === candidate.clearing_price &&
+            existing?.price_base_scale === candidate.price_base_scale &&
+            existing?.settled_at_unix_ms === candidate.settled_at_unix_ms
+          ) {
+            continue;
+          }
+          next[report.batch_id] = candidate;
+          changed = true;
+        }
+        return changed ? next : prev;
+      });
       const reportByOrder = new Map<string, { report: PrivateSettlementReportForApp; execution: PrivateExecutionReportForApp }>();
       for (const report of reports as PrivateSettlementReportForApp[]) {
         for (const execution of report.order_execution_reports ?? []) {
@@ -520,7 +590,7 @@ export default function App() {
         }
       }
       let changed = false;
-      const nextOrders = orders.map(order => {
+      const nextOrders = ordersRef.current.map(order => {
         const matched = reportByOrder.get(normalizeFeltForComparison(order.orderCommitment));
         if (!matched) return order;
         const pair = pairs.find(candidate => candidate.pair_id === matched.report.pair_id);
@@ -555,16 +625,38 @@ export default function App() {
           filledAmount,
         };
       });
-      if (changed) {
-        saveAndSet(nextOrders);
-        setBalanceTick(value => value + 1);
-      } else if (reports.length > 0) {
+      if (changed || reports.length > 0) {
+        if (changed) {
+          saveAndSet(nextOrders);
+        }
         setBalanceTick(value => value + 1);
       }
     }
     void syncReports();
     return () => { cancelled = true; };
-  }, [orders, pairs, proofStatuses, saveAndSet, settlementTranscripts, walletReady]);
+  }, [orders, pairs, privateReportRetryTick, proofStatuses, saveAndSet, settlementTranscripts, walletReady]);
+
+  useEffect(() => {
+    if (!walletReady || orders.length === 0) return;
+    const hasPendingPrivateReport = orders.some(order => {
+      if (!order.batchId || !order.orderCommitment) return false;
+      if (!PRIVATE_REPORT_RECOVERY_STATUSES.has(order.status)) return false;
+      const syncKey = privateReportOrderSyncKey(order.batchId, order.orderCommitment);
+      if (!syncKey || privateReportSyncedOrders.current.has(syncKey)) return false;
+      if (privateReportRequestsInFlight.current.has(order.batchId)) return false;
+      const proofStatus = proofStatuses[order.batchId];
+      return (
+        proofStatus?.state === "confirmed-onchain" ||
+        Boolean(settlementTranscripts[order.batchId]) ||
+        PRIVATE_REPORT_READY_STATUSES.has(order.status)
+      );
+    });
+    if (!hasPendingPrivateReport) return;
+    const retryTimer = setInterval(() => {
+      setPrivateReportRetryTick(value => value + 1);
+    }, PRIVATE_REPORT_RETRY_MS);
+    return () => clearInterval(retryTimer);
+  }, [orders, proofStatuses, settlementTranscripts, walletReady]);
 
   // Balance polling
   const [balanceTick, setBalanceTick] = useState(0);
@@ -578,21 +670,31 @@ export default function App() {
         if (!cancelled && changed) setBalanceTick(v => v + 1);
       }
     };
-    const refreshSettlementOutputs = async () => {
+    const refreshPublicArtifacts = async () => {
       const w = walletRuntime();
       if (w?.isReady()) {
-        const changed = await w.syncSettlementOutputs?.().catch(() => false);
+        const changed = await w.scanNotes?.().catch(() => false);
+        if (!cancelled && changed) setBalanceTick(v => v + 1);
+      }
+    };
+    const pruneStaleSettlementOutputs = async () => {
+      const w = walletRuntime();
+      if (w?.isReady()) {
+        const changed = await w.pruneUnsettledSettlementOutputs?.().catch(() => false);
         if (!cancelled && changed) setBalanceTick(v => v + 1);
       }
     };
     void refreshDeposits();
-    void refreshSettlementOutputs();
+    void refreshPublicArtifacts();
+    void pruneStaleSettlementOutputs();
     const depositTimer = setInterval(() => { void refreshDeposits(); }, 5_000);
-    const settlementTimer = setInterval(() => { void refreshSettlementOutputs(); }, 15_000);
+    const publicArtifactTimer = setInterval(() => { void refreshPublicArtifacts(); }, 30_000);
+    const pruneTimer = setInterval(() => { void pruneStaleSettlementOutputs(); }, 60_000);
     return () => {
       cancelled = true;
       clearInterval(depositTimer);
-      clearInterval(settlementTimer);
+      clearInterval(publicArtifactTimer);
+      clearInterval(pruneTimer);
     };
   }, [walletReady]);
 
@@ -1090,6 +1192,36 @@ export default function App() {
     }
   }
 
+  async function handleConsolidateNotes(plan: {
+    sourceNoteCommitments: string[];
+    targetAmounts: string[];
+  }) {
+    const w = walletRuntime();
+    if (!w || !w.isReady()) {
+      setSubmitError("Unlock Zylith wallet before consolidating notes.");
+      return;
+    }
+    try {
+      const result = await w.consolidateNotes(plan);
+      setPrivateSettlementTranscripts(prev => ({
+        ...prev,
+        [result.consolidation_id]: {
+          batch_id: result.consolidation_id,
+          pair_id: "CONSOLIDATION",
+          batch_epoch: 0,
+          clearing_price: "0",
+          price_base_scale: "1",
+          settled_at_unix_ms: result.settled_at_unix_ms ?? Date.now(),
+          loaded_at_unix_ms: Date.now(),
+        },
+      }));
+      setBalanceTick(v => v + 1);
+    } catch (error) {
+      setSubmitError(userFacingErrorMessage(error));
+      throw error;
+    }
+  }
+
   function toggleLiquidityWorkspace() {
     if (workspace === "liquidity") {
       navigatePath(sessionGet(LAST_TAKER_ROUTE_KEY, "/trade"));
@@ -1224,6 +1356,7 @@ export default function App() {
               setClaimNoteCommitment(note.note_commitment);
               setOpenSlide("withdraw");
             }}
+            onConsolidateNotes={handleConsolidateNotes}
             onConnectWallet={() => setOpenSlide("wallet")}
           />
         )}

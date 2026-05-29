@@ -388,6 +388,78 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("settled_pending_output");
   });
 
+  it("revives stalled orders when a delayed proof status confirms", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "stalled" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "confirmed-onchain",
+          matched_order_count: 2,
+        },
+      },
+      withdrawableNotes: [],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("settled_pending_output");
+  });
+
+  it("revives proof-failed orders when a delayed proof status confirms", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "proof_failed" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "confirmed-onchain",
+          matched_order_count: 2,
+        },
+      },
+      withdrawableNotes: [],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("settled_pending_output");
+  });
+
+  it("does not regress private report fills while public artifacts are delayed", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({
+        status: "filled",
+        clearingPrice: "0.0525",
+        filledAmount: "15",
+      })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "confirmed-onchain",
+          matched_order_count: 2,
+        },
+      },
+      withdrawableNotes: [],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("filled");
+    expect(updated[0].clearingPrice).toBe("0.0525");
+    expect(updated[0].filledAmount).toBe("15");
+  });
+
   it("releases confirmed zero-match batches before delayed artifacts publish", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],

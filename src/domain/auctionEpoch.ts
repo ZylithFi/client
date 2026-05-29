@@ -134,12 +134,41 @@ async function apiBatchTranscript(batchId: string): Promise<PublicSettlementTran
   return null;
 }
 
+async function apiBatchTranscripts(batchIds: string[]): Promise<PublicSettlementTranscript[]> {
+  if (batchIds.length === 0) return [];
+  const query = batchIds.map(encodeURIComponent).join(",");
+  const path = `/api/batches/transcripts?batch_ids=${query}`;
+  const bases = INDEXER_URL ? [COORDINATOR_URL, INDEXER_URL] : [COORDINATOR_URL];
+  for (const base of bases) {
+    try {
+      const r = await fetch(`${base}${path}`);
+      if (!r.ok) continue;
+      return r.json() as Promise<PublicSettlementTranscript[]>;
+    } catch {
+      continue;
+    }
+  }
+  const loaded = await Promise.all(batchIds.map(apiBatchTranscript));
+  return loaded.filter((transcript): transcript is PublicSettlementTranscript => Boolean(transcript));
+}
+
 async function apiProofJobStatus(batchId: string): Promise<PublicProofJobStatus | null> {
   if (!PROVER_URL) return null;
   const r = await fetch(`${PROVER_URL}/api/public/proof-jobs/${encodeURIComponent(batchId)}`);
   if (r.status === 404) return null;
   if (!r.ok) return null;
   return r.json() as Promise<PublicProofJobStatus>;
+}
+
+async function apiProofJobStatuses(batchIds: string[]): Promise<PublicProofJobStatus[]> {
+  if (!PROVER_URL || batchIds.length === 0) return [];
+  const query = batchIds.map(encodeURIComponent).join(",");
+  const r = await fetch(`${PROVER_URL}/api/public/proof-jobs?batch_ids=${query}`);
+  if (!r.ok) {
+    const loaded = await Promise.all(batchIds.map(apiProofJobStatus));
+    return loaded.filter((status): status is PublicProofJobStatus => Boolean(status));
+  }
+  return r.json() as Promise<PublicProofJobStatus[]>;
 }
 
 async function loadDeployment(): Promise<DeploymentConfig> {
@@ -191,35 +220,31 @@ export function usePublicSettlementTranscripts(
     .sort()
     .join("|");
   const extraKey = [...new Set(extraBatchIds)].filter(Boolean).sort().join("|");
+  const pendingKey = [
+    ...new Set([
+      ...settledKey.split("|").filter(Boolean),
+      ...extraKey.split("|").filter(Boolean),
+    ]),
+  ]
+    .filter(batchId => !transcripts[batchId])
+    .sort()
+    .join("|");
 
   useEffect(() => {
-    if (!settledKey && !extraKey) return;
+    if (!pendingKey) return;
     let cancelled = false;
 
     async function loadSettledTranscripts() {
-      const settledIds = [...new Set([
-        ...settledKey.split("|").filter(Boolean),
-        ...extraKey.split("|").filter(Boolean),
-      ])];
+      const settledIds = pendingKey.split("|").filter(Boolean);
       if (settledIds.length === 0) return;
 
-      const loaded = await Promise.all(
-        settledIds.map(async batchId => {
-          try {
-            const transcript = await apiBatchTranscript(batchId);
-            return transcript
-              ? [batchId, { ...transcript, loaded_at_unix_ms: Date.now() }] as const
-              : null;
-          } catch {
-            return null;
-          }
-        }),
-      );
+      const loaded = await apiBatchTranscripts(settledIds)
+        .catch(() => [] as PublicSettlementTranscript[]);
 
       if (cancelled) return;
       const next: Record<string, PublicSettlementTranscript> = {};
-      for (const entry of loaded) {
-        if (entry) next[entry[0]] = entry[1];
+      for (const transcript of loaded) {
+        next[transcript.batch_id] = { ...transcript, loaded_at_unix_ms: Date.now() };
       }
       if (Object.keys(next).length > 0) {
         setTranscripts(prev => ({ ...prev, ...next }));
@@ -229,7 +254,7 @@ export function usePublicSettlementTranscripts(
     void loadSettledTranscripts();
     const t = setInterval(() => { void loadSettledTranscripts(); }, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [settledKey, extraKey]);
+  }, [pendingKey]);
 
   return transcripts;
 }
@@ -238,7 +263,11 @@ export function usePublicProofJobStatuses(
   batchIds: string[],
 ): Record<string, PublicProofJobStatus> {
   const [statuses, setStatuses] = useState<Record<string, PublicProofJobStatus>>({});
-  const key = [...new Set(batchIds)].filter(Boolean).sort().join("|");
+  const key = [...new Set(batchIds)]
+    .filter(Boolean)
+    .filter(batchId => !isTerminalProofStatus(statuses[batchId]))
+    .sort()
+    .join("|");
 
   useEffect(() => {
     if (!key) return;
@@ -246,20 +275,11 @@ export function usePublicProofJobStatuses(
 
     async function loadStatuses() {
       const ids = key.split("|").filter(Boolean);
-      const loaded = await Promise.all(
-        ids.map(async batchId => {
-          try {
-            const status = await apiProofJobStatus(batchId);
-            return status ? [batchId, status] as const : null;
-          } catch {
-            return null;
-          }
-        }),
-      );
+      const loaded = await apiProofJobStatuses(ids).catch(() => [] as PublicProofJobStatus[]);
       if (cancelled) return;
       const next: Record<string, PublicProofJobStatus> = {};
-      for (const entry of loaded) {
-        if (entry) next[entry[0]] = entry[1];
+      for (const status of loaded) {
+        next[status.batch_id] = status;
       }
       if (Object.keys(next).length > 0) {
         setStatuses(prev => ({ ...prev, ...next }));
@@ -272,6 +292,12 @@ export function usePublicProofJobStatuses(
   }, [key]);
 
   return statuses;
+}
+
+function isTerminalProofStatus(status?: PublicProofJobStatus): boolean {
+  if (!status) return false;
+  if (status.failure) return true;
+  return ["confirmed-onchain", "failed", "cancelled"].includes(status.state);
 }
 
 export function useDeployment(): DeploymentConfig | null {

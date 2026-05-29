@@ -93,9 +93,11 @@ type WalletRuntime = {
   getWithdrawableNotes: () => WithdrawableNote[];
   getPrivateStrategies: () => PrivateStrategySummary[];
   previewFundingNotes: (order: PrivateOrderDraft) => FundingPreview;
-  scanNotes: () => Promise<void>;
+  consolidateNotes: (request: NoteConsolidationRequest) => Promise<NoteConsolidationResult>;
+  scanNotes: () => Promise<boolean>;
   refreshPrivateState: () => Promise<void>;
   refreshDepositState: () => Promise<boolean>;
+  pruneUnsettledSettlementOutputs: () => Promise<boolean>;
   syncSettlementOutputs: () => Promise<boolean>;
   syncPrivateSettlementReports: (requests: PrivateSettlementReportRequest[]) => Promise<PrivateSettlementReport[]>;
   submitDepositViaWallet: (asset: string, amount: string) => Promise<{
@@ -166,6 +168,8 @@ type WalletWasmModule = {
   zylith_wallet_build_private_order_submission: (inputJson: string) => string;
   zylith_wallet_build_strategy_parent: (inputJson: string) => string;
   zylith_wallet_build_renewal_parent_cancel_submission_plan: (inputJson: string) => string;
+  zylith_wallet_build_note_consolidation_draft: (inputJson: string) => string;
+  zylith_wallet_sign_note_consolidation_witness: (inputJson: string) => string;
   zylith_wallet_scan_output_bundle: (seedHex: string, bundleJson: string) => string;
   zylith_wallet_scan_output_bundle_with_root: (
     seedHex: string,
@@ -242,6 +246,20 @@ type WithdrawableNote = {
   pending_withdrawal_tx?: string;
   metadata_commitment: string;
   maker_attribution?: MakerBandAttribution;
+};
+
+type NoteConsolidationRequest = {
+  sourceNoteCommitments: string[];
+  targetAmounts: string[];
+};
+
+type NoteConsolidationResult = {
+  consolidation_id: string;
+  transaction_hash: string;
+  finality_status?: string;
+  execution_status?: string;
+  settled_at_unix_ms?: number;
+  output_note_commitments: string[];
 };
 
 type MakerAttributionArtifactList = {
@@ -766,7 +784,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         seedHex,
         publicConfig.account_id,
         "notes",
-      )).filter(record => record.deployment_scope === deploymentScope);
+      ))
+        .filter(record => record.deployment_scope === deploymentScope)
+        .map(normalizeLocalNoteRecord);
+      compactLocalNotes();
     } catch {
       quarantineLocalStore(key);
       notes = [];
@@ -775,6 +796,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   async function saveNotes() {
     if (!seedHex || !publicConfig) return;
+    compactLocalNotes();
     const encrypted = await encryptLocalStore(
       notes.map(note => ({ ...note, deployment_scope: deploymentScope })),
       seedHex,
@@ -1033,15 +1055,22 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   async function scanNotes() {
     const { seedHex: unlockedSeed } = requireUnlocked();
-    if (!indexerUrl) return;
+    if (!indexerUrl) return false;
     const artifacts = await fetchVisibleArtifacts();
     let notesChanged = false;
     let scanStateChanged = false;
     const scannedArtifactIds = new Set(scanState.scanned_artifact_ids);
-    for (const artifact of artifacts) {
-      if (!artifact.settled_at_unix_ms) continue;
-      if (scannedArtifactIds.has(artifact.batch_id)) continue;
-      const bundle = await fetchOutputBundle(artifact.batch_id);
+    const knownNoteCommitments = new Set(
+      notes.map((record) => normalizeFeltForComparison(record.note_commitment)),
+    );
+    const pendingArtifacts = artifacts.filter((artifact) =>
+      artifact.settled_at_unix_ms && !scannedArtifactIds.has(artifact.batch_id),
+    );
+    const fetchedBundles = await mapWithConcurrency(pendingArtifacts, 4, async (artifact) => ({
+      artifact,
+      bundle: await fetchOutputBundle(artifact.batch_id).catch(() => null),
+    }));
+    for (const { artifact, bundle } of fetchedBundles) {
       if (!bundle) continue;
       const scanned = JSON.parse(
         artifact.output_note_root
@@ -1066,7 +1095,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         scanned.notes,
       );
       for (const scannedNote of scanned.notes) {
-        if (notes.some((record) => record.note_commitment === scannedNote.note_commitment)) {
+        const normalizedCommitment = normalizeFeltForComparison(scannedNote.note_commitment);
+        if (knownNoteCommitments.has(normalizedCommitment)) {
           continue;
         }
         notes.push({
@@ -1079,6 +1109,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           output_proof: scannedNote.output_proof,
           maker_attribution: attributionByOutput.get(scannedNote.note_commitment),
         });
+        knownNoteCommitments.add(normalizedCommitment);
         notesChanged = true;
       }
       scannedArtifactIds.add(artifact.batch_id);
@@ -1090,8 +1121,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     if (notesChanged) {
       await saveNotes();
-      await pushRecoverySnapshot(false);
+      scheduleRecoverySnapshot(false);
     }
+    return notesChanged;
   }
 
   async function refreshPrivateState() {
@@ -1105,8 +1137,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   async function syncSettlementOutputs() {
     const pruned = await pruneUnsettledSettlementOutputs().catch(() => false);
-    await scanNotes();
-    return pruned;
+    const scanned = await scanNotes().catch(() => false);
+    return pruned || scanned;
   }
 
   async function syncPrivateSettlementReports(requests: PrivateSettlementReportRequest[]) {
@@ -1196,7 +1228,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     if (notesChanged) {
       await saveNotes();
-      await pushRecoverySnapshot(false);
+      scheduleRecoverySnapshot(false);
     }
     return reports;
   }
@@ -1219,6 +1251,106 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     } finally {
       recoverySyncInFlight = false;
     }
+  }
+
+  async function consolidateNotes(request: NoteConsolidationRequest): Promise<NoteConsolidationResult> {
+    const { seedHex: unlockedSeed } = requireUnlocked();
+    const sourceCommitments = request.sourceNoteCommitments
+      .map(normalizeFeltForComparison)
+      .filter((commitment): commitment is string => Boolean(commitment));
+    if (sourceCommitments.length < 2) {
+      throw new Error("Select at least two notes to consolidate");
+    }
+    const sourceSet = new Set(sourceCommitments);
+    const inputRecords = notes.filter((record) =>
+      sourceSet.has(normalizeFeltForComparison(record.note_commitment)) &&
+      !record.spent &&
+      !record.locked_by_order &&
+      !(record.source === "deposit" && record.deposit_confirmed !== true) &&
+      !record.pending_withdrawal_tx,
+    );
+    if (inputRecords.length !== sourceSet.size) {
+      throw new Error("One or more selected notes are no longer available");
+    }
+    const targetAmounts = request.targetAmounts
+      .map((amount) => amount.trim())
+      .filter(Boolean);
+    if (targetAmounts.length === 0) {
+      throw new Error("Consolidation target notes are missing");
+    }
+    const consolidationId = `consolidation-${Date.now()}-${randomFeltHex().slice(2, 14)}`;
+    const draft = JSON.parse(
+      core.zylith_wallet_build_note_consolidation_draft(
+        JSON.stringify({
+          seed_hex: unlockedSeed,
+          consolidation_id: consolidationId,
+          input_notes: inputRecords.map((record) => record.note),
+          target_amounts: targetAmounts,
+        }),
+      ),
+    ) as {
+      consolidation_id: string;
+      output_notes: unknown[];
+      output_note_preimages: LocalNoteRecord["note"][];
+      output_recovery_records: unknown[];
+      output_recovery_dummy_commitments: string[];
+      output_ciphertext_bundle_ref: string;
+      outputs: Array<{
+        batch_id: string;
+        note_commitment: string;
+        note: LocalNoteRecord["note"];
+        output_note: unknown;
+        output_proof: unknown;
+      }>;
+    };
+    const prepared = await postJson<{ witness: unknown }>(
+      proverUrl,
+      "/api/private/note-consolidations/prepare",
+      {
+        consolidation_id: consolidationId,
+        input_notes: inputRecords.map((record) => record.note),
+        output_notes: draft.output_notes,
+        output_note_preimages: draft.output_note_preimages,
+        output_recovery_records: draft.output_recovery_records,
+        output_recovery_dummy_commitments: draft.output_recovery_dummy_commitments,
+        output_ciphertext_bundle_ref: draft.output_ciphertext_bundle_ref,
+      },
+    );
+    const signedWitness = JSON.parse(
+      core.zylith_wallet_sign_note_consolidation_witness(
+        JSON.stringify({
+          seed_hex: unlockedSeed,
+          witness: prepared.witness,
+        }),
+      ),
+    );
+    const submitted = await postJson<NoteConsolidationResult>(
+      proverUrl,
+      "/api/private/note-consolidations/submit",
+      { witness: signedWitness },
+    );
+    if (String(submitted.execution_status ?? "").toUpperCase() === "REVERTED") {
+      throw new Error("Note consolidation transaction reverted");
+    }
+    const outputNotes = draft.outputs.map((output) => ({
+      note_commitment: normalizeNoteCommitment(output.note_commitment),
+      deployment_scope: deploymentScope,
+      batch_id: consolidationId,
+      source: "settlement_output" as const,
+      note: output.note,
+      output_note: output.output_note,
+      output_proof: output.output_proof,
+    }));
+    notes = notes.map((record) => {
+      if (!sourceSet.has(normalizeFeltForComparison(record.note_commitment))) return record;
+      return { ...record, locked_by_order: undefined, spent: true };
+    });
+    for (const output of outputNotes) {
+      mergeRecoveredNote(output);
+    }
+    await saveNotes();
+    await pushRecoverySnapshot(true).catch(() => false);
+    return submitted;
   }
 
   async function submitDepositViaWallet(asset: string, amount: string) {
@@ -1362,7 +1494,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       record.deposit_failure_reason = undefined;
     }
     await saveNotes();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     void (async () => {
       await waitForStarknetTransaction(transactionHash, deployment, "Private deposit");
       await refreshDepositConfirmations().catch(() => false);
@@ -1425,7 +1557,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     if (changed) {
       await saveNotes();
-      await pushRecoverySnapshot(false);
+      scheduleRecoverySnapshot(false);
     }
     return changed;
   }
@@ -1561,7 +1693,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         : note,
     );
     await saveNotes();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     return accepted;
   }
 
@@ -1602,7 +1734,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     if (!changed) return false;
     await saveNotes();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     return true;
   }
 
@@ -1717,7 +1849,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     );
     await saveNotes();
     await saveStrategies();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     return {
       cancelled_at_unix_ms: cancelledAt,
       parent_cancel_transaction_hash: parentCancel.transactionHash,
@@ -1735,7 +1867,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.status = "paused";
     strategy.updated_at_unix_ms = pausedAt;
     await saveStrategies();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     return { paused_at_unix_ms: pausedAt };
   }
 
@@ -1761,7 +1893,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.status = strategy.offline_package ? "delegated" : "active";
     strategy.updated_at_unix_ms = resumedAt;
     await saveStrategies();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     startStrategyWorker();
     if (strategy.status === "active") {
       await runStrategyWorkerOnce().catch(() => undefined);
@@ -1839,7 +1971,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.updated_at_unix_ms = Date.now();
     strategy.last_error = undefined;
     await saveStrategies();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     return true;
   }
 
@@ -1885,7 +2017,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       fundingNote.locked_by_order = acceptedOrderCommitment;
     }
     await saveNotes();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     return {
       order_commitment: acceptedOrderCommitment,
       cancellation_secret: built.cancellation_secret,
@@ -1973,7 +2105,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
     strategies.push(strategy);
     await saveStrategies();
-    await pushRecoverySnapshot(false);
+    scheduleRecoverySnapshot(false);
     startStrategyWorker();
     await runStrategyWorkerOnce();
     return {
@@ -2335,7 +2467,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         await materializeStrategyChildIfDue(strategy);
       }
       await saveStrategies();
-      await pushRecoverySnapshot(false);
+      scheduleRecoverySnapshot(false);
     } finally {
       strategyWorkerInFlight = false;
     }
@@ -2634,9 +2766,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     getWithdrawableNotes,
     getPrivateStrategies,
     previewFundingNotes,
+    consolidateNotes,
     scanNotes,
     refreshPrivateState,
     refreshDepositState,
+    pruneUnsettledSettlementOutputs,
     syncSettlementOutputs,
     syncPrivateSettlementReports,
     submitDepositViaWallet,
@@ -2730,6 +2864,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const now = Date.now();
     if (latestEpochCache && latestEpochCache.expiresAt > now) {
       return latestEpochCache.value;
+    }
+    const listedBatches = await fetchJson<BatchSummary[]>(coordinatorUrl, "/api/batches")
+      .catch(() => null);
+    if (Array.isArray(listedBatches) && listedBatches.length > 0) {
+      const epochs = listedBatches
+        .map((batch) => batch?.epoch_id)
+        .filter((epoch): epoch is number => typeof epoch === "number");
+      const value = epochs.length > 0 ? Math.max(...epochs) : null;
+      latestEpochCache = { value, expiresAt: now + LATEST_EPOCH_CACHE_TTL_MS };
+      return value;
     }
     const pairIds = await enabledPairIds();
     const batches = await Promise.all(
@@ -2868,38 +3012,51 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return true;
   }
 
+  function scheduleRecoverySnapshot(force: boolean) {
+    void pushRecoverySnapshot(force).catch(() => undefined);
+  }
+
   function recoveryHeaders(unlockedSeed: string) {
     return {
       "x-zylith-recovery-auth": core.zylith_wallet_recovery_auth_tag(unlockedSeed),
     };
   }
 
+  function compactLocalNotes() {
+    if (notes.length < 2) return false;
+    const compacted = new Map<string, LocalNoteRecord>();
+    let changed = false;
+    for (const rawNote of notes) {
+      const note = normalizeLocalNoteRecord(rawNote);
+      const key = normalizeFeltForComparison(note.note_commitment);
+      const existing = compacted.get(key);
+      if (!existing) {
+        compacted.set(key, note);
+        if (note !== rawNote || note.note_commitment !== rawNote.note_commitment) changed = true;
+        continue;
+      }
+      changed = mergeLocalNoteRecord(existing, note) || changed;
+      changed = true;
+    }
+    if (changed) {
+      notes = [...compacted.values()];
+    }
+    return changed;
+  }
+
   function mergeRecoveredNote(remoteNote: LocalNoteRecord) {
     if (!remoteNote?.note_commitment || !remoteNote.note) return false;
     if (remoteNote.deployment_scope !== deploymentScope) return false;
-    if (remoteNote.locked_by_order) {
-      remoteNote.locked_by_order = normalizeFeltForComparison(remoteNote.locked_by_order);
-    }
-    const existing = notes.find((note) => note.note_commitment === remoteNote.note_commitment);
+    const normalizedRemoteNote = normalizeLocalNoteRecord(remoteNote);
+    const remoteCommitment = normalizeFeltForComparison(normalizedRemoteNote.note_commitment);
+    const existing = notes.find((note) =>
+      normalizeFeltForComparison(note.note_commitment) === remoteCommitment
+    );
     if (!existing) {
-      notes.push(remoteNote);
+      notes.push(normalizedRemoteNote);
       return true;
     }
-    let changed = false;
-    if (remoteNote.spent && !existing.spent) {
-      existing.spent = true;
-      changed = true;
-    }
-    if (remoteNote.locked_by_order && !existing.locked_by_order) {
-      existing.locked_by_order = remoteNote.locked_by_order;
-      changed = true;
-    }
-    if (remoteNote.pending_withdrawal_tx && !existing.pending_withdrawal_tx) {
-      existing.pending_withdrawal_tx = remoteNote.pending_withdrawal_tx;
-      existing.withdrawal_requested_at_unix_ms = remoteNote.withdrawal_requested_at_unix_ms;
-      changed = true;
-    }
-    return changed;
+    return mergeLocalNoteRecord(existing, normalizedRemoteNote);
   }
 
   function mergeRecoveredStrategy(remoteStrategy: PrivateStrategyRecord) {
@@ -3104,7 +3261,7 @@ function smallestSufficientNoteSet(
   preference: SubmissionTimingPreference = "balanced",
 ) {
   if (required <= 0n) return [];
-  const boundedCandidates = candidates.slice(0, 32);
+  const boundedCandidates = fundingCandidateSearchPool(candidates, required);
   let best: LocalNoteRecord[] = [];
   let bestTotal: bigint | null = null;
   let bestNonStandardCount = -1;
@@ -3149,6 +3306,49 @@ function smallestSufficientNoteSet(
     if (leftAmount < rightAmount) return 1;
     return left.note_commitment.localeCompare(right.note_commitment);
   });
+}
+
+function fundingCandidateSearchPool(candidates: LocalNoteRecord[], required: bigint) {
+  if (candidates.length <= 48) return candidates;
+  const byCommitment = new Map<string, LocalNoteRecord>();
+  const add = (record: LocalNoteRecord) => {
+    byCommitment.set(normalizeFeltForComparison(record.note_commitment), record);
+  };
+  candidates.slice(0, 24).forEach(add);
+  candidates.slice(-24).forEach(add);
+  candidates
+    .filter((record) => BigInt(record.note.amount) >= required)
+    .slice(0, 16)
+    .forEach(add);
+  candidates
+    .filter((record) => !isStandardNoteAmount(record))
+    .slice(0, 16)
+    .forEach(add);
+  [...candidates]
+    .sort((left, right) => {
+      const leftDelta = absBigInt(BigInt(left.note.amount) - required);
+      const rightDelta = absBigInt(BigInt(right.note.amount) - required);
+      if (leftDelta < rightDelta) return -1;
+      if (leftDelta > rightDelta) return 1;
+      const leftAmount = BigInt(left.note.amount);
+      const rightAmount = BigInt(right.note.amount);
+      if (leftAmount < rightAmount) return -1;
+      if (leftAmount > rightAmount) return 1;
+      return left.note_commitment.localeCompare(right.note_commitment);
+    })
+    .slice(0, 24)
+    .forEach(add);
+  return [...byCommitment.values()].sort((left, right) => {
+    const leftAmount = BigInt(left.note.amount);
+    const rightAmount = BigInt(right.note.amount);
+    if (leftAmount < rightAmount) return -1;
+    if (leftAmount > rightAmount) return 1;
+    return left.note_commitment.localeCompare(right.note_commitment);
+  });
+}
+
+function absBigInt(value: bigint) {
+  return value < 0n ? -value : value;
 }
 
 function isStandardNoteAmount(record: LocalNoteRecord) {
@@ -3434,6 +3634,82 @@ function normalizeFeltForComparison(value: string | undefined | null) {
   }
 }
 
+function normalizeLocalNoteRecord(record: LocalNoteRecord): LocalNoteRecord {
+  return {
+    ...record,
+    note_commitment: normalizeFeltForComparison(record.note_commitment) || normalizeNoteCommitment(record.note_commitment),
+    locked_by_order: record.locked_by_order
+      ? normalizeFeltForComparison(record.locked_by_order)
+      : undefined,
+  };
+}
+
+function mergeLocalNoteRecord(existing: LocalNoteRecord, incoming: LocalNoteRecord): boolean {
+  let changed = false;
+  const normalizedIncoming = normalizeLocalNoteRecord(incoming);
+  const normalizedExistingCommitment =
+    normalizeFeltForComparison(existing.note_commitment) || existing.note_commitment;
+  if (existing.note_commitment !== normalizedExistingCommitment) {
+    existing.note_commitment = normalizedExistingCommitment;
+    changed = true;
+  }
+  if (normalizedIncoming.deployment_scope && existing.deployment_scope !== normalizedIncoming.deployment_scope) {
+    existing.deployment_scope = normalizedIncoming.deployment_scope;
+    changed = true;
+  }
+  if (normalizedIncoming.source === "settlement_output" && existing.source !== "settlement_output") {
+    existing.source = "settlement_output";
+    changed = true;
+  } else if (!existing.source && normalizedIncoming.source) {
+    existing.source = normalizedIncoming.source;
+    changed = true;
+  }
+  if (normalizedIncoming.batch_id && existing.batch_id !== normalizedIncoming.batch_id) {
+    existing.batch_id = normalizedIncoming.batch_id;
+    changed = true;
+  }
+  if (normalizedIncoming.output_note && !existing.output_note) {
+    existing.output_note = normalizedIncoming.output_note;
+    changed = true;
+  }
+  if (normalizedIncoming.output_proof && !existing.output_proof) {
+    existing.output_proof = normalizedIncoming.output_proof;
+    changed = true;
+  }
+  if (normalizedIncoming.maker_attribution && !existing.maker_attribution) {
+    existing.maker_attribution = normalizedIncoming.maker_attribution;
+    changed = true;
+  }
+  if (normalizedIncoming.pending_deposit_tx && !existing.pending_deposit_tx) {
+    existing.pending_deposit_tx = normalizedIncoming.pending_deposit_tx;
+    changed = true;
+  }
+  if (normalizedIncoming.deposit_confirmed && !existing.deposit_confirmed) {
+    existing.deposit_confirmed = true;
+    changed = true;
+  }
+  if (normalizedIncoming.deposit_failed && !existing.deposit_failed) {
+    existing.deposit_failed = true;
+    existing.deposit_failure_reason = normalizedIncoming.deposit_failure_reason;
+    changed = true;
+  }
+  if (normalizedIncoming.spent && !existing.spent) {
+    existing.spent = true;
+    existing.locked_by_order = undefined;
+    changed = true;
+  }
+  if (!existing.spent && normalizedIncoming.locked_by_order && !existing.locked_by_order) {
+    existing.locked_by_order = normalizedIncoming.locked_by_order;
+    changed = true;
+  }
+  if (normalizedIncoming.pending_withdrawal_tx && !existing.pending_withdrawal_tx) {
+    existing.pending_withdrawal_tx = normalizedIncoming.pending_withdrawal_tx;
+    existing.withdrawal_requested_at_unix_ms = normalizedIncoming.withdrawal_requested_at_unix_ms;
+    changed = true;
+  }
+  return changed;
+}
+
 function uniqueStrings(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
   return [...new Set(
@@ -3442,6 +3718,24 @@ function uniqueStrings(values: unknown): string[] {
       .map((value) => value.trim())
       .filter(Boolean),
   )];
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }));
+  return results;
 }
 
 function selectedDepositFundingRail(deployment: DeploymentConfig): DepositFundingRail {

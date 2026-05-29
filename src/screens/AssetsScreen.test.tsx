@@ -15,6 +15,7 @@ const baseProps = {
   onDeposit: vi.fn(),
   onWithdraw: vi.fn(),
   onClaimNote: vi.fn(),
+  onConsolidateNotes: vi.fn(),
   onConnectWallet: vi.fn(),
 };
 

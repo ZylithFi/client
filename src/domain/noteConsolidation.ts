@@ -13,7 +13,7 @@ export type NoteConsolidationPlan = {
   targetAmountDisplays: string[];
   targetNoteCount: number;
   reason: string;
-  executable: false;
+  executable: true;
 };
 
 export function noteConsolidationPlans(notes: WithdrawableNote[]): NoteConsolidationPlan[] {
@@ -52,7 +52,7 @@ function consolidationPlanForAsset(asset: string, notes: WithdrawableNote[]): No
     targetAmountDisplays: targetAmounts.map(amount => fromAtomicStr(amount.toString(), asset)),
     targetNoteCount: targetAmounts.length,
     reason: "Odd change and partial-fill notes can be merged into fewer standard denominations.",
-    executable: false,
+    executable: true,
   };
 }
 

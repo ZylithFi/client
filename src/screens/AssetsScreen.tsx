@@ -17,7 +17,7 @@ import {
   sumByAsset,
 } from "../domain/noteLifecycle";
 import { msToCountdown } from "../domain/uiFormat";
-import { noteConsolidationPlans } from "../domain/noteConsolidation";
+import { noteConsolidationPlans, type NoteConsolidationPlan } from "../domain/noteConsolidation";
 
 function fmtAddr(value?: string): string {
   if (!value) return "—";
@@ -65,6 +65,7 @@ export function AssetsScreen({
   starknetAddress,
   onDeposit,
   onClaimNote,
+  onConsolidateNotes,
 }: {
   allAssets: string[];
   depositableAssets: string[];
@@ -80,9 +81,12 @@ export function AssetsScreen({
   onDeposit: (asset?: string) => void;
   onWithdraw: (asset?: string, noteCommitment?: string) => void;
   onClaimNote: (note: WithdrawableNote) => void;
+  onConsolidateNotes: (plan: NoteConsolidationPlan) => Promise<void>;
   onConnectWallet: () => void;
 }) {
   const [now, setNow] = useState(Date.now());
+  const [consolidatingAsset, setConsolidatingAsset] = useState<string | null>(null);
+  const [consolidationError, setConsolidationError] = useState<string | null>(null);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -116,6 +120,18 @@ export function AssetsScreen({
     for (const note of recognizedSettlementOutputs) assets.add(note.asset);
     return [...assets];
   }, [allAssets, balances, pendingDeposits, recognizedSettlementOutputs]);
+
+  async function submitConsolidation(plan: NoteConsolidationPlan) {
+    setConsolidationError(null);
+    setConsolidatingAsset(plan.asset);
+    try {
+      await onConsolidateNotes(plan);
+    } catch (error) {
+      setConsolidationError(error instanceof Error ? error.message : "Note consolidation failed.");
+    } finally {
+      setConsolidatingAsset(null);
+    }
+  }
   if (!walletReady || !starknetAddress) {
     return (
       <div className="workspace-page">
@@ -303,6 +319,7 @@ export function AssetsScreen({
                   <th>Source amount</th>
                   <th>Target notes</th>
                   <th>Status</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -313,7 +330,19 @@ export function AssetsScreen({
                     <td className="num">{plan.sourceAmountDisplay}</td>
                     <td className="num">{plan.targetNoteCount}</td>
                     <td className="tca-muted-cell">
-                      Eligible for proved consolidation once the consolidation proving endpoint is enabled.
+                      {plan.reason}
+                      {consolidationError && (
+                        <div className="danger-text">{consolidationError}</div>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        className="table-action"
+                        disabled={consolidatingAsset !== null}
+                        onClick={() => { void submitConsolidation(plan); }}
+                      >
+                        {consolidatingAsset === plan.asset ? "Consolidating" : "Consolidate"}
+                      </button>
                     </td>
                   </tr>
                 ))}

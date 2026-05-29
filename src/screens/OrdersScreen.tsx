@@ -62,7 +62,7 @@ function childLifecycle({
     return { label: "No fill", tone: "warn", detail: "Batch settled without output" };
   }
   if (batchStatus === "Settled") {
-    return { label: "Output pending", tone: "info", detail: "Settlement confirmed; output report delayed" };
+    return { label: "Output pending", tone: "info", detail: "Settlement confirmed; private report pending" };
   }
   if (
     (batchStatus === "Closed" || batchStatus === "Proving" || batchStatus === "Clearing" || batchStatus === "Settling") &&

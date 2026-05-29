@@ -440,7 +440,7 @@ export function ReportsScreen({
             <div className="empty-mark">—</div>
             <div className="empty-body">
               {allOutputPending.length > 0
-                ? "Output reports pending. TCA appears after delayed outputs publish."
+                ? "Output reports pending. TCA appears after the private settlement report is available."
                 : "No fills yet. TCA appears after your first filled order."}
             </div>
           </div>

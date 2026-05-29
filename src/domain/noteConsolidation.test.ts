@@ -35,7 +35,7 @@ describe("note consolidation planning", () => {
     expect(plans[0].sourceNoteCount).toBe(8);
     expect(plans[0].sourceAmountDisplay).toBe("24");
     expect(plans[0].targetNoteCount).toBeLessThan(8);
-    expect(plans[0].executable).toBe(false);
+    expect(plans[0].executable).toBe(true);
   });
 
   it("ignores locked, spent, pending-withdrawal, and already standard notes", () => {

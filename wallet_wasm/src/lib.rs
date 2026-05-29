@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+use zylith_core::hash::tagged_field_hex;
 use zylith_core::{
     AssetId, BatchId, DepositIntent, DepositSubmissionPlan, EncryptedMakerAttributionArtifact,
-    Note, OrderCommitment, OrderIntent, OrderSubmission, OutputCiphertextBundle,
-    OutputNoteMerkleProof, OutputNoteRecord, OutputRecoveryRecord, PrivateExecutionKeyRegistry,
-    PrivateOrderPayload, RecoveryArtifact, RecoveryArtifactKind, RecoverySeed,
-    RenewalParentCancelPlanRequest, RenewalParentCancelSubmissionPlan,
+    Note, NoteConsolidationWitness, OrderCommitment, OrderIntent, OrderSubmission,
+    OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord, OutputRecoveryRecord,
+    PrivateExecutionKeyRegistry, PrivateOrderPayload, RecoveryArtifact, RecoveryArtifactKind,
+    RecoverySeed, RenewalParentCancelPlanRequest, RenewalParentCancelSubmissionPlan,
     SettlementOutputWithdrawalPlanRequest, SettlementOutputWithdrawalSubmissionPlan,
     SpendAuthorization, TrustedOrderIngressRequest, WithdrawalSubmissionPlan,
     build_deposit_submission_plan, build_order_submission,
@@ -14,14 +15,15 @@ use zylith_core::{
     create_recovery_artifact, decrypt_maker_attribution_artifact, decrypt_output_note_for_owner,
     decrypt_output_recovery_record, decrypt_recovery_artifact_payload, derive_account_id,
     derive_order_cancellation_secret, derive_recovery_auth_tag, derive_user_keys,
-    funding_input_set_commitment, funding_nullifier_set_commitment,
-    note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
-    output_note_metadata_commitment, output_recovery_key_tag_for_spend_authority,
-    renewal_cancel_auth_key_felt_from_raw_key_hex, renewal_cancel_authority_from_raw_key_hex,
-    renewal_parent_commitment, renewal_parent_secret_commitment, sign_order_authorization,
-    spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
-    verify_output_note_membership, withdraw_auth_key_felt_from_raw_key_hex,
-    withdraw_authority_from_raw_key_hex,
+    encrypt_output_note_for_owner, funding_input_set_commitment, funding_nullifier_set_commitment,
+    note_consolidation_commitment, note_recognition_public_key_from_raw_key_hex,
+    nullifier_from_note_secret, output_note_merkle_proof, output_note_metadata_commitment,
+    output_recovery_key_tag_for_spend_authority, renewal_cancel_auth_key_felt_from_raw_key_hex,
+    renewal_cancel_authority_from_raw_key_hex, renewal_parent_commitment,
+    renewal_parent_secret_commitment, sign_note_consolidation_authorization,
+    sign_order_authorization, spend_auth_key_felt_from_raw_key_hex,
+    spend_authority_from_raw_key_hex, verify_output_note_membership,
+    withdraw_auth_key_felt_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
 };
 
 #[wasm_bindgen(start)]
@@ -220,6 +222,208 @@ pub fn zylith_wallet_build_renewal_parent_cancel_submission_plan(
     })
     .map_err(js_error)?;
     to_json(&plan)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_build_note_consolidation_draft(input_json: &str) -> Result<String, JsValue> {
+    let request: BuildNoteConsolidationDraftRequest = from_json(input_json)?;
+    if request.input_notes.is_empty() {
+        return Err(js_error("note consolidation requires input notes"));
+    }
+    if request.target_amounts.is_empty() {
+        return Err(js_error("note consolidation requires target amounts"));
+    }
+    let target_amounts = request
+        .target_amounts
+        .iter()
+        .map(|amount| {
+            amount
+                .parse::<u128>()
+                .map_err(|error| js_error(format!("invalid target amount: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let owner_key_hex = hex::encode(keys.note_recognition_key);
+    let spend_key_hex = hex::encode(keys.spend_auth_key);
+    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let owner_public_key =
+        note_recognition_public_key_from_raw_key_hex(&owner_key_hex).map_err(js_error)?;
+    let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
+    let withdraw_authority =
+        withdraw_authority_from_raw_key_hex(&withdraw_key_hex).map_err(js_error)?;
+    let asset_id = request.input_notes[0].asset_id.clone();
+    let input_commitments = request
+        .input_notes
+        .iter()
+        .map(|note| {
+            if note.asset_id != asset_id {
+                return Err(js_error("note consolidation inputs must share an asset"));
+            }
+            if note.spend_authority != spend_authority {
+                return Err(js_error(
+                    "note consolidation inputs must be owned by this wallet",
+                ));
+            }
+            note.commitment()
+                .map(|commitment| commitment.0)
+                .map_err(js_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let input_total = request.input_notes.iter().try_fold(0_u128, |total, note| {
+        total
+            .checked_add(note.amount)
+            .ok_or_else(|| js_error("note consolidation input total overflows"))
+    })?;
+    let output_total = target_amounts.iter().try_fold(0_u128, |total, amount| {
+        if *amount == 0 {
+            return Err(js_error(
+                "note consolidation target amount must be non-zero",
+            ));
+        }
+        total
+            .checked_add(*amount)
+            .ok_or_else(|| js_error("note consolidation target total overflows"))
+    })?;
+    if input_total != output_total {
+        return Err(js_error(
+            "note consolidation input and target totals must match",
+        ));
+    }
+
+    let mut output_note_preimages = Vec::with_capacity(request.target_amounts.len());
+    let mut output_notes = Vec::with_capacity(request.target_amounts.len());
+    for (output_index, amount) in target_amounts.iter().enumerate() {
+        let blinding = tagged_field_hex(
+            "zylith/consolidation-output-blinding",
+            &serde_json::json!({
+                "account_id": derive_account_id(&seed),
+                "consolidation_id": request.consolidation_id.0,
+                "input_commitments": input_commitments,
+                "output_index": output_index,
+                "amount": amount,
+            }),
+        )
+        .map_err(js_error)?;
+        let metadata_commitment = tagged_field_hex(
+            "zylith/consolidation-output-metadata",
+            &serde_json::json!({
+                "consolidation_id": request.consolidation_id.0,
+                "output_index": output_index,
+                "asset_id": asset_id.0,
+                "amount": amount,
+                "spend_authority": spend_authority,
+                "withdraw_authority": withdraw_authority,
+            }),
+        )
+        .map_err(js_error)?;
+        let note = Note {
+            asset_id: asset_id.clone(),
+            amount: *amount,
+            owner_public_key: owner_public_key.clone(),
+            spend_authority: spend_authority.clone(),
+            withdraw_authority: withdraw_authority.clone(),
+            blinding,
+            nonce: output_index as u64,
+            metadata_commitment,
+        };
+        let output_note = OutputNoteRecord {
+            note_commitment: note.commitment().map_err(js_error)?,
+            asset_id: asset_id.clone(),
+            amount: *amount,
+            withdraw_authority: withdraw_authority.clone(),
+        };
+        output_note_preimages.push(note);
+        output_notes.push(output_note);
+    }
+
+    let mut ciphertexts = Vec::with_capacity(output_notes.len());
+    let mut outputs = Vec::with_capacity(output_notes.len());
+    for (output_index, (note, output_note)) in output_note_preimages
+        .iter()
+        .zip(output_notes.iter())
+        .enumerate()
+    {
+        let proof = output_note_merkle_proof(&output_notes, &output_note.note_commitment)
+            .map_err(js_error)?;
+        ciphertexts.push(
+            encrypt_output_note_for_owner(
+                &request.consolidation_id.0,
+                output_index,
+                note,
+                output_note,
+                &proof,
+                &owner_public_key,
+            )
+            .map_err(js_error)?,
+        );
+        outputs.push(ScannedNote {
+            batch_id: request.consolidation_id.clone(),
+            note_commitment: output_note.note_commitment.0.clone(),
+            note: note.clone(),
+            output_note: output_note.clone(),
+            output_proof: proof,
+        });
+    }
+
+    let output_bundle = OutputCiphertextBundle::from_ciphertexts(
+        request.consolidation_id.clone(),
+        format!(
+            "zylith-consolidation://{}/output-bundle",
+            request.consolidation_id.0
+        ),
+        ciphertexts,
+    )
+    .map_err(js_error)?;
+    let output_recovery_records = output_bundle
+        .ciphertexts
+        .iter()
+        .take(output_notes.len())
+        .map(|ciphertext| {
+            ciphertext
+                .recovery
+                .clone()
+                .ok_or_else(|| js_error("note consolidation output missing recovery record"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_recovery_dummy_commitments = output_bundle
+        .ciphertexts
+        .iter()
+        .skip(output_notes.len())
+        .map(|ciphertext| {
+            ciphertext
+                .recovery
+                .as_ref()
+                .map(|recovery| recovery.commitment.clone())
+                .ok_or_else(|| js_error("note consolidation dummy output missing recovery record"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    to_json(&BuildNoteConsolidationDraftResponse {
+        consolidation_id: request.consolidation_id,
+        input_notes: request.input_notes,
+        output_notes,
+        output_note_preimages,
+        output_recovery_records,
+        output_recovery_dummy_commitments,
+        output_ciphertext_bundle_ref: output_bundle.bundle_commitment.clone(),
+        output_bundle,
+        outputs,
+    })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_sign_note_consolidation_witness(input_json: &str) -> Result<String, JsValue> {
+    let request: SignNoteConsolidationWitnessRequest = from_json(input_json)?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let spend_key_felt = spend_auth_key_felt_from_raw_key_hex(&hex::encode(keys.spend_auth_key));
+    let mut witness = request.witness;
+    let consolidation_commitment = note_consolidation_commitment(&witness).map_err(js_error)?;
+    witness.spend_authorization =
+        sign_note_consolidation_authorization(&spend_key_felt, &consolidation_commitment)
+            .map_err(js_error)?;
+    to_json(&witness)
 }
 
 #[wasm_bindgen]
@@ -592,6 +796,34 @@ pub struct BuildRenewalParentCancelSubmissionPlanRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildNoteConsolidationDraftRequest {
+    pub seed_hex: String,
+    pub consolidation_id: BatchId,
+    pub input_notes: Vec<Note>,
+    #[serde(default)]
+    pub target_amounts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildNoteConsolidationDraftResponse {
+    pub consolidation_id: BatchId,
+    pub input_notes: Vec<Note>,
+    pub output_notes: Vec<OutputNoteRecord>,
+    pub output_note_preimages: Vec<Note>,
+    pub output_recovery_records: Vec<OutputRecoveryRecord>,
+    pub output_recovery_dummy_commitments: Vec<String>,
+    pub output_ciphertext_bundle_ref: String,
+    pub output_bundle: OutputCiphertextBundle,
+    pub outputs: Vec<ScannedNote>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignNoteConsolidationWitnessRequest {
+    pub seed_hex: String,
+    pub witness: NoteConsolidationWitness,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateRecoverySnapshotRequest {
     pub seed_hex: String,
     pub sequence: u64,
@@ -599,7 +831,7 @@ pub struct CreateRecoverySnapshotRequest {
     pub payload_json: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScannedNote {
     pub batch_id: BatchId,
     pub note_commitment: String,
@@ -608,12 +840,12 @@ pub struct ScannedNote {
     pub output_proof: OutputNoteMerkleProof,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScannedNoteList {
     pub notes: Vec<ScannedNote>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputRecoveryKeyTagList {
     pub key_tags: Vec<String>,
 }
@@ -652,20 +884,24 @@ fn _assert_wasm_return_types(
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildPrivateOrderSubmissionRequest, derive_public_config,
+        BuildNoteConsolidationDraftResponse, BuildPrivateOrderSubmissionRequest,
+        derive_public_config, zylith_wallet_build_note_consolidation_draft,
         zylith_wallet_build_private_order_submission, zylith_wallet_build_strategy_parent,
         zylith_wallet_create_recovery_snapshot, zylith_wallet_decrypt_recovery_artifact,
         zylith_wallet_generate_mnemonic, zylith_wallet_mnemonic_to_seed_hex,
         zylith_wallet_recovery_auth_tag, zylith_wallet_scan_output_bundle,
-        zylith_wallet_seed_hex_to_mnemonic,
+        zylith_wallet_seed_hex_to_mnemonic, zylith_wallet_sign_note_consolidation_witness,
     };
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use zylith_core::{
-        AssetId, BatchId, Note, NoteCommitment, Nullifier, OrderIntent, OrderSide, OrderType,
-        OutputCiphertextBundle, PairId, PrivateExecutionKeyPublicConfig,
-        PrivateExecutionKeyRegistry, RecoverySeed, RelayMode, TimeInForce, derive_user_keys,
-        encrypt_note_for_owner, note_recognition_public_key_from_raw_key_hex,
-        spend_authority_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
+        AssetId, BatchId, ConsumedInput, Note, NoteCommitment, NoteConsolidationWitness, Nullifier,
+        OrderIntent, OrderSide, OrderType, OutputCiphertextBundle, PairId,
+        PrivateExecutionKeyPublicConfig, PrivateExecutionKeyRegistry, RecoverySeed, RelayMode,
+        SpendAuthorization, TimeInForce, derive_user_keys, encrypt_note_for_owner,
+        note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
+        nullifier_sparse_update_witnesses_for_consumed_inputs,
+        settlement_note_root_after_deposit_chain, spend_authority_from_raw_key_hex,
+        withdraw_authority_from_raw_key_hex,
     };
 
     #[test]
@@ -836,6 +1072,115 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn builds_and_signs_note_consolidation_draft() {
+        let seed = RecoverySeed([8_u8; 32]);
+        let keys = derive_user_keys(&seed);
+        let owner_public_key =
+            note_recognition_public_key_from_raw_key_hex(&hex::encode(keys.note_recognition_key))
+                .expect("owner key");
+        let spend_authority = spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key))
+            .expect("spend authority");
+        let withdraw_authority =
+            withdraw_authority_from_raw_key_hex(&hex::encode(keys.withdraw_auth_key))
+                .expect("withdraw authority");
+        let input_notes = vec![
+            Note {
+                asset_id: AssetId("USDC".into()),
+                amount: 100,
+                owner_public_key: owner_public_key.clone(),
+                spend_authority: spend_authority.clone(),
+                withdraw_authority: withdraw_authority.clone(),
+                blinding: "0x111".into(),
+                nonce: 1,
+                metadata_commitment: "0x211".into(),
+            },
+            Note {
+                asset_id: AssetId("USDC".into()),
+                amount: 200,
+                owner_public_key,
+                spend_authority,
+                withdraw_authority,
+                blinding: "0x112".into(),
+                nonce: 2,
+                metadata_commitment: "0x212".into(),
+            },
+        ];
+        let draft_json = zylith_wallet_build_note_consolidation_draft(
+            &serde_json::json!({
+                "seed_hex": seed.to_hex(),
+                "consolidation_id": "consolidation-test",
+                "input_notes": input_notes,
+                "target_amounts": ["300"]
+            })
+            .to_string(),
+        )
+        .expect("draft");
+        let draft: BuildNoteConsolidationDraftResponse =
+            serde_json::from_str(&draft_json).expect("draft json");
+        let input_commitments = draft
+            .input_notes
+            .iter()
+            .map(|note| note.commitment().expect("input commitment"))
+            .collect::<Vec<_>>();
+        let consumed_inputs = draft
+            .input_notes
+            .iter()
+            .zip(input_commitments.iter())
+            .map(|(note, commitment)| ConsumedInput {
+                note_commitment: commitment.clone(),
+                nullifier: nullifier_from_note_secret(commitment, &note.blinding)
+                    .expect("nullifier"),
+            })
+            .collect::<Vec<_>>();
+        let (prior_nullifier_root, new_nullifier_root, nullifier_sparse_witnesses) =
+            nullifier_sparse_update_witnesses_for_consumed_inputs(&[], &consumed_inputs)
+                .expect("sparse witnesses");
+        let prior_note_root = settlement_note_root_after_deposit_chain(
+            &input_commitments
+                .iter()
+                .map(|commitment| commitment.0.clone())
+                .collect::<Vec<_>>(),
+        )
+        .expect("prior note root");
+        let witness = NoteConsolidationWitness {
+            consolidation_id: draft.consolidation_id.clone(),
+            auction_verifier_address: "0x1234".into(),
+            prior_note_root,
+            prior_nullifier_root,
+            input_notes: draft.input_notes,
+            spend_authorization: SpendAuthorization {
+                signature_r: "0x0".into(),
+                signature_s: "0x0".into(),
+            },
+            note_membership_witnesses: Vec::new(),
+            nullifier_history: Vec::new(),
+            nullifier_sparse_witnesses,
+            output_notes: draft.output_notes,
+            output_note_preimages: draft.output_note_preimages,
+            output_recovery_records: draft.output_recovery_records,
+            output_recovery_dummy_commitments: draft.output_recovery_dummy_commitments,
+            output_ciphertext_bundle_ref: draft.output_ciphertext_bundle_ref,
+            new_nullifier_root,
+        };
+
+        let signed_json = zylith_wallet_sign_note_consolidation_witness(
+            &serde_json::json!({
+                "seed_hex": seed.to_hex(),
+                "witness": witness
+            })
+            .to_string(),
+        )
+        .expect("signed witness");
+        let signed: NoteConsolidationWitness =
+            serde_json::from_str(&signed_json).expect("signed json");
+
+        assert_eq!(signed.output_notes.len(), 1);
+        assert_eq!(signed.output_notes[0].amount, 300);
+        assert_ne!(signed.spend_authorization.signature_r, "0x0");
+        assert_ne!(signed.output_ciphertext_bundle_ref, "0x0");
     }
 
     #[test]

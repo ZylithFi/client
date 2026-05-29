@@ -93,6 +93,6 @@ describe("ReportsScreen", () => {
       />,
     );
 
-    expect(screen.getByText("Output reports pending. TCA appears after delayed outputs publish.")).toBeInTheDocument();
+    expect(screen.getByText("Output reports pending. TCA appears after the private settlement report is available.")).toBeInTheDocument();
   });
 });
