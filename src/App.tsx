@@ -823,11 +823,11 @@ export default function App() {
 
   async function handleSubmit(intent: TicketSubmitIntent): Promise<boolean> {
     const w = walletRuntime();
-    if (!w || !w.isReady()) { setSubmitError("Unlock your Zylith wallet first"); return false; }
+    if (!w || !w.isReady()) { setSubmitError("Unlock Zylith wallet first."); return false; }
     const submitPair = pairForIntent(intent);
-    if (!submitPair) { setSubmitError("No active pair selected"); return false; }
+    if (!submitPair) { setSubmitError("Select a pair before submitting."); return false; }
     const expectedBatch = batchByPair[submitPair.pair_id] ?? null;
-    if (!expectedBatch) { setSubmitError("No active batch for this pair"); return false; }
+    if (!expectedBatch) { setSubmitError("This pair is not accepting orders right now. Please retry later."); return false; }
 
     setSubmitting(true); setSubmitError(null);
     try {
@@ -836,11 +836,11 @@ export default function App() {
         submitPair.quote_asset_id,
       );
       if (currentBatch.status !== "Open") {
-        setSubmitError("Batch is no longer open");
+        setSubmitError("This batch is already closed. Please retry in the next epoch.");
         return false;
       }
       if (intent.shape === "strategy" && !coordinatorStatus?.batch_window_ms) {
-        setSubmitError("Batch timing is still loading");
+        setSubmitError("Batch timing is still loading. Please retry later.");
         return false;
       }
 
@@ -1022,7 +1022,7 @@ export default function App() {
 
     if (order.strategyId) {
       if (!w || !w.isReady()) {
-        setSubmitError("Unlock your Zylith wallet before cancelling this strategy.");
+        setSubmitError("Unlock Zylith wallet before cancelling this strategy.");
         return;
       }
       try {
@@ -1048,7 +1048,7 @@ export default function App() {
   async function handlePauseStrategy(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock your Zylith wallet before pausing this curve.");
+      setSubmitError("Unlock Zylith wallet before pausing this curve.");
       return;
     }
     try {
@@ -1062,7 +1062,7 @@ export default function App() {
   async function handleResumeStrategy(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock your Zylith wallet before resuming this curve.");
+      setSubmitError("Unlock Zylith wallet before resuming this curve.");
       return;
     }
     try {
@@ -1076,7 +1076,7 @@ export default function App() {
   async function handleRefreshStrategyPackage(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock your Zylith wallet before refreshing this package.");
+      setSubmitError("Unlock Zylith wallet before refreshing this package.");
       return;
     }
     try {

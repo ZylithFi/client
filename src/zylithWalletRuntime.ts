@@ -732,6 +732,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   let strategyTimer: number | null = null;
   let strategyWorkerInFlight = false;
   let recoverySyncInFlight = false;
+  let postUnlockSyncInFlight = false;
   let privacyWarmupInFlight = false;
   let lastRecoverySnapshotAtUnixMs = 0;
   let scanState: WalletScanState = {
@@ -888,13 +889,23 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     await loadStrategies();
     await loadScanState();
     void warmUpStarknetPrivacyFundingForDeployment().catch(() => undefined);
-    await refreshDepositConfirmations().catch(() => false);
-    await syncRecoveryArtifacts({ pushSnapshot: false }).catch(() => false);
-    await pruneUnsettledSettlementOutputs().catch(() => false);
-    await scanNotes().catch(() => undefined);
-    await pushRecoverySnapshot(false).catch(() => undefined);
+    void runPostUnlockSync();
     startStrategyWorker();
     return true;
+  }
+
+  async function runPostUnlockSync() {
+    if (postUnlockSyncInFlight || !seedHex || !publicConfig) return;
+    postUnlockSyncInFlight = true;
+    try {
+      await refreshDepositConfirmations().catch(() => false);
+      await syncRecoveryArtifacts({ pushSnapshot: false }).catch(() => false);
+      await pruneUnsettledSettlementOutputs().catch(() => false);
+      await scanNotes().catch(() => undefined);
+      await pushRecoverySnapshot(false).catch(() => undefined);
+    } finally {
+      postUnlockSyncInFlight = false;
+    }
   }
 
   async function warmUpStarknetPrivacyFundingForDeployment() {
@@ -1010,6 +1021,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       strategyTimer = null;
     }
     strategyWorkerInFlight = false;
+    postUnlockSyncInFlight = false;
     seedHex = null;
     publicConfig = null;
     deploymentScope = "unbound";
@@ -1249,7 +1261,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const discoveryUrl = normalizeUrl(fundingRail.discoveryUrl);
     const provingUrl = normalizeUrl(fundingRail.provingUrl);
     if (!discoveryUrl || !provingUrl) {
-      throw new Error("Starknet Privacy discovery and proving URLs are required");
+      throw new Error("Private deposit service URLs are required");
     }
     if (rawAmount <= 0n) {
       throw new Error("Deposit amount must be greater than zero");
@@ -1352,7 +1364,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     await saveNotes();
     await pushRecoverySnapshot(false);
     void (async () => {
-      await waitForStarknetTransaction(transactionHash, deployment, "Starknet Privacy deposit");
+      await waitForStarknetTransaction(transactionHash, deployment, "Private deposit");
       await refreshDepositConfirmations().catch(() => false);
     })().catch((error) => {
       console.warn("Deposit confirmation polling failed", error);
@@ -1380,7 +1392,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       await new Promise((resolve) => window.setTimeout(resolve, 3_000));
     }
     throw new Error(
-      `${label} was submitted but not confirmed yet. Please retry later after Starknet indexes the transaction.`,
+      `${label} was submitted but is not confirmed yet. Please retry later after the network confirms it.`,
     );
   }
 
@@ -3464,7 +3476,7 @@ function selectedDepositFundingRail(deployment: DeploymentConfig): DepositFundin
   ) {
     return selected;
   }
-  throw new Error("Starknet Privacy funding is not fully configured");
+  throw new Error("Private deposit funding is not fully configured");
 }
 
 async function executeInjectedStarknetCalls(
@@ -3640,7 +3652,7 @@ async function ensureWalletAccountAccess(provider: StarknetInjectedProvider) {
       return enabledAddress;
     }
   }
-  throw new Error("Connect a Starknet wallet to submit protocol transactions");
+  throw new Error("Connect a Starknet wallet before submitting this transaction");
 }
 
 function providerSearchText(key: string, provider: StarknetInjectedProvider) {
@@ -3782,7 +3794,7 @@ async function selectInjectedStarknetProvider() {
       return provider;
     }
   }
-  throw new Error("Connect a Starknet wallet to submit protocol transactions");
+  throw new Error("Connect a Starknet wallet before submitting this transaction");
 }
 
 async function loadWalletDeploymentConfig(): Promise<DeploymentConfig> {
@@ -3948,7 +3960,7 @@ async function starknetRpc<T>(rpcUrl: string, method: string, params: unknown): 
     headers: { accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
-  if (!response.ok) throw new Error(`Starknet RPC failed with HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`Starknet network request failed with HTTP ${response.status}`);
   return (await response.json()) as T;
 }
 

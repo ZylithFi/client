@@ -108,9 +108,9 @@ export function WalletSlide({
     try {
       const addr = await connectStarknetProvider(wallet.provider, wallet.id);
       if (addr) onStarknetConnected(addr);
-      else setError(`${wallet.name} did not return an account`);
+      else setError("Wallet did not return an account. Unlock it and retry.");
     } catch (e) {
-      setError(userFacingErrorMessage(e, "Starknet connection failed."));
+      setError(userFacingErrorMessage(e, "Wallet connection failed."));
     } finally {
       setConnectingWalletId(null);
     }
@@ -131,7 +131,7 @@ export function WalletSlide({
   }
 
   async function handleCreate() {
-    if (!w) { setError("Zylith wallet runtime not loaded"); return; }
+    if (!w) { setError("Zylith wallet is still loading. Please retry later."); return; }
     if (!passphrase) { setError("Enter a passphrase"); return; }
     setWorking(true);
     setError("");
@@ -150,8 +150,8 @@ export function WalletSlide({
   }
 
   async function handleImport() {
-    if (!w) { setError("Zylith wallet runtime not loaded"); return; }
-    if (!phrase.trim()) { setError("Enter recovery phrase"); return; }
+    if (!w) { setError("Zylith wallet is still loading. Please retry later."); return; }
+    if (!phrase.trim()) { setError("Enter your recovery phrase"); return; }
     if (!passphrase) { setError("Enter a passphrase"); return; }
     setWorking(true);
     setError("");
@@ -170,7 +170,7 @@ export function WalletSlide({
   }
 
   async function handleUnlock() {
-    if (!w) { setError("Zylith wallet runtime not loaded"); return; }
+    if (!w) { setError("Zylith wallet is still loading. Please retry later."); return; }
     if (!passphrase) { setError("Enter your passphrase"); return; }
     setWorking(true);
     setError("");
@@ -487,7 +487,7 @@ export function RecoverySlide({
 
   async function handleReveal() {
     const w = walletRuntime();
-    if (!w || !w.isReady()) { setError("Unlock your Zylith wallet first"); return; }
+    if (!w || !w.isReady()) { setError("Unlock Zylith wallet first."); return; }
     if (!passphrase) { setError("Enter your passphrase"); return; }
     setWorking(true);
     setError("");
@@ -597,11 +597,11 @@ export function DepositSlide({
 
   async function handleDeposit() {
     const w = walletRuntime();
-    if (!w || !w.isReady()) { setError("Unlock your Zylith wallet first"); return; }
-    if (!starknetAddress) { setError("Connect a Starknet wallet first"); return; }
+    if (!w || !w.isReady()) { setError("Unlock Zylith wallet first."); return; }
+    if (!starknetAddress) { setError("Connect a Starknet wallet before depositing."); return; }
     if (!amount.trim()) { setError("Enter an amount"); return; }
     const atomicAmount = toAtomicStr(amount, asset);
-    if (atomicAmount === "0") { setError("Invalid amount"); return; }
+    if (atomicAmount === "0") { setError("Enter a valid amount."); return; }
     setWorking(true);
     setError("");
     try {
@@ -661,7 +661,7 @@ export function DepositSlide({
           disabled={!starknetAddress || !amount.trim() || working}
           onClick={() => { void handleDeposit(); }}
         >
-          {working ? "Submitting…" : starknetAddress ? `Deposit ${asset}` : "Connect wallet first"}
+          {working ? "Depositing…" : starknetAddress ? `Deposit ${asset}` : "Connect wallet first"}
         </button>
       </div>
     </div>
@@ -729,9 +729,9 @@ export function WithdrawSlide({
   const selectedWithdrawNote = assetNotes.find(n => n.note_commitment === selectedNote) ?? assetNotes[0] ?? null;
 
   async function handleWithdraw() {
-    if (!w || !w.isReady()) { setError("Unlock your Zylith wallet first"); return; }
-    if (!recipient.trim()) { setError("Enter recipient address"); return; }
-    if (!selectedWithdrawNote) { setError(`No available ${asset} notes`); return; }
+    if (!w || !w.isReady()) { setError("Unlock Zylith wallet first."); return; }
+    if (!recipient.trim()) { setError("Enter a recipient address."); return; }
+    if (!selectedWithdrawNote) { setError(`No available ${asset} notes.`); return; }
     setWorking(true);
     setError("");
     try {

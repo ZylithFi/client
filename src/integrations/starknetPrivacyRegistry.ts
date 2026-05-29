@@ -207,5 +207,5 @@ function encodeBigint(value: unknown) {
   if (typeof value === "bigint") return value.toString();
   if (typeof value === "number") return BigInt(value).toString();
   if (typeof value === "string") return BigInt(value).toString();
-  throw new Error("Cannot serialize Starknet Privacy registry value");
+  throw new Error("Cannot serialize private deposit registry value");
 }

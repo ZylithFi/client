@@ -22,6 +22,46 @@ function isLowLevelPayload(message: string): boolean {
   );
 }
 
+function privateDepositErrorMessage(message: string): string | null {
+  if (/Connect a Starknet wallet before (using Starknet Privacy funding|funding the privacy signer|depositing)/i.test(message)) {
+    return "Connect a Starknet wallet before depositing.";
+  }
+  if (/(Private deposit|Starknet Privacy) funding is not fully configured|(Private deposit|Starknet Privacy) .*URLs are required|signer warmup is not configured|proof signer deployment is not configured|paymaster is required|paymaster is not configured|deposit relay is not configured/i.test(message)) {
+    return "Private deposits are not available in this deployment. Refresh the app and retry.";
+  }
+  if (/discovery service is unavailable|Discovery service is not healthy|discovery health check failed/i.test(message)) {
+    return "Private deposit service is unavailable. Please retry later.";
+  }
+  if (/Connected Starknet wallet changed/i.test(message)) {
+    return "Connected wallet changed during deposit. Reconnect the wallet you started with and retry.";
+  }
+  if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow|Connected wallet balance is below/i.test(message)) {
+    return "Connected wallet does not have enough balance for this deposit.";
+  }
+  if (/max fee|fee.*exceed|insufficient.*fee|not enough.*fee|actual fee/i.test(message)) {
+    return "Connected wallet does not have enough STRK for network fees.";
+  }
+  if (/Transfer allowance exceeded|approval|allowance/i.test(message)) {
+    return "Deposit approval failed. Please retry later.";
+  }
+  if (/NO_REPLAY_PROTECTION|replay protection|one-unit surplus/i.test(message)) {
+    return "Deposit amount is too close to the wallet balance. Try a slightly smaller amount.";
+  }
+  if (/privacy warning|SDK privacy warning|USER_LINKAGE/i.test(message)) {
+    return "This deposit would weaken privacy. Use a different amount or retry later.";
+  }
+  if (/proof generation failed|proof submission failed|private deposit proof failed|prover did not return proof facts|Proving service error|proof facts/i.test(message)) {
+    return "Private deposit proof failed. Please retry later.";
+  }
+  if (/paymaster submission failed|paymaster rejected|paymaster did not return|funding embedded signer|signer setup failed|funding setup failed/i.test(message)) {
+    return "Private deposit transaction failed. Please retry later.";
+  }
+  if (/(Private deposit|Starknet Privacy) .+ failed|privacy signer|proof signer|privacy-pool|bridge withdrawal/i.test(message)) {
+    return "Private deposit failed. Please retry later.";
+  }
+  return null;
+}
+
 export function userFacingErrorMessage(
   error: unknown,
   fallback = "Something went wrong. Please retry later.",
@@ -42,23 +82,13 @@ export function userFacingErrorMessage(
   if (/wrong starknet network/i.test(message)) {
     return capitalizeFirst(message);
   }
+  const privateDepositMessage = privateDepositErrorMessage(message);
+  if (privateDepositMessage) return privateDepositMessage;
   if (/wallet_addInvokeTransaction|contractAddress|contract_address|entrypoint|entry_point|invalid_union|invalid input/i.test(message)) {
     return "Wallet could not prepare the transaction. Please retry later.";
   }
-  if (/^Starknet Privacy .+ failed:/i.test(message)) {
-    return capitalizeFirst(message);
-  }
-  if (/Connect a Starknet wallet before using Starknet Privacy funding/i.test(message)) {
-    return "Connect a Starknet wallet before depositing.";
-  }
   if (/INVALID_SIG|INVALID_SIGNATURE/i.test(message)) {
     return "Embedded Zylith wallet authorization failed. Lock and unlock your Zylith wallet, then retry.";
-  }
-  if (/Starknet Privacy discovery and proving URLs are required/i.test(message)) {
-    return "Starknet Privacy services are not configured.";
-  }
-  if (/Starknet Privacy prover did not return proof facts/i.test(message)) {
-    return "Starknet Privacy prover did not return proof facts. Please retry later.";
   }
   if (/failed to fetch|networkerror|network request failed|load failed/i.test(message)) {
     return "Network request failed. Check your connection and retry.";
@@ -67,10 +97,10 @@ export function userFacingErrorMessage(
     return "Coordinator is unavailable. Please retry later.";
   }
   if (/private ingress key registry pin mismatch/i.test(message)) {
-    return "Private ingress key verification failed. Please retry later.";
+    return "Private execution key verification failed. Please retry later.";
   }
   if (/private ingress key registry is unavailable/i.test(message)) {
-    return "Private ingress key registry is unavailable. Please retry later.";
+    return "Private execution keys are unavailable. Please retry later.";
   }
   if (/\/api\/private\/orders failed with HTTP 400/i.test(message)) {
     return "Private order was rejected. Refresh the app, unlock Zylith wallet, and submit again.";
@@ -84,8 +114,8 @@ export function userFacingErrorMessage(
   if (/paymaster URL is not configured/i.test(message)) {
     return "Withdrawal relay is not configured.";
   }
-  if (/RPC:/i.test(message)) {
-    return "Starknet RPC returned an error. Please retry later.";
+  if (/RPC:|Starknet RPC/i.test(message)) {
+    return "Starknet network returned an error. Please retry later.";
   }
   if (/no unlocked ([A-Za-z0-9]+) (shielded )?note can fund this order/i.test(message)) {
     return capitalizeFirst(message) + (/[.!?]$/.test(message) ? "" : ".");
