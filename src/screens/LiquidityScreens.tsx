@@ -465,6 +465,7 @@ function CurvePreview({
   renewing,
   renewalWindowHours,
   renewalWindowLabelText,
+  relayMode,
   onPreviewFunding,
 }: {
   pair: PairConfig;
@@ -475,6 +476,7 @@ function CurvePreview({
   renewing: boolean;
   renewalWindowHours: string;
   renewalWindowLabelText: string;
+  relayMode: "SelfRelay" | "ZylithRelay";
   onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
 }) {
   const activeBandSets = side === "two-sided"
@@ -506,6 +508,7 @@ function CurvePreview({
         childSize: "",
         priceLimit: "",
         jitter: 0,
+        relayMode: renewing ? relayMode : "SelfRelay",
       });
     } catch (error) {
       previewError = userFacingErrorMessage(error, "Funding preview unavailable.");
@@ -846,6 +849,7 @@ export function LiquidityCurvesScreen({
             renewing={renewing}
             renewalWindowHours={renewalHours.toString()}
             renewalWindowLabelText={renewalLabel}
+            relayMode={relayMode}
             onPreviewFunding={onPreviewFunding}
           />
           {renewing && (

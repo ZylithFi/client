@@ -2749,7 +2749,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       if (record.source === "deposit" && record.deposit_confirmed !== true) continue;
       const asset = record.note.asset_id;
       const current = balances.get(asset) ?? { available: 0n, locked: 0n };
-      if (record.locked_by_order) {
+      if (record.locked_by_order || !isSpendableLocalNote(record)) {
         current.locked += BigInt(record.note.amount);
       } else {
         current.available += BigInt(record.note.amount);
@@ -3237,7 +3237,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           allowedLockRef !== "" &&
           normalizeFeltForComparison(record.locked_by_order) === allowedLockRef
         )) &&
-        (record.source !== "deposit" || record.deposit_confirmed === true) &&
+        isSpendableLocalNote(record) &&
         !reservedNoteCommitments.has(record.note_commitment) &&
         record.note.asset_id === asset,
       )
@@ -3264,6 +3264,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       (record) =>
         !record.spent &&
         !record.locked_by_order &&
+        isSpendableLocalNote(record) &&
         (!noteCommitment || record.note_commitment === noteCommitment),
     );
     if (!note) {
@@ -3365,6 +3366,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 function fundingAssetForDraft(draft: PrivateOrderDraft) {
   const [base, quote] = draft.pair.split("/");
   return draft.side === "Buy" ? quote : base;
+}
+
+function isSpendableLocalNote(record: LocalNoteRecord) {
+  return (
+    !record.pending_withdrawal_tx &&
+    (record.source !== "deposit" || record.deposit_confirmed === true)
+  );
 }
 
 function fundingRequirement(draft: PrivateOrderDraft) {
