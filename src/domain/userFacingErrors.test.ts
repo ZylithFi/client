@@ -69,5 +69,9 @@ describe("userFacingErrorMessage", () => {
     expect(userFacingErrorMessage(
       new Error("Renewal relay request failed with HTTP 404: <html><body>not found</body></html>"),
     )).toBe("Zylith relay endpoint is unavailable. Refresh the app and retry.");
+
+    expect(userFacingErrorMessage(
+      new Error("Zylith relay endpoint is not configured"),
+    )).toBe("Zylith relay endpoint is unavailable. Refresh the app and retry.");
   });
 });

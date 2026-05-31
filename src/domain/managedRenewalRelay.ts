@@ -41,8 +41,12 @@ export function managedRenewalRelayConfigured(): boolean {
 export async function submitManagedRenewalPackage(
   renewalPackage: OfflineRenewalPackage,
 ): Promise<ManagedRelayPackageStatus | null> {
-  if (renewalPackage.relay_mode !== "ZylithRelay" || !managedRelayUrl) return null;
-  return postJson<ManagedRelayPackageStatus>(managedRelayUrl, "/api/relay/packages", renewalPackage);
+  if (renewalPackage.relay_mode !== "ZylithRelay") return null;
+  return postJson<ManagedRelayPackageStatus>(
+    requiredManagedRelayUrl(),
+    "/api/relay/packages",
+    renewalPackage,
+  );
 }
 
 export async function fetchManagedRenewalPackageResults(
@@ -145,6 +149,11 @@ function relayHeaders(): Record<string, string> {
   };
 }
 
+function requiredManagedRelayUrl() {
+  if (managedRelayUrl) return managedRelayUrl;
+  throw new Error("Zylith relay endpoint is not configured");
+}
+
 function relayAuthorizationHeaders(input: RelayAuthorizationHeaders): Record<string, string> {
   const auth = input.relay_authorization;
   if (!auth || !input.package_commitment || !input.parent_cancel_authority) return {};
@@ -159,6 +168,7 @@ function relayAuthorizationHeaders(input: RelayAuthorizationHeaders): Record<str
 
 function localServiceUrl(port: number) {
   if (typeof window === "undefined") return "";
+  if (!isLocalHost(window.location.hostname)) return "";
   return `${window.location.protocol}//${window.location.hostname}:${port}`;
 }
 
@@ -166,6 +176,6 @@ function normalizeUrl(value: string) {
   return value.replace(/\/+$/, "");
 }
 
-function normalizeText(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
+function isLocalHost(hostname: string) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }

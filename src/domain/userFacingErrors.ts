@@ -117,6 +117,9 @@ export function userFacingErrorMessage(
   if (/Renewal relay request failed with HTTP 404/i.test(message)) {
     return "Zylith relay endpoint is unavailable. Refresh the app and retry.";
   }
+  if (/Zylith relay endpoint is not configured|managed relay.*not configured/i.test(message)) {
+    return "Zylith relay endpoint is unavailable. Refresh the app and retry.";
+  }
   if (/Renewal relay request failed.*exceeds slot limit/i.test(message)) {
     return "Renewal window is too large for the managed relay. Choose a shorter window and retry.";
   }
