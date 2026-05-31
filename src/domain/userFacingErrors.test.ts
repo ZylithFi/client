@@ -47,4 +47,13 @@ describe("userFacingErrorMessage", () => {
       new Error("Request to /api/private/orders failed with HTTP 400"),
     )).toBe("Private order was rejected by validation. Check available notes, curve bands, and batch status, then retry.");
   });
+
+  it("does not expose relay authorization internals", () => {
+    const message = userFacingErrorMessage(
+      new Error("Renewal relay request failed with HTTP 401: Unauthorized"),
+    );
+
+    expect(message).toBe("Zylith relay could not verify this renewal package. Refresh, unlock, and retry.");
+    expect(message).not.toMatch(/token|bearer|signature|authorization/i);
+  });
 });

@@ -866,8 +866,13 @@ export default function App() {
       for (const renewalPackage of renewalPackages) {
         const response = await fetchManagedRenewalPackageResults(renewalPackage).catch((error: unknown) => {
           setSubmitError(userFacingErrorMessage(error));
-          return null;
+          return undefined;
         });
+        if (response === undefined) continue;
+        if (!response) {
+          changed = await w.discardPreparedPrivateStrategy?.(renewalPackage.package_id).catch(() => false) || changed;
+          continue;
+        }
         if (!response?.results?.length || cancelled) continue;
         changed = await w.recordOfflineRenewalRelayResults(renewalPackage.package_id, response.results).catch(() => false) || changed;
       }

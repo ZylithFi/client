@@ -115,7 +115,7 @@ export function userFacingErrorMessage(
     return "Maker curves need renewal enabled. Choose a renewal window and retry.";
   }
   if (/Renewal relay request failed with HTTP 401|Unauthorized/i.test(message)) {
-    return "Zylith relay is not authorized in this deployment. Use local browser renewal or configure relay access.";
+    return "Zylith relay could not verify this renewal package. Refresh, unlock, and retry.";
   }
   if (/Renewal relay request failed with HTTP 4\d\d|Renewal relay request failed/i.test(message)) {
     return "Zylith relay rejected this renewal package. Check the relay configuration and retry.";
