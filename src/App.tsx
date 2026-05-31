@@ -62,6 +62,7 @@ import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import { claimableOutputs } from "./domain/noteLifecycle";
 import { OFFLINE_RENEWAL_RELAY_RESULTS_EVENT } from "./offlineRenewalOperator";
 import {
+  deleteManagedRenewalPackage,
   fetchManagedRenewalPackageResults,
   submitManagedRenewalPackage,
 } from "./domain/managedRenewalRelay";
@@ -1173,6 +1174,12 @@ export default function App() {
   }
 
   // Cancel order
+  async function cleanupManagedRelayStrategyPackage(strategyId: string) {
+    const renewalPackage = strategies.find(strategy => strategy.id === strategyId)?.offline_package;
+    if (renewalPackage?.relay_mode !== "ZylithRelay") return;
+    await deleteManagedRenewalPackage(renewalPackage);
+  }
+
   async function handleCancelOrder(order: LocalOrder) {
     const w = walletRuntime();
     const markCancelled = (cancelTransactionHash?: string) => {
@@ -1190,6 +1197,9 @@ export default function App() {
       }
       try {
         const result = await w.cancelPrivateStrategy(order.strategyId);
+        await cleanupManagedRelayStrategyPackage(order.strategyId).catch((error: unknown) => {
+          setSubmitError(userFacingErrorMessage(error));
+        });
         markCancelled(result.parent_cancel_transaction_hash);
         return;
       } catch (error) {
@@ -1216,6 +1226,9 @@ export default function App() {
     }
     try {
       await w.cancelPrivateStrategy(strategyId);
+      await cleanupManagedRelayStrategyPackage(strategyId).catch((error: unknown) => {
+        setSubmitError(userFacingErrorMessage(error));
+      });
       setBalanceTick(v => v + 1);
     } catch (error) {
       setSubmitError(userFacingErrorMessage(error));

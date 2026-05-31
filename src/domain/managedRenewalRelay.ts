@@ -56,6 +56,20 @@ export async function fetchManagedRenewalPackageResults(
   );
 }
 
+export async function deleteManagedRenewalPackage(
+  renewalPackage: RelayAuthorizationHeaders & {
+    package_id: string;
+    relay_mode?: "SelfRelay" | "ZylithRelay";
+  },
+): Promise<boolean> {
+  if (renewalPackage.relay_mode !== "ZylithRelay" || !managedRelayUrl) return false;
+  return deleteJson(
+    managedRelayUrl,
+    `/api/relay/packages/${encodeURIComponent(renewalPackage.package_id)}`,
+    relayAuthorizationHeaders(renewalPackage),
+  );
+}
+
 async function fetchJson<T>(
   baseUrl: string,
   path: string,
@@ -73,6 +87,26 @@ async function fetchJson<T>(
     throw new Error(detail || `Renewal relay request failed with HTTP ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+async function deleteJson(
+  baseUrl: string,
+  path: string,
+  authHeaders: Record<string, string> = {},
+): Promise<boolean> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "DELETE",
+    headers: {
+      ...relayHeaders(),
+      ...authHeaders,
+    },
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(detail || `Renewal relay request failed with HTTP ${response.status}`);
+  }
+  return true;
 }
 
 async function postJson<T>(baseUrl: string, path: string, body: unknown): Promise<T> {
