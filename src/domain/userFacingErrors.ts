@@ -102,8 +102,23 @@ export function userFacingErrorMessage(
   if (/private ingress key registry is unavailable/i.test(message)) {
     return "Private execution keys are unavailable. Please retry later.";
   }
+  if (/maker curve must contain at least|at least .*points|at least .*bands/i.test(message)) {
+    return "Maker curves need at least three filled price bands.";
+  }
+  if (/maker curve .*spread|outer bands must span|price range/i.test(message)) {
+    return "Curve bands are too tight for this pair. Widen the outer prices and retry.";
+  }
+  if (/maker curve band depth|band depth .*below|minimum band/i.test(message)) {
+    return "Each curve band needs more depth for this pair.";
+  }
+  if (/renewal-backed child|Zylith relay mode requires|renewal package|resting maker strategy/i.test(message)) {
+    return "Maker curves need renewal enabled. Choose a renewal window and retry.";
+  }
+  if (/maker curve order amount|curve envelope price|maker curve limit_price/i.test(message)) {
+    return "Curve parameters are inconsistent. Check the band prices and depths, then retry.";
+  }
   if (/\/api\/private\/orders failed with HTTP 400/i.test(message)) {
-    return "Private order was rejected. Refresh the app, unlock Zylith wallet, and submit again.";
+    return "Private order was rejected by validation. Check available notes, curve bands, and batch status, then retry.";
   }
   if (/request to .* failed with HTTP 5\d\d|private ingress|prover|target service is not configured/i.test(message)) {
     return "Private execution service is unavailable. Please retry later.";

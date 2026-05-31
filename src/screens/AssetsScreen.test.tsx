@@ -86,4 +86,49 @@ describe("AssetsScreen", () => {
     expect(screen.queryByText("Waiting for settlement record")).not.toBeInTheDocument();
     expect(screen.getByText("No private capital in flight.")).toBeInTheDocument();
   });
+
+  it("groups split deposit failures as one user action", () => {
+    render(
+      <AssetsScreen
+        {...baseProps}
+        walletReady
+        starknetAddress="0xabc"
+        pendingDeposits={[{
+          note_commitment: "0xnote1",
+          asset: "STRK",
+          amount: "10000000000000000000",
+          transaction_hash: "0xtxsplit",
+          request_id: "0xreq",
+          requested_at_unix_ms: 10,
+          confirmed: false,
+          failed: true,
+          failure_reason: "Deposit transaction failed.",
+        }, {
+          note_commitment: "0xnote2",
+          asset: "STRK",
+          amount: "10000000000000000000",
+          transaction_hash: "0xtxsplit",
+          request_id: "0xreq",
+          requested_at_unix_ms: 10,
+          confirmed: false,
+          failed: true,
+          failure_reason: "Deposit transaction failed.",
+        }, {
+          note_commitment: "0xnote3",
+          asset: "STRK",
+          amount: "5000000000000000000",
+          transaction_hash: "0xtxsplit",
+          request_id: "0xreq",
+          requested_at_unix_ms: 10,
+          confirmed: false,
+          failed: true,
+          failure_reason: "Deposit transaction failed.",
+        }]}
+      />,
+    );
+
+    expect(screen.getAllByText("Failed deposit", { selector: "span" })).toHaveLength(1);
+    expect(screen.getAllByText("25")).toHaveLength(2);
+    expect(screen.getByText("Deposit transaction failed. · 3 notes")).toBeInTheDocument();
+  });
 });

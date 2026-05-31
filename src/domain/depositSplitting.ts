@@ -44,6 +44,14 @@ export function splitDepositAmount(
   const descendingDenominations = [...ascendingDenominations].reverse();
   const minDenomination = ascendingDenominations[0];
   if (ascendingDenominations.length === 1 && rawAmount <= minDenomination * 4n) {
+    const exactMinCount = rawAmount / minDenomination;
+    if (
+      rawAmount % minDenomination === 0n &&
+      exactMinCount > 1n &&
+      exactMinCount <= BigInt(maxNotes)
+    ) {
+      return Array.from({ length: Number(exactMinCount) }, () => minDenomination);
+    }
     return [rawAmount];
   }
   const chunks: bigint[] = [];

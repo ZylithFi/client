@@ -554,11 +554,45 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .rb-detail-row.danger,
 .rb-detail-row.danger strong { color: var(--z-status-danger); }
 .claim-empty { font-size: 11px; color: var(--z-text-body); padding: 4px 0; line-height: 1.45; }
-.claim-section.ready {
+.claim-section.compact {
+  flex: 0 0 auto;
+  gap: 8px;
+  background: var(--z-app-surface-solid);
+}
+.claim-section.compact.ready {
   background:
-    linear-gradient(90deg, rgba(var(--z-good-rgb), 0.075), transparent 45%),
-    var(--z-app-surface);
-  box-shadow: inset 2px 0 0 rgba(var(--z-good-rgb), 0.78), inset 0 -1px 0 var(--z-border);
+    linear-gradient(90deg, rgba(var(--z-good-rgb), 0.045), transparent 62%),
+    var(--z-app-surface-solid);
+}
+.claim-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  color: var(--z-text-body);
+  text-align: left;
+}
+.claim-toggle span {
+  color: var(--z-text-body);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.claim-toggle em {
+  color: var(--z-text-muted);
+  font-family: var(--z-font-mono);
+  font-size: 10px;
+  font-style: normal;
+  font-feature-settings: "tnum" 1;
+}
+.claim-section.ready .claim-toggle em { color: var(--z-status-good); }
+.claim-toggle strong {
+  color: var(--z-text-muted);
+  font-family: var(--z-font-mono);
+  font-size: 13px;
+  font-weight: 400;
 }
 .claim-row {
   display: grid;
@@ -1776,6 +1810,62 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 }
 .liq-select.compact { margin-bottom: 0; height: 34px; }
 .liq-select option { background: var(--z-app-surface-solid); }
+.liq-inventory-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: -4px 0 14px;
+}
+.liq-inventory-cell {
+  min-width: 0;
+  padding: 8px 9px;
+  background: var(--z-app-inset);
+  box-shadow: inset 0 0 0 1px var(--z-border);
+}
+.liq-inventory-cell span,
+.liq-inventory-cell em,
+.liq-inventory-cell small {
+  display: block;
+  font-size: 10px;
+}
+.liq-inventory-cell span {
+  color: var(--z-text-body);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.liq-inventory-cell strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--z-text-strong);
+  font-family: var(--z-font-amount);
+  font-size: 15px;
+  line-height: 1;
+  font-feature-settings: "tnum" 1;
+}
+.liq-inventory-cell em {
+  margin-top: 4px;
+  color: var(--z-text-muted);
+  font-style: normal;
+}
+.liq-inventory-cell small {
+  margin-top: 3px;
+  color: var(--z-text-body);
+  font-family: var(--z-font-mono);
+}
+.liq-funding-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.liq-funding-warning button {
+  flex: 0 0 auto;
+  color: var(--z-status-warn);
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.liq-funding-warning button:hover { color: var(--z-text-strong); }
 .liq-side-segment {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

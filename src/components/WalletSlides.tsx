@@ -581,13 +581,15 @@ export function DepositSlide({
   const [amount, setAmount] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpenRef.current) {
       setAsset(allAssets.includes(defaultAsset) ? defaultAsset : allAssets[0] ?? defaultAsset);
       setAmount("");
       setError("");
     }
+    wasOpenRef.current = open;
   }, [open, defaultAsset, allAssets]);
 
   function changeAsset(a: string) {

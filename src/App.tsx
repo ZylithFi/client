@@ -21,6 +21,7 @@ import {
 import {
   type RuntimeStatus,
   connectedStarknetAddress,
+  restoreConnectedStarknetWallet,
   walletRuntime,
   walletRuntimeStatus,
 } from "./domain/browserWallet";
@@ -129,7 +130,7 @@ const PRIVATE_REPORT_RECOVERY_STATUSES = new Set<LocalOrderStatus>([
   "proof_failed",
   "stalled",
 ]);
-const PRIVATE_REPORT_RETRY_MS = 8_000;
+const PRIVATE_REPORT_RETRY_MS = 3_000;
 const PRIVATE_REPORT_READY_STATUSES = new Set<LocalOrderStatus>([
   "settled_pending_output",
   "filled",
@@ -412,6 +413,25 @@ export default function App() {
   });
 
   useEffect(() => {
+    let cancelled = false;
+    const restore = () => {
+      void restoreConnectedStarknetWallet()
+        .then(address => {
+          if (!cancelled && address) setStarknetAddress(address);
+        })
+        .catch(() => undefined);
+    };
+    restore();
+    window.addEventListener("focus", restore);
+    window.addEventListener("starknet#initialized", restore);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", restore);
+      window.removeEventListener("starknet#initialized", restore);
+    };
+  }, []);
+
+  useEffect(() => {
     const interval = setInterval(() => {
       const next = connectedStarknetAddress();
       setStarknetAddress(previous => {
@@ -421,6 +441,28 @@ export default function App() {
     }, 1500);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (walletReady || !hasVault) return;
+    let cancelled = false;
+    const requestUnlock = () => {
+      void walletRuntime()?.requestSessionUnlock?.()
+        .then(unlocked => {
+          if (!cancelled && unlocked) {
+            window.dispatchEvent(new CustomEvent("zylith-wallet-runtime-ready"));
+          }
+        })
+        .catch(() => undefined);
+    };
+    requestUnlock();
+    const interval = window.setInterval(requestUnlock, 2500);
+    window.addEventListener("focus", requestUnlock);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", requestUnlock);
+    };
+  }, [walletReady, hasVault]);
 
   // Orders
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() => walletOrderOwnerKey(null));
@@ -962,7 +1004,7 @@ export default function App() {
         ? (intent.side === "Buy" ? sortedCurvePoints[sortedCurvePoints.length - 1].price : sortedCurvePoints[0].price)
         : "0";
       const atomicAmount = intent.shape === "curve"
-        ? (intent.inventoryCap.trim() ? toAtomicStr(intent.inventoryCap, submitPair.base_asset_id) : curveBaseTotal.toString())
+        ? curveBaseTotal.toString()
         : toAtomicStr(intent.amount, submitPair.base_asset_id);
       const atomicPrice = intent.shape === "curve"
         ? curveEnvelopePrice
@@ -1025,7 +1067,7 @@ export default function App() {
         pair: submitPair.pair_id,
         side: intent.side,
         wireMode: wm,
-        amount: intent.shape === "curve" ? intent.inventoryCap || fromAtomicStr(curveBaseTotal.toString(), submitPair.base_asset_id) : intent.amount,
+        amount: intent.shape === "curve" ? fromAtomicStr(curveBaseTotal.toString(), submitPair.base_asset_id) : intent.amount,
         fundingAsset,
         fundingAmount: fromAtomicStr(fundingAmountAtomic, fundingAsset),
         limitPrice: intent.shape === "limit" ? intent.limitPrice : intent.shape === "strategy" ? intent.priceLimit || "" : "",
@@ -1079,7 +1121,7 @@ export default function App() {
       ? curveEnvelopePrice
       : toPriceAtomicStr(intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0", quote);
     let atomicAmount = intent.shape === "curve"
-      ? (intent.inventoryCap.trim() ? toAtomicStr(intent.inventoryCap, base) : curveBaseTotal.toString())
+      ? curveBaseTotal.toString()
       : toAtomicStr(intent.amount, base);
     let mode = wm;
 

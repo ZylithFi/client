@@ -64,9 +64,18 @@ describe("deposit splitting", () => {
     expect(chunks.reduce((sum, chunk) => sum + chunk, 0n)).toBe(137n * USDC);
   });
 
-  it("keeps tiny deposits compact instead of fragmenting dust notes", () => {
-    expect(splitDepositAmount(2n * USDC, "USDC", 6)).toEqual([2n * USDC]);
-    expect(splitDepositAmount(4n * USDC, "USDC", 6)).toEqual([4n * USDC]);
+  it("splits small whole-USDC deposits into usable one-dollar notes", () => {
+    expect(splitDepositAmount(2n * USDC, "USDC", 6)).toEqual([1n * USDC, 1n * USDC]);
+    expect(splitDepositAmount(4n * USDC, "USDC", 6)).toEqual([
+      1n * USDC,
+      1n * USDC,
+      1n * USDC,
+      1n * USDC,
+    ]);
+  });
+
+  it("keeps sub-denomination dust compact", () => {
+    expect(splitDepositAmount(USDC / 2n, "USDC", 6)).toEqual([USDC / 2n]);
   });
 
   it("uses BTC-scale denominations for strkBTC", () => {

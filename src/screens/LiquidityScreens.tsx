@@ -367,9 +367,9 @@ function sideFromCurveSide(side: Exclude<CurveSide, "two-sided">): "Buy" | "Sell
 }
 
 function curveCtaLabel(side: CurveSide): string {
-  if (side === "bid") return "Activate hidden bid curve";
-  if (side === "ask") return "Activate hidden ask curve";
-  return "Activate hidden two-sided curve";
+  if (side === "bid") return "Activate bid curve";
+  if (side === "ask") return "Activate ask curve";
+  return "Activate two-sided curve";
 }
 
 function bandRowsFilled(points: CurvePoint[]): CurvePoint[] {
@@ -562,6 +562,7 @@ export function LiquidityCurvesScreen({
   pairs,
   records,
   balances,
+  pendingDeposits,
   activePairId,
   setActivePairId,
   walletReady,
@@ -573,12 +574,14 @@ export function LiquidityCurvesScreen({
   onEditCurve,
   onPauseCurve,
   onResumeCurve,
+  onDeposit,
   editRecord,
   onEditConsumed,
 }: {
   pairs: PairConfig[];
   records: LiquidityCurveRecord[];
   balances: WalletBalance[];
+  pendingDeposits: PendingDeposit[];
   activePairId: string;
   setActivePairId: (pairId: string) => void;
   walletReady: boolean;
@@ -590,6 +593,7 @@ export function LiquidityCurvesScreen({
   onEditCurve: (record: LiquidityCurveRecord) => void;
   onPauseCurve: (record: LiquidityCurveRecord) => void;
   onResumeCurve: (record: LiquidityCurveRecord) => void;
+  onDeposit: (asset?: string) => void;
   editRecord: LiquidityCurveRecord | null;
   onEditConsumed: () => void;
 }) {
@@ -599,7 +603,7 @@ export function LiquidityCurvesScreen({
   const [askBands, setAskBands] = useState<CurvePoint[]>(() => defaultCurveBands());
   const [advanced, setAdvanced] = useState(false);
   const [inventoryCap, setInventoryCap] = useState("");
-  const [renewing, setRenewing] = useState(false);
+  const [renewing, setRenewing] = useState(true);
   const [renewalDuration, setRenewalDuration] = useState<RenewalDurationPreset>("24");
   const [customRenewalDays, setCustomRenewalDays] = useState("30");
   const [relayMode, setRelayMode] = useState<"SelfRelay" | "ZylithRelay">("ZylithRelay");
@@ -643,6 +647,7 @@ export function LiquidityCurvesScreen({
 
   const base = selectedPair.base_asset_id;
   const quote = selectedPair.quote_asset_id;
+  const builderInventoryAssets = Array.from(new Set([base, quote]));
   const neededInventoryAssets = side === "bid" ? [quote] : side === "ask" ? [base] : [base, quote];
   const missingInventoryAssets = neededInventoryAssets.filter(asset => {
     const balance = balances.find(candidate => candidate.asset === asset);
@@ -714,6 +719,28 @@ export function LiquidityCurvesScreen({
             {pairs.map(pair => <option value={pair.pair_id} key={pair.pair_id}>{pair.pair_id}</option>)}
           </select>
 
+          <div className="liq-inventory-strip" aria-label="Liquidity inventory">
+            {builderInventoryAssets.map(asset => {
+              const balance = balances.find(entry => entry.asset === asset);
+              const pending = pendingDeposits
+                .filter(deposit => deposit.asset === asset && !deposit.confirmed && !deposit.failed)
+                .reduce((sum, deposit) => sum + BigInt(deposit.amount), 0n);
+              return (
+                <div key={asset} className="liq-inventory-cell">
+                  <span>{asset}</span>
+                  <strong>{balance ? fromAtomicStr(balance.available, asset) : "—"}</strong>
+                  <em>available</em>
+                  {balance && BigInt(balance.locked) > 0n && (
+                    <small>{fromAtomicStr(balance.locked, asset)} locked</small>
+                  )}
+                  {pending > 0n && (
+                    <small>{fromAtomicStr(pending.toString(), asset)} pending</small>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
           <div className="liq-side-segment" aria-label="Curve side">
             {([
               ["bid", "Bid Curve"],
@@ -724,8 +751,9 @@ export function LiquidityCurvesScreen({
             ))}
           </div>
           {walletReady && missingInventoryAssets.length > 0 && (
-            <div className="wc-note warn">
-              No available {missingInventoryText} for this quote. Deposit before quoting liquidity.
+            <div className="wc-note warn liq-funding-warning">
+              <span>No available {missingInventoryText} for this quote. Deposit before quoting liquidity.</span>
+              <button type="button" onClick={() => onDeposit(missingInventoryAssets[0])}>Deposit</button>
             </div>
           )}
 
@@ -757,7 +785,6 @@ export function LiquidityCurvesScreen({
                   className="liq-select compact"
                   value={renewalDuration}
                   onChange={event => setRenewalDuration(event.target.value as RenewalDurationPreset)}
-                  disabled={!renewing}
                 >
                   {RENEWAL_DURATION_OPTIONS.map(option => (
                     <option
@@ -798,7 +825,6 @@ export function LiquidityCurvesScreen({
                       setRenewalDuration("1");
                     }
                   }}
-                  disabled={!renewing}
                 >
                   <option value="ZylithRelay">Zylith relay</option>
                   <option value="SelfRelay">Local browser</option>
@@ -1429,6 +1455,7 @@ export function LiquidityWorkspace({
           pairs={pairs}
           records={records}
           balances={balances}
+          pendingDeposits={pendingDeposits}
           activePairId={activePairId}
           setActivePairId={setActivePairId}
           walletReady={walletReady}
@@ -1440,6 +1467,7 @@ export function LiquidityWorkspace({
           onEditCurve={editCurve}
           onPauseCurve={record => { void pauseCurve(record); }}
           onResumeCurve={record => { void resumeCurve(record); }}
+          onDeposit={onDeposit}
           editRecord={editRecord}
           onEditConsumed={() => setEditRecord(null)}
         />

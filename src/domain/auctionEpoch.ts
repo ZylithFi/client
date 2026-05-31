@@ -287,7 +287,7 @@ export function usePublicProofJobStatuses(
     }
 
     void loadStatuses();
-    const t = setInterval(() => { void loadStatuses(); }, 5000);
+    const t = setInterval(() => { void loadStatuses(); }, 2500);
     return () => { cancelled = true; clearInterval(t); };
   }, [key]);
 

@@ -407,7 +407,7 @@ export function reconcileOrderLifecycle({
       ) {
         return { ...order, status: "stalled" as LocalOrderStatus };
       }
-      if (batch.status === "Closed") return { ...order, status: "settling" as LocalOrderStatus };
+      if (batch.status === "Closed") return { ...order, status: "in_batch" as LocalOrderStatus };
       return { ...order, status: "proving" as LocalOrderStatus };
     }
     if (

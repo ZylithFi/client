@@ -52,6 +52,50 @@ function amountOrDash(amount: string | bigint, asset: string) {
   return BigInt(amount) > 0n ? fromAtomicStr(amount.toString(), asset) : "—";
 }
 
+type DepositPipelineRow = PendingDeposit & {
+  count: number;
+};
+
+function aggregateDepositRows(deposits: PendingDeposit[]): DepositPipelineRow[] {
+  const groups = new Map<string, DepositPipelineRow>();
+  for (const deposit of deposits) {
+    const status = deposit.failed ? `failed:${deposit.failure_reason ?? ""}` : deposit.confirmed ? "confirmed" : "pending";
+    const scope = deposit.transaction_hash
+      ? `tx:${deposit.transaction_hash}`
+      : deposit.request_id
+        ? `req:${deposit.request_id}`
+        : `note:${deposit.note_commitment}`;
+    const key = `${scope}:${deposit.asset}:${status}`;
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, { ...deposit, count: 1 });
+      continue;
+    }
+    existing.amount = (BigInt(existing.amount) + BigInt(deposit.amount)).toString();
+    existing.count += 1;
+    existing.requested_at_unix_ms = Math.min(
+      existing.requested_at_unix_ms ?? Number.MAX_SAFE_INTEGER,
+      deposit.requested_at_unix_ms ?? Number.MAX_SAFE_INTEGER,
+    );
+    existing.confirmed = existing.confirmed && deposit.confirmed;
+    existing.failed = Boolean(existing.failed || deposit.failed);
+  }
+  return Array.from(groups.values()).sort((a, b) =>
+    (b.requested_at_unix_ms ?? 0) - (a.requested_at_unix_ms ?? 0),
+  );
+}
+
+function depositAvailabilityText(deposit: DepositPipelineRow): string {
+  const splitSuffix = deposit.count > 1 ? ` · ${deposit.count} notes` : "";
+  if (deposit.failed) {
+    return `${deposit.failure_reason ?? "Deposit transaction failed."}${splitSuffix}`;
+  }
+  if (deposit.confirmed) {
+    return `Available after scanner refresh${splitSuffix}`;
+  }
+  return `Waiting for funding rail confirmation${splitSuffix}`;
+}
+
 export function AssetsScreen({
   allAssets,
   pairs,
@@ -104,6 +148,10 @@ export function AssetsScreen({
   );
   const depositTotals = pendingDepositTotals(pendingDeposits);
   const failedDepositTotals = sumByAsset(pendingDeposits.filter(deposit => deposit.failed));
+  const depositPipelineRows = useMemo(
+    () => aggregateDepositRows(pendingDeposits),
+    [pendingDeposits],
+  );
   const activeOrderTotals = activeOrderFundingTotals(pendingOrders, pairs);
   const activeOutputCount = activeSettlementOutputs(recognizedSettlementOutputs).length;
   const consolidationPlans = useMemo(
@@ -227,8 +275,8 @@ export function AssetsScreen({
               </tr>
             </thead>
             <tbody>
-              {pendingDeposits.map(deposit => (
-                <tr key={`deposit:${deposit.note_commitment}`}>
+              {depositPipelineRows.map(deposit => (
+                <tr key={`deposit:${deposit.transaction_hash ?? deposit.request_id ?? deposit.note_commitment}:${deposit.failed ? "failed" : "active"}`}>
                   <td>
                     <span className={deposit.failed ? "pill danger" : deposit.confirmed ? "pill good" : "pill warn"}>
                       {deposit.failed ? "Failed deposit" : deposit.confirmed ? "Activated" : "Pending deposit"}
@@ -236,14 +284,8 @@ export function AssetsScreen({
                   </td>
                   <td>{deposit.asset}</td>
                   <td className="num">{fromAtomicStr(deposit.amount, deposit.asset)}</td>
-                  <td className="ref">{fmtAddr(deposit.transaction_hash ?? deposit.note_commitment)}</td>
-                  <td>
-                    {deposit.failed
-                      ? deposit.failure_reason ?? "Transaction was not confirmed"
-                      : deposit.confirmed
-                        ? "Available after scanner refresh"
-                        : "Waiting for funding rail confirmation"}
-                  </td>
+                  <td className="ref">{fmtAddr(deposit.transaction_hash ?? deposit.request_id ?? deposit.note_commitment)}</td>
+                  <td>{depositAvailabilityText(deposit)}</td>
                   <td />
                 </tr>
               ))}
@@ -291,7 +333,7 @@ export function AssetsScreen({
                 );
               })}
 
-              {pendingDeposits.length === 0 && pendingOrders.length === 0 && recognizedSettlementOutputs.length === 0 && (
+              {depositPipelineRows.length === 0 && pendingOrders.length === 0 && recognizedSettlementOutputs.length === 0 && (
                 <tr>
                   <td colSpan={6}>
                     <div className="asset-empty-inline">No private capital in flight.</div>

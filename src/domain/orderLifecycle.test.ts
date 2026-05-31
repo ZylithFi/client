@@ -350,7 +350,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("filled");
   });
 
-  it("keeps newly closed batches as settling instead of proving", () => {
+  it("keeps newly closed batches in batch until the proof worker starts", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "in_batch" })],
       batches: [
@@ -363,7 +363,29 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated[0].status).toBe("settling");
+    expect(updated[0].status).toBe("in_batch");
+  });
+
+  it("moves closed batches to proving only after the proof job reports proving", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "in_batch" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Closed" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "proving",
+        },
+      },
+      withdrawableNotes: [],
+      settlementBlockedFallbackEpochs: 10,
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("proving");
   });
 
   it("marks confirmed onchain settlement as output pending while delayed artifacts are hidden", () => {

@@ -27,6 +27,7 @@ function ClaimSection({
   onClaim: (note: WithdrawableNote) => void;
 }) {
   const [now, setNow] = useState(Date.now());
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -46,50 +47,62 @@ function ClaimSection({
     .sort((a, b) => a.remainingMs - b.remainingMs || a.note.asset.localeCompare(b.note.asset));
   const hasReady = rows.some(row => row.readyAt !== null && row.remainingMs === 0);
   const readyCount = rows.filter(row => row.readyAt !== null && row.remainingMs === 0).length;
+  const totalCount = rows.length + pendingNotes.length;
+
+  useEffect(() => {
+    if (totalCount === 0) setExpanded(false);
+  }, [totalCount]);
+
+  if (totalCount === 0) return null;
 
   return (
-    <div className={`right-section claim-section ${hasReady ? "ready" : ""}`}>
-      <div className="right-hd">
-        <span>Claim</span>
-        {hasReady
-          ? <span className="right-hd-meta good">Ready</span>
-          : eligibleNotes.length > 0 && <span className="right-hd-meta">{eligibleNotes.length}</span>}
-      </div>
-      {hasReady && (
-        <div className="claim-ready-note">
-          {readyCount} {readyCount === 1 ? "output" : "outputs"} ready to withdraw
-        </div>
-      )}
-      {rows.length === 0 ? (
-        <div className="claim-empty">
-          {pendingNotes.length > 0 ? `${pendingNotes.length} withdrawal pending` : "No settled outputs"}
-        </div>
-      ) : (
-        <>
-          {rows.map(row => {
-            const disabled = row.readyAt === null || row.remainingMs > 0;
-            return (
-              <div key={row.note.note_commitment} className={`claim-row ${disabled ? "" : "ready"}`}>
-                <div className="claim-asset">{row.note.asset}</div>
-                <div>
-                  <div className="claim-amount z-amt">{fromAtomicStr(row.note.amount, row.note.asset)}</div>
-                  <div className="claim-delay">
-                    {row.readyAt === null
-                      ? "Waiting for settlement record"
-                      : disabled ? `Claim delay ${msToCountdown(row.remainingMs)}` : fmtAddr(row.note.note_commitment)}
+    <div className={`right-section claim-section compact ${hasReady ? "ready" : ""}`}>
+      <button
+        type="button"
+        className="claim-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded(value => !value)}
+      >
+        <span>Notes</span>
+        <em>
+          {hasReady
+            ? `${readyCount} ready`
+            : rows.length > 0
+              ? `${rows.length} output${rows.length === 1 ? "" : "s"}`
+              : `${pendingNotes.length} withdrawal${pendingNotes.length === 1 ? "" : "s"}`}
+        </em>
+        <strong>{expanded ? "−" : "+"}</strong>
+      </button>
+      {expanded && (
+        rows.length === 0 ? (
+          <div className="claim-empty">{pendingNotes.length} withdrawal pending</div>
+        ) : (
+          <>
+            {rows.map(row => {
+              const disabled = row.readyAt === null || row.remainingMs > 0;
+              return (
+                <div key={row.note.note_commitment} className={`claim-row ${disabled ? "" : "ready"}`}>
+                  <div className="claim-asset">{row.note.asset}</div>
+                  <div>
+                    <div className="claim-amount z-amt">{fromAtomicStr(row.note.amount, row.note.asset)}</div>
+                    <div className="claim-delay">
+                      {row.readyAt === null
+                        ? "Waiting for settlement record"
+                        : disabled ? `Claim delay ${msToCountdown(row.remainingMs)}` : fmtAddr(row.note.note_commitment)}
+                    </div>
                   </div>
+                  <button
+                    className="claim-btn"
+                    disabled={disabled}
+                    onClick={() => onClaim(row.note)}
+                  >
+                    Withdraw
+                  </button>
                 </div>
-                <button
-                  className="claim-btn"
-                  disabled={disabled}
-                  onClick={() => onClaim(row.note)}
-                >
-                  Withdraw
-                </button>
-              </div>
-            );
-          })}
-        </>
+              );
+            })}
+          </>
+        )
       )}
     </div>
   );
@@ -265,15 +278,6 @@ export function RightColumn({
         </div>
       </div>
 
-      {walletReady && (
-        <ClaimSection
-          notes={recognizedSettlementOutputs}
-          settlementTranscripts={settlementTranscripts}
-          claimDelaySeconds={claimDelaySeconds}
-          onClaim={onClaimNote}
-        />
-      )}
-
       <div className="right-section right-grow">
         <div className="right-hd">
           <span>Active</span>
@@ -314,6 +318,15 @@ export function RightColumn({
           ))
         )}
       </div>
+
+      {walletReady && (
+        <ClaimSection
+          notes={recognizedSettlementOutputs}
+          settlementTranscripts={settlementTranscripts}
+          claimDelaySeconds={claimDelaySeconds}
+          onClaim={onClaimNote}
+        />
+      )}
     </div>
   );
 }

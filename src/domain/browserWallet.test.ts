@@ -5,6 +5,7 @@ import {
   connectedStarknetAddress,
   disconnectStarknetProvider,
   discoverStarknetWallets,
+  restoreConnectedStarknetWallet,
   selectedStarknetProvider,
 } from "./browserWallet";
 
@@ -56,6 +57,7 @@ describe("browser wallet selection", () => {
       starknet_braavos?: unknown;
       braavosStarknet?: unknown;
       zylithSelectedStarknetProvider?: unknown;
+      zylithSelectedStarknetAddress?: unknown;
       ready?: unknown;
     }).starknet = undefined;
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = undefined;
@@ -64,6 +66,7 @@ describe("browser wallet selection", () => {
     (window as typeof window & { braavosStarknet?: unknown }).braavosStarknet = undefined;
     (window as typeof window & { ready?: unknown }).ready = undefined;
     (window as typeof window & { zylithSelectedStarknetProvider?: unknown }).zylithSelectedStarknetProvider = undefined;
+    (window as typeof window & { zylithSelectedStarknetAddress?: unknown }).zylithSelectedStarknetAddress = undefined;
     delete (window as unknown as { starknet_hidden_braavos?: unknown }).starknet_hidden_braavos;
   });
 
@@ -105,6 +108,31 @@ describe("browser wallet selection", () => {
     expect(selectedStarknetProvider()).toBe(wallet);
     expect(connectedStarknetAddress()).toBeNull();
     await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBeNull();
+  });
+
+  it("restores an already-authorized wallet session without opening a connect prompt", async () => {
+    const request = vi.fn(async (rawRequest: { type?: string; params?: unknown }) => {
+      const params = rawRequest.params as { silent_mode?: boolean } | undefined;
+      if (rawRequest.type === "wallet_requestAccounts" && params?.silent_mode === true) {
+        return [{ address: "0xrestored" }];
+      }
+      throw new Error("interactive prompt should not be used");
+    });
+    const wallet = {
+      id: "braavos",
+      name: "Braavos",
+      request,
+    };
+    (window as typeof window & { starknet_braavos?: unknown }).starknet_braavos = wallet;
+    window.localStorage.setItem(selectedWalletKey, wallet.id);
+
+    await expect(restoreConnectedStarknetWallet()).resolves.toBe("0xrestored");
+
+    expect(connectedStarknetAddress()).toBe("0xrestored");
+    expect(request).toHaveBeenCalledWith({
+      type: "wallet_requestAccounts",
+      params: { silent_mode: true },
+    });
   });
 
   it("discovers Braavos from object registries and ranks it before Ready wrappers", () => {

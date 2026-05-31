@@ -21,6 +21,7 @@ const DIRECT_ORDER_MODES = new Set<OrderMode>(["Limit", "Maker Curve"]);
 const STRATEGY_ORDER_MODES = new Set<OrderMode>(["TWAP", "VWAP", "Repeat", "Resting"]);
 const MAX_ORDER_FUNDING_INPUTS = 4;
 const DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS = 10;
+const SESSION_UNLOCK_CHANNEL = "zylith.wallet.session-unlock.v1";
 
 type WalletBalance = {
   asset: string;
@@ -33,6 +34,8 @@ type PendingDeposit = {
   asset: string;
   amount: string;
   transaction_hash?: string;
+  request_id?: string;
+  requested_at_unix_ms?: number;
   confirmed: boolean;
   failed?: boolean;
   failure_reason?: string;
@@ -84,6 +87,7 @@ type WalletRuntime = {
   importRecoverySeed: (recoveryPhraseOrSeedHex: string, passphrase: string) => Promise<boolean>;
   replaceRecoverySeed: (recoveryPhraseOrSeedHex: string, passphrase: string) => Promise<boolean>;
   unlockWithPassphrase: (passphrase: string) => Promise<boolean>;
+  requestSessionUnlock: () => Promise<boolean>;
   exportRecoverySeed: (passphrase: string) => Promise<string>;
   syncRecoveryArtifacts: () => Promise<boolean>;
   getPublicConfig: () => WalletPublicConfig | null;
@@ -229,6 +233,7 @@ type LocalNoteRecord = {
   deposit_confirmed?: boolean;
   deposit_failed?: boolean;
   deposit_failure_reason?: string;
+  deposit_request_id?: string;
   deposit_requested_at_unix_ms?: number;
   spent?: boolean;
   pending_withdrawal_tx?: string;
@@ -752,6 +757,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   let recoverySyncInFlight = false;
   let postUnlockSyncInFlight = false;
   let privacyWarmupInFlight = false;
+  let sessionChannel: BroadcastChannel | null = null;
+  let pendingSessionUnlock: {
+    nonce: string;
+    resolve: (value: boolean) => void;
+    timeout: number;
+  } | null = null;
   let lastRecoverySnapshotAtUnixMs = 0;
   let scanState: WalletScanState = {
     version: 1,
@@ -765,6 +776,55 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       throw new Error("Zylith wallet is locked");
     }
     return { seedHex, publicConfig };
+  }
+
+  function setupSessionUnlockChannel() {
+    if (typeof BroadcastChannel === "undefined" || sessionChannel) return;
+    sessionChannel = new BroadcastChannel(SESSION_UNLOCK_CHANNEL);
+    sessionChannel.onmessage = (event) => {
+      const message = event.data as { type?: string; nonce?: string; seed_hex?: string } | null;
+      if (!message || typeof message !== "object") return;
+      if (message.type === "request-unlock" && message.nonce && seedHex) {
+        sessionChannel?.postMessage({
+          type: "unlock-response",
+          nonce: message.nonce,
+          seed_hex: seedHex,
+        });
+        return;
+      }
+      if (
+        message.type === "unlock-response" &&
+        pendingSessionUnlock &&
+        message.nonce === pendingSessionUnlock.nonce &&
+        typeof message.seed_hex === "string"
+      ) {
+        const pending = pendingSessionUnlock;
+        pendingSessionUnlock = null;
+        window.clearTimeout(pending.timeout);
+        void hydrateFromSeed(message.seed_hex)
+          .then(() => pending.resolve(true))
+          .catch(() => pending.resolve(false));
+      }
+    };
+  }
+
+  function requestSessionUnlock(): Promise<boolean> {
+    if (seedHex && publicConfig) return Promise.resolve(true);
+    if (!hasVault() || typeof BroadcastChannel === "undefined") return Promise.resolve(false);
+    setupSessionUnlockChannel();
+    if (!sessionChannel) return Promise.resolve(false);
+    if (pendingSessionUnlock) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const nonce = randomFeltHex();
+      const timeout = window.setTimeout(() => {
+        if (pendingSessionUnlock?.nonce === nonce) {
+          pendingSessionUnlock = null;
+          resolve(false);
+        }
+      }, 900);
+      pendingSessionUnlock = { nonce, resolve, timeout };
+      sessionChannel?.postMessage({ type: "request-unlock", nonce });
+    });
   }
 
   async function loadNotes() {
@@ -1038,6 +1098,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   function lock() {
+    if (pendingSessionUnlock) {
+      window.clearTimeout(pendingSessionUnlock.timeout);
+      pendingSessionUnlock.resolve(false);
+      pendingSessionUnlock = null;
+    }
     if (strategyTimer !== null) {
       window.clearInterval(strategyTimer);
       strategyTimer = null;
@@ -1399,6 +1464,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       throw new Error("Deposit amount must be greater than zero");
     }
     const provider = await selectInjectedStarknetProvider();
+    const depositRequestId = randomFeltHex();
     const depositChunks = splitDepositAmount(rawAmount, asset, assetDecimals(asset));
     const plans = depositChunks.map((depositChunk) => JSON.parse(
       core.zylith_wallet_build_deposit_submission_plan(
@@ -1449,6 +1515,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           source: "deposit",
           note: plan.note,
           deposit_confirmed: false,
+          deposit_request_id: depositRequestId,
           deposit_requested_at_unix_ms: requestTime,
         });
       }
@@ -1456,34 +1523,47 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     await saveNotes();
     await pushRecoverySnapshot(true);
     const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(() => undefined);
-    const depositResult: SubmitPrivacyBridgeDepositResult = await submitPrivacyBridgeDeposit({
-      provider: provider as never,
-      seedHex: unlockedSeed,
-      chainId,
-      rpcUrl,
-      privacyPoolAddress,
-      bridgeAddress,
-      tokenAddress,
-      discoveryUrl,
-      provingUrl,
-      paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
-      paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
-      privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-      minProvingDelayBlocks:
-        fundingRail.minProvingDelayBlocks ?? DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
-      sdkRegistry,
-      plan: {
-        amount: totalDepositAmount,
-        encodedArgs: {
-          asset_id: plans[0]?.encoded_args.asset_id ?? asset,
-          total_amount: totalDepositAmount.toString(),
-          amounts: plans.map((plan) => plan.encoded_args.amount),
-          deposit_nonces: plans.map((plan) => plan.encoded_args.deposit_nonce),
-          note_commitments: plans.map((plan) => plan.encoded_args.note_commitment),
-          withdraw_authorities: plans.map((plan) => plan.encoded_args.withdraw_authority),
+    let depositResult: SubmitPrivacyBridgeDepositResult;
+    try {
+      depositResult = await submitPrivacyBridgeDeposit({
+        provider: provider as never,
+        seedHex: unlockedSeed,
+        chainId,
+        rpcUrl,
+        privacyPoolAddress,
+        bridgeAddress,
+        tokenAddress,
+        discoveryUrl,
+        provingUrl,
+        paymasterAddress: fundingRail.paymasterAddress || configuredPaymasterAddress,
+        paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
+        privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
+        minProvingDelayBlocks:
+          fundingRail.minProvingDelayBlocks ?? DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
+        sdkRegistry,
+        plan: {
+          amount: totalDepositAmount,
+          encodedArgs: {
+            asset_id: plans[0]?.encoded_args.asset_id ?? asset,
+            total_amount: totalDepositAmount.toString(),
+            amounts: plans.map((plan) => plan.encoded_args.amount),
+            deposit_nonces: plans.map((plan) => plan.encoded_args.deposit_nonce),
+            note_commitments: plans.map((plan) => plan.encoded_args.note_commitment),
+            withdraw_authorities: plans.map((plan) => plan.encoded_args.withdraw_authority),
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      const plannedCommitments = new Set(noteCommitments);
+      notes = notes.filter((record) =>
+        !plannedCommitments.has(record.note_commitment) ||
+        record.pending_deposit_tx ||
+        record.deposit_confirmed === true,
+      );
+      await saveNotes();
+      scheduleRecoverySnapshot(false);
+      throw error;
+    }
     await saveStarknetPrivacySdkRegistry(depositResult.sdkRegistry).catch(() => undefined);
     const transactionHash = depositResult.transactionHash;
     for (const noteCommitment of noteCommitments) {
@@ -1533,7 +1613,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const pending = notes.filter(
       (record) =>
         record.source === "deposit" &&
-        record.deposit_confirmed !== true,
+        record.deposit_confirmed !== true &&
+        !record.spent,
     );
     if (pending.length === 0) return false;
     const pendingCommitments = pending.map((record) => normalizeNoteCommitment(record.note_commitment));
@@ -1612,8 +1693,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const ageMs = Date.now() - (record.deposit_requested_at_unix_ms ?? Date.now());
       if (!record.pending_deposit_tx) {
         if (ageMs >= PENDING_DEPOSIT_FAILURE_GRACE_MS) {
-          record.deposit_failed = true;
-          record.deposit_failure_reason = "Deposit transaction was not submitted.";
+          record.spent = true;
           changed = true;
         }
         continue;
@@ -2655,12 +2735,19 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   function getPendingDeposits() {
     return notes
-      .filter((record) => record.source === "deposit" && record.deposit_confirmed !== true)
+      .filter((record) =>
+        record.source === "deposit" &&
+        record.deposit_confirmed !== true &&
+        !record.spent &&
+        !(record.deposit_failed === true && !record.pending_deposit_tx)
+      )
       .map((record) => ({
         note_commitment: record.note_commitment,
         asset: record.note.asset_id,
         amount: record.note.amount,
         transaction_hash: record.pending_deposit_tx,
+        request_id: record.deposit_request_id,
+        requested_at_unix_ms: record.deposit_requested_at_unix_ms,
         confirmed: record.deposit_confirmed === true,
         failed: record.deposit_failed === true,
         failure_reason: record.deposit_failure_reason,
@@ -2749,6 +2836,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
   }
 
+  setupSessionUnlockChannel();
+  void requestSessionUnlock();
+
   return {
     hasVault,
     isReady: () => Boolean(seedHex && publicConfig),
@@ -2757,6 +2847,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     importRecoverySeed,
     replaceRecoverySeed,
     unlockWithPassphrase,
+    requestSessionUnlock,
     exportRecoverySeed,
     syncRecoveryArtifacts,
     getPublicConfig: () => publicConfig,

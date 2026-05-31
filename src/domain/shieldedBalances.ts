@@ -38,6 +38,8 @@ export type PendingDeposit = {
   asset: string;
   amount: string;
   transaction_hash?: string;
+  request_id?: string;
+  requested_at_unix_ms?: number;
   confirmed: boolean;
   failed?: boolean;
   failure_reason?: string;

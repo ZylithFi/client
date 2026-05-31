@@ -37,4 +37,14 @@ describe("userFacingErrorMessage", () => {
 
     expect(message).toBe("Starknet network returned an error. Please retry later.");
   });
+
+  it("explains maker curve validation failures without refresh advice", () => {
+    expect(userFacingErrorMessage(
+      new Error("maker curve outer bands must span at least 20 bps"),
+    )).toBe("Curve bands are too tight for this pair. Widen the outer prices and retry.");
+
+    expect(userFacingErrorMessage(
+      new Error("Request to /api/private/orders failed with HTTP 400"),
+    )).toBe("Private order was rejected by validation. Check available notes, curve bands, and batch status, then retry.");
+  });
 });
