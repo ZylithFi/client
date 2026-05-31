@@ -1737,6 +1737,8 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   text-transform: uppercase;
 }
 .liq-card-actions button:hover { color: var(--z-text-strong); }
+.liq-card-actions button.danger { color: var(--z-status-warn); }
+.liq-card-actions button.danger:hover { color: var(--z-status-danger); }
 .liq-sections,
 .liq-analytics-list,
 .liq-section-spaced,

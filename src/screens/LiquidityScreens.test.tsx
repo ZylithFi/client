@@ -31,7 +31,7 @@ describe("LiquidityCurvesScreen", () => {
       <LiquidityCurvesScreen
         pairs={pairs}
         records={[]}
-        balances={[]}
+        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
         pendingDeposits={[]}
         activePairId="ETH/USDC"
         setActivePairId={setActivePairId}
@@ -143,6 +143,73 @@ describe("LiquidityCurvesScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deposit" }));
 
     expect(onDeposit).toHaveBeenCalledWith("USDC");
+  });
+
+  it("explains when quote capital is locked in existing curves", () => {
+    render(
+      <LiquidityCurvesScreen
+        pairs={pairs}
+        records={[]}
+        balances={[{ asset: "USDC", available: "0", locked: "2000000" }]}
+        pendingDeposits={[]}
+        activePairId="ETH/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onSubmitCurve={vi.fn()}
+        onCancelCurve={vi.fn()}
+        onEditCurve={vi.fn()}
+        onPauseCurve={vi.fn()}
+        onResumeCurve={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/USDC is locked in existing curves/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeDisabled();
+  });
+
+  it("shows cancel with the active curve management actions", () => {
+    const onCancelCurve = vi.fn();
+    const record = {
+      id: "curve-1",
+      pair: "ETH/USDC",
+      side: "Buy" as const,
+      sideLabel: "Bid" as const,
+      status: "Active" as const,
+      points: [{ price: "2500", baseAmount: "1" }],
+      submittedAt: Date.now(),
+      relatedOrders: [],
+    };
+
+    render(
+      <LiquidityCurvesScreen
+        pairs={pairs}
+        records={[record]}
+        balances={[]}
+        pendingDeposits={[]}
+        activePairId="ETH/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onSubmitCurve={vi.fn()}
+        onCancelCurve={onCancelCurve}
+        onEditCurve={vi.fn()}
+        onPauseCurve={vi.fn()}
+        onResumeCurve={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(onCancelCurve).toHaveBeenCalledWith(record);
   });
 
   it("keeps renewal controls active for maker curves by default", () => {

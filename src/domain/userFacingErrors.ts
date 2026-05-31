@@ -1,4 +1,6 @@
 function rawErrorMessage(error: unknown): string {
+  const structured = structuredErrorMessage(error);
+  if (structured) return structured;
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   try {
@@ -6,6 +8,30 @@ function rawErrorMessage(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+function structuredErrorMessage(error: unknown): string | null {
+  if (error instanceof Error) {
+    return structuredErrorMessage(error.message);
+  }
+  if (typeof error === "string") {
+    const trimmed = error.trim();
+    if (!trimmed || !/^[\[{]/.test(trimmed)) return null;
+    try {
+      return structuredErrorMessage(JSON.parse(trimmed));
+    } catch {
+      return null;
+    }
+  }
+  if (!error || typeof error !== "object") return null;
+  const record = error as Record<string, unknown>;
+  for (const key of ["error", "detail", "message", "reason"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    const nested = structuredErrorMessage(value);
+    if (nested) return nested;
+  }
+  return null;
 }
 
 function capitalizeFirst(message: string): string {
@@ -156,8 +182,10 @@ export function userFacingErrorMessage(
   if (/RPC:|Starknet RPC/i.test(message)) {
     return "Starknet network returned an error. Please retry later.";
   }
-  if (/no unlocked ([A-Za-z0-9]+) (shielded )?note can fund this order/i.test(message)) {
-    return capitalizeFirst(message) + (/[.!?]$/.test(message) ? "" : ".");
+  const noUnlockedFunding = message.match(/no unlocked ([A-Za-z0-9]+) (shielded )?note can fund this order/i);
+  if (noUnlockedFunding) {
+    const asset = noUnlockedFunding[1];
+    return `No unlocked ${asset} note can fund this order. Cancel or edit existing curves if ${asset} is locked, or deposit more ${asset}.`;
   }
   if (/selected (shielded )?note is not withdrawable/i.test(message)) {
     return "Selected note is not withdrawable.";

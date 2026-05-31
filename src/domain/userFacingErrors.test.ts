@@ -38,6 +38,14 @@ describe("userFacingErrorMessage", () => {
     expect(message).toBe("Starknet network returned an error. Please retry later.");
   });
 
+  it("extracts service JSON error envelopes before applying generic fallback", () => {
+    const message = userFacingErrorMessage(
+      new Error(JSON.stringify({ error: "No unlocked USDC note can fund this order" })),
+    );
+
+    expect(message).toBe("No unlocked USDC note can fund this order. Cancel or edit existing curves if USDC is locked, or deposit more USDC.");
+  });
+
   it("explains maker curve validation failures without refresh advice", () => {
     expect(userFacingErrorMessage(
       new Error("maker curve outer bands must span at least 20 bps"),

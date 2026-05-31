@@ -186,6 +186,25 @@ function curveFundingAsset(record: LiquidityCurveRecord): string {
   return record.side === "Buy" ? curveQuoteAsset(record) : curveBaseAsset(record);
 }
 
+function balanceAmount(
+  balances: WalletBalance[],
+  asset: string,
+  field: "available" | "locked",
+): bigint {
+  const balance = balances.find(entry => entry.asset === asset);
+  if (!balance) return 0n;
+  try {
+    return BigInt(balance[field]);
+  } catch {
+    return 0n;
+  }
+}
+
+function assetListText(assets: string[]) {
+  if (assets.length <= 1) return assets[0] ?? "";
+  return `${assets.slice(0, -1).join(", ")} and ${assets.at(-1)}`;
+}
+
 function curveLockedCapital(record: LiquidityCurveRecord): number {
   if (record.points.length === 0) {
     return record.relatedOrders.reduce((sum, order) => sum + parseHuman(order.fundingAmount ?? order.amount), 0);
@@ -652,18 +671,17 @@ export function LiquidityCurvesScreen({
   const quote = selectedPair.quote_asset_id;
   const builderInventoryAssets = Array.from(new Set([base, quote]));
   const neededInventoryAssets = side === "bid" ? [quote] : side === "ask" ? [base] : [base, quote];
-  const missingInventoryAssets = neededInventoryAssets.filter(asset => {
-    const balance = balances.find(candidate => candidate.asset === asset);
-    if (!balance) return true;
-    try {
-      return BigInt(balance.available) <= 0n;
-    } catch {
-      return true;
-    }
-  });
-  const missingInventoryText = missingInventoryAssets.length <= 1
-    ? `${missingInventoryAssets[0] ?? ""} note`
-    : `${missingInventoryAssets.slice(0, -1).join(", ")} and ${missingInventoryAssets.at(-1)} notes`;
+  const missingInventoryAssets = neededInventoryAssets.filter(asset =>
+    balanceAmount(balances, asset, "available") <= 0n,
+  );
+  const lockedOnlyAssets = missingInventoryAssets.filter(asset =>
+    balanceAmount(balances, asset, "locked") > 0n,
+  );
+  const missingInventoryText = `${assetListText(missingInventoryAssets)} ${missingInventoryAssets.length === 1 ? "note" : "notes"}`;
+  const lockedAssetText = assetListText(lockedOnlyAssets);
+  const fundingWarningText = lockedOnlyAssets.length > 0
+    ? `${lockedAssetText} ${lockedOnlyAssets.length === 1 ? "is" : "are"} locked in existing curves. Cancel or edit a curve, or deposit more ${lockedAssetText}.`
+    : `No available ${missingInventoryText} for this quote. Deposit before quoting liquidity.`;
   const sideBandSets: Array<[Exclude<CurveSide, "two-sided">, CurvePoint[]]> = side === "two-sided"
     ? [
         ["bid", bidBands],
@@ -676,6 +694,7 @@ export function LiquidityCurvesScreen({
   const canSubmit = walletReady &&
     !submitting &&
     !localRelayTooLong &&
+    missingInventoryAssets.length === 0 &&
     sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
 
   async function submit() {
@@ -755,7 +774,7 @@ export function LiquidityCurvesScreen({
           </div>
           {walletReady && missingInventoryAssets.length > 0 && (
             <div className="wc-note warn liq-funding-warning">
-              <span>No available {missingInventoryText} for this quote. Deposit before quoting liquidity.</span>
+              <span>{fundingWarningText}</span>
               <button type="button" onClick={() => onDeposit(missingInventoryAssets[0])}>Deposit</button>
             </div>
           )}
@@ -883,7 +902,6 @@ export function LiquidityCurvesScreen({
                   <span>{record.pair}</span>
                   <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>{record.sideLabel}</span>
                   <span className={`pill ${record.status === "Expiring" ? "warn" : record.status === "Paused" ? "muted" : "good"}`}>{record.status}</span>
-                  <button type="button" className="table-action liq-card-cancel" onClick={() => onCancelCurve(record)}>Cancel</button>
                 </div>
                 <div className="liq-active-rate">{formatPct(curveFillRate(record.relatedOrders))}</div>
                 <div className="liq-depth-bar">
@@ -928,6 +946,7 @@ export function LiquidityCurvesScreen({
                       : <button type="button" onClick={() => onPauseCurve(record)}>Pause</button>
                   )}
                   <button type="button" onClick={() => onEditCurve(record)}>Edit</button>
+                  <button type="button" className="danger" onClick={() => onCancelCurve(record)}>Cancel</button>
                 </div>
               </div>
             ))
