@@ -83,8 +83,7 @@ async function fetchJson<T>(
   });
   if (response.status === 404) return null;
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(detail || `Renewal relay request failed with HTTP ${response.status}`);
+    throw new Error(await relayErrorMessage(response));
   }
   return (await response.json()) as T;
 }
@@ -103,8 +102,7 @@ async function deleteJson(
   });
   if (response.status === 404) return false;
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(detail || `Renewal relay request failed with HTTP ${response.status}`);
+    throw new Error(await relayErrorMessage(response));
   }
   return true;
 }
@@ -119,10 +117,26 @@ async function postJson<T>(baseUrl: string, path: string, body: unknown): Promis
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(detail || `Renewal relay request failed with HTTP ${response.status}`);
+    throw new Error(await relayErrorMessage(response));
   }
   return (await response.json()) as T;
+}
+
+async function relayErrorMessage(response: Response) {
+  const detail = await relayErrorDetail(response);
+  return `Renewal relay request failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+}
+
+async function relayErrorDetail(response: Response) {
+  const text = await response.text().catch(() => "");
+  if (!text.trim()) return "";
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; detail?: unknown; message?: unknown };
+    const error = parsed.error ?? parsed.detail ?? parsed.message;
+    return typeof error === "string" ? error : text;
+  } catch {
+    return text;
+  }
 }
 
 function relayHeaders(): Record<string, string> {
