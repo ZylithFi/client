@@ -106,6 +106,8 @@ const RELEASED_LOCK_STATUSES = new Set<LocalOrderStatus>([
   "no_fill",
   "rolled",
   "failed",
+  "proof_failed",
+  "stalled",
   "cancelled",
 ]);
 const ACTIVE_ORDER_STATUSES = new Set<LocalOrderStatus>([
@@ -890,6 +892,32 @@ export default function App() {
   const activeOrders = orders.filter(o =>
     ACTIVE_ORDER_STATUSES.has(o.status),
   );
+
+  useEffect(() => {
+    if (!walletReady) return;
+    const w = walletRuntime();
+    if (!w?.isReady() || !w.releaseUnreferencedNoteLocks) return;
+    const retainedLockRefs = new Set<string>();
+    for (const order of orders) {
+      const commitment = normalizeFeltForComparison(order.orderCommitment);
+      if (commitment && commitment !== "0x0") retainedLockRefs.add(commitment);
+    }
+    for (const strategy of strategies) {
+      const parentCommitment = normalizeFeltForComparison(strategy.parent_order_commitment);
+      if (parentCommitment && parentCommitment !== "0x0") retainedLockRefs.add(parentCommitment);
+      for (const child of strategy.submitted_children) {
+        const childCommitment = normalizeFeltForComparison(child.order_commitment);
+        if (childCommitment && childCommitment !== "0x0") retainedLockRefs.add(childCommitment);
+      }
+    }
+    let cancelled = false;
+    void w.releaseUnreferencedNoteLocks([...retainedLockRefs])
+      .then((changed) => {
+        if (!cancelled && changed) setBalanceTick(value => value + 1);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [orders, strategies, walletReady]);
 
   useEffect(() => {
     if (!walletReady || strategies.length === 0 || pairs.length === 0) return;

@@ -49,6 +49,7 @@ export type PrivateStrategyChildSummary = {
 
 export type PrivateStrategySummary = {
   id: string;
+  parent_order_commitment?: string;
   mode: "TWAP" | "VWAP" | "Repeat" | "Resting";
   pair: string;
   side?: "Buy" | "Sell";

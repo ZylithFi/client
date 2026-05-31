@@ -104,6 +104,7 @@ type WalletRuntime = {
   pruneUnsettledSettlementOutputs: () => Promise<boolean>;
   syncSettlementOutputs: () => Promise<boolean>;
   syncPrivateSettlementReports: (requests: PrivateSettlementReportRequest[]) => Promise<PrivateSettlementReport[]>;
+  releaseUnreferencedNoteLocks: (retainedLockRefs: string[]) => Promise<boolean>;
   submitDepositViaWallet: (asset: string, amount: string) => Promise<{
     transaction_hash: string;
     note_commitment: string;
@@ -288,6 +289,7 @@ type MakerAttributionPlaintext = {
 
 type PrivateStrategySummary = {
   id: string;
+  parent_order_commitment?: string;
   mode: PrivateStrategyRecord["mode"];
   pair: string;
   side: Side;
@@ -1828,6 +1830,26 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return true;
   }
 
+  async function releaseUnreferencedNoteLocks(retainedLockRefs: string[]) {
+    requireUnlocked();
+    const retained = new Set(
+      retainedLockRefs
+        .map(normalizeFeltForComparison)
+        .filter(Boolean),
+    );
+    let changed = false;
+    notes = notes.map((note) => {
+      const lockRef = normalizeFeltForComparison(note.locked_by_order);
+      if (!lockRef || retained.has(lockRef)) return note;
+      changed = true;
+      return { ...note, locked_by_order: undefined };
+    });
+    if (!changed) return false;
+    await saveNotes();
+    scheduleRecoverySnapshot(false);
+    return true;
+  }
+
   function markSpentByFundingFallback(fundingFallback?: { asset?: string; amount?: string; batchId?: string }) {
     const asset = fundingFallback?.asset?.trim();
     const amount = fundingFallback?.amount?.trim();
@@ -2872,6 +2894,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   function getPrivateStrategies(): PrivateStrategySummary[] {
     return strategies.map((strategy) => ({
       id: strategy.id,
+      parent_order_commitment: strategy.parent.parent_order_commitment,
       mode: strategy.mode,
       pair: strategy.pair,
       side: strategy.side,
@@ -2964,6 +2987,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     pruneUnsettledSettlementOutputs,
     syncSettlementOutputs,
     syncPrivateSettlementReports,
+    releaseUnreferencedNoteLocks,
     submitDepositViaWallet,
     submitPrivateOrder,
     cancelPrivateOrder,
