@@ -21,7 +21,8 @@ use zylith_core::{
     output_recovery_key_tag_for_spend_authority, renewal_cancel_auth_key_felt_from_raw_key_hex,
     renewal_cancel_authority_from_raw_key_hex, renewal_parent_commitment,
     renewal_parent_secret_commitment, sign_note_consolidation_authorization,
-    sign_order_authorization, spend_auth_key_felt_from_raw_key_hex,
+    sign_order_authorization, sign_renewal_relay_package_authorization,
+    spend_auth_key_felt_from_raw_key_hex,
     spend_authority_from_raw_key_hex, verify_output_note_membership,
     withdraw_auth_key_felt_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
 };
@@ -222,6 +223,34 @@ pub fn zylith_wallet_build_renewal_parent_cancel_submission_plan(
     })
     .map_err(js_error)?;
     to_json(&plan)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_sign_renewal_relay_package_authorization(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    let request: BuildRenewalRelayPackageAuthorizationRequest = from_json(input_json)?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let order_cancel_key_hex = hex::encode(keys.order_cancellation_key);
+    let parent_cancel_authority =
+        renewal_cancel_authority_from_raw_key_hex(&order_cancel_key_hex).map_err(js_error)?;
+    if parent_cancel_authority != request.parent_cancel_authority {
+        return Err(js_error("relay package authority does not match wallet"));
+    }
+    let renewal_cancel_auth_key =
+        renewal_cancel_auth_key_felt_from_raw_key_hex(&order_cancel_key_hex);
+    let authorization = sign_renewal_relay_package_authorization(
+        &renewal_cancel_auth_key,
+        &request.package_commitment,
+        &parent_cancel_authority,
+    )
+    .map_err(js_error)?;
+    to_json(&BuildRenewalRelayPackageAuthorizationResponse {
+        signer_public_key: parent_cancel_authority,
+        signature_r: authorization.signature_r,
+        signature_s: authorization.signature_s,
+    })
 }
 
 #[wasm_bindgen]
@@ -793,6 +822,20 @@ pub struct BuildRenewalParentCancelSubmissionPlanRequest {
     pub parent_cancel_authority: String,
     #[serde(default)]
     pub prior_renewal_entries: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildRenewalRelayPackageAuthorizationRequest {
+    pub seed_hex: String,
+    pub package_commitment: String,
+    pub parent_cancel_authority: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BuildRenewalRelayPackageAuthorizationResponse {
+    pub signer_public_key: String,
+    pub signature_r: String,
+    pub signature_s: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

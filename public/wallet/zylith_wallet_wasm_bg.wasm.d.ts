@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const zylith_wallet_build_deposit_submission_plan: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_build_note_consolidation_draft: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_private_order_submission: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_renewal_parent_cancel_submission_plan: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_settlement_output_withdrawal_submission_plan: (a: number, b: number) => [number, number, number, number];
@@ -20,6 +21,8 @@ export const zylith_wallet_recovery_auth_tag: (a: number, b: number) => [number,
 export const zylith_wallet_scan_output_bundle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const zylith_wallet_scan_output_bundle_with_root: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const zylith_wallet_seed_hex_to_mnemonic: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_sign_note_consolidation_witness: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_sign_renewal_relay_package_authorization: (a: number, b: number) => [number, number, number, number];
 export const init: () => void;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;

@@ -173,6 +173,7 @@ type WalletWasmModule = {
   zylith_wallet_build_private_order_submission: (inputJson: string) => string;
   zylith_wallet_build_strategy_parent: (inputJson: string) => string;
   zylith_wallet_build_renewal_parent_cancel_submission_plan: (inputJson: string) => string;
+  zylith_wallet_sign_renewal_relay_package_authorization: (inputJson: string) => string;
   zylith_wallet_build_note_consolidation_draft: (inputJson: string) => string;
   zylith_wallet_sign_note_consolidation_witness: (inputJson: string) => string;
   zylith_wallet_scan_output_bundle: (seedHex: string, bundleJson: string) => string;
@@ -313,6 +314,8 @@ type PrivateStrategySummary = {
     end_epoch: number;
     slot_count: number;
     relay_mode?: "SelfRelay" | "ZylithRelay";
+    parent_cancel_authority?: string;
+    relay_authorization?: OfflineRenewalPackage["relay_authorization"];
   };
   parent_cancel_transaction_hash?: string;
   last_error?: string;
@@ -625,6 +628,12 @@ type OfflineRenewalPackage = {
   end_epoch: number;
   slot_count: number;
   relay_mode?: "SelfRelay" | "ZylithRelay";
+  parent_cancel_authority: string;
+  relay_authorization?: {
+    signer_public_key: string;
+    signature_r: string;
+    signature_s: string;
+  };
   ingress_key_registry_fingerprint?: string;
   relay_policy: {
     prover_url: string;
@@ -1899,6 +1908,22 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
   }
 
+  function signRenewalRelayPackageAuthorization(
+    unlockedSeed: string,
+    packageCommitment: string,
+    parentCancelAuthority: string,
+  ) {
+    return JSON.parse(
+      core.zylith_wallet_sign_renewal_relay_package_authorization(
+        JSON.stringify({
+          seed_hex: unlockedSeed,
+          package_commitment: packageCommitment,
+          parent_cancel_authority: parentCancelAuthority,
+        }),
+      ),
+    ) as OfflineRenewalPackage["relay_authorization"];
+  }
+
   async function cancelPrivateStrategy(strategyId: string) {
     requireUnlocked();
     const strategy = strategies.find((entry) => entry.id === strategyId);
@@ -2403,6 +2428,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       end_epoch: slots[slots.length - 1]?.epoch_id ?? firstEpoch,
       slot_count: slots.length,
       relay_mode: draft.relayMode ?? "SelfRelay",
+      parent_cancel_authority: strategy.parent.parent_cancel_authority,
       ingress_key_registry_fingerprint: ingressKeyPin || undefined,
       relay_policy: {
         prover_url: proverUrl,
@@ -2419,6 +2445,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         package_commitment: undefined,
       }),
     };
+    offlinePackage.relay_authorization = signRenewalRelayPackageAuthorization(
+      unlockedSeed,
+      offlinePackage.package_commitment,
+      offlinePackage.parent_cancel_authority,
+    );
     strategy.offline_package = offlinePackage;
     strategies.push(strategy);
     for (const lock of fundingLocks) {
@@ -2438,6 +2469,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   async function createOfflineRenewalPackageForStrategy(
     strategy: PrivateStrategyRecord,
   ): Promise<OfflineRenewalPackage> {
+    const { seedHex: unlockedSeed } = requireUnlocked();
     if (!coordinatorUrl || !proverUrl) {
       throw new Error("Coordinator and private ingress URLs are required for offline renewal packages");
     }
@@ -2557,6 +2589,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       end_epoch: slots[slots.length - 1]?.epoch_id ?? firstEpoch,
       slot_count: slots.length,
       relay_mode: strategy.offline_package?.relay_mode ?? "SelfRelay",
+      parent_cancel_authority: strategy.parent.parent_cancel_authority,
       ingress_key_registry_fingerprint: ingressKeyPin || undefined,
       relay_policy: {
         prover_url: proverUrl,
@@ -2573,6 +2606,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         package_commitment: undefined,
       }),
     };
+    offlinePackage.relay_authorization = signRenewalRelayPackageAuthorization(
+      unlockedSeed,
+      offlinePackage.package_commitment,
+      offlinePackage.parent_cancel_authority,
+    );
     strategy.offline_package = offlinePackage;
     strategy.max_children = Math.max(strategy.max_children, strategy.next_child_index - 1);
     strategy.renewal_window_children = slotCount;
@@ -2860,6 +2898,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         end_epoch: strategy.offline_package.end_epoch,
         slot_count: strategy.offline_package.slot_count,
         relay_mode: strategy.offline_package.relay_mode,
+        parent_cancel_authority: strategy.offline_package.parent_cancel_authority,
+        relay_authorization: strategy.offline_package.relay_authorization,
       } : undefined,
       parent_cancel_transaction_hash: strategy.parent_cancel_transaction_hash,
       last_error: strategy.last_error,

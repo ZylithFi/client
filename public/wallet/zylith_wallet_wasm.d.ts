@@ -5,6 +5,8 @@ export function init(): void;
 
 export function zylith_wallet_build_deposit_submission_plan(input_json: string): string;
 
+export function zylith_wallet_build_note_consolidation_draft(input_json: string): string;
+
 export function zylith_wallet_build_private_order_submission(input_json: string): string;
 
 export function zylith_wallet_build_renewal_parent_cancel_submission_plan(input_json: string): string;
@@ -41,11 +43,16 @@ export function zylith_wallet_scan_output_bundle_with_root(seed_hex: string, bun
 
 export function zylith_wallet_seed_hex_to_mnemonic(seed_hex: string): string;
 
+export function zylith_wallet_sign_note_consolidation_witness(input_json: string): string;
+
+export function zylith_wallet_sign_renewal_relay_package_authorization(input_json: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly zylith_wallet_build_deposit_submission_plan: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_build_note_consolidation_draft: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_private_order_submission: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_renewal_parent_cancel_submission_plan: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_settlement_output_withdrawal_submission_plan: (a: number, b: number) => [number, number, number, number];
@@ -64,6 +71,8 @@ export interface InitOutput {
     readonly zylith_wallet_scan_output_bundle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly zylith_wallet_scan_output_bundle_with_root: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly zylith_wallet_seed_hex_to_mnemonic: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_sign_note_consolidation_witness: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_sign_renewal_relay_package_authorization: (a: number, b: number) => [number, number, number, number];
     readonly init: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

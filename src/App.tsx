@@ -849,25 +849,27 @@ export default function App() {
 
   useEffect(() => {
     if (!walletReady) return;
-    const packageIds = Array.from(new Set(
+    const renewalPackages = Array.from(
+      new Map(
       strategies
         .map(strategy => strategy.offline_package)
         .filter((pkg): pkg is NonNullable<typeof pkg> => pkg?.relay_mode === "ZylithRelay")
-        .map(pkg => pkg.package_id),
-    ));
-    if (packageIds.length === 0) return;
+        .map(pkg => [pkg.package_id, pkg] as const),
+      ).values(),
+    );
+    if (renewalPackages.length === 0) return;
     let cancelled = false;
     async function syncManagedRelayResults() {
       const w = walletRuntime();
       if (!w?.isReady()) return;
       let changed = false;
-      for (const packageId of packageIds) {
-        const response = await fetchManagedRenewalPackageResults(packageId).catch((error: unknown) => {
+      for (const renewalPackage of renewalPackages) {
+        const response = await fetchManagedRenewalPackageResults(renewalPackage).catch((error: unknown) => {
           setSubmitError(userFacingErrorMessage(error));
           return null;
         });
         if (!response?.results?.length || cancelled) continue;
-        changed = await w.recordOfflineRenewalRelayResults(packageId, response.results).catch(() => false) || changed;
+        changed = await w.recordOfflineRenewalRelayResults(renewalPackage.package_id, response.results).catch(() => false) || changed;
       }
       if (!cancelled && changed) setBalanceTick(value => value + 1);
     }

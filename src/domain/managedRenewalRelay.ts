@@ -20,10 +20,19 @@ type ManagedRelayPackageResults = {
   results: OfflineRenewalRelayResult[];
 };
 
+type RelayAuthorizationHeaders = {
+  package_commitment?: string;
+  parent_cancel_authority?: string;
+  relay_authorization?: {
+    signer_public_key: string;
+    signature_r: string;
+    signature_s: string;
+  };
+};
+
 const managedRelayUrl = normalizeUrl(
   import.meta.env.VITE_ZYLITH_RENEWAL_RELAY_URL || localServiceUrl(3400),
 );
-const managedRelayToken = normalizeText(import.meta.env.VITE_ZYLITH_RENEWAL_RELAY_TOKEN);
 
 export function managedRenewalRelayConfigured(): boolean {
   return Boolean(managedRelayUrl);
@@ -37,18 +46,26 @@ export async function submitManagedRenewalPackage(
 }
 
 export async function fetchManagedRenewalPackageResults(
-  packageId: string,
+  renewalPackage: RelayAuthorizationHeaders & { package_id: string },
 ): Promise<ManagedRelayPackageResults | null> {
   if (!managedRelayUrl) return null;
   return fetchJson<ManagedRelayPackageResults>(
     managedRelayUrl,
-    `/api/relay/packages/${encodeURIComponent(packageId)}/results`,
+    `/api/relay/packages/${encodeURIComponent(renewalPackage.package_id)}/results`,
+    relayAuthorizationHeaders(renewalPackage),
   );
 }
 
-async function fetchJson<T>(baseUrl: string, path: string): Promise<T | null> {
+async function fetchJson<T>(
+  baseUrl: string,
+  path: string,
+  authHeaders: Record<string, string> = {},
+): Promise<T | null> {
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: relayHeaders(),
+    headers: {
+      ...relayHeaders(),
+      ...authHeaders,
+    },
   });
   if (response.status === 404) return null;
   if (!response.ok) {
@@ -77,7 +94,18 @@ async function postJson<T>(baseUrl: string, path: string, body: unknown): Promis
 function relayHeaders(): Record<string, string> {
   return {
     accept: "application/json",
-    ...(managedRelayToken ? { authorization: `Bearer ${managedRelayToken}` } : {}),
+  };
+}
+
+function relayAuthorizationHeaders(input: RelayAuthorizationHeaders): Record<string, string> {
+  const auth = input.relay_authorization;
+  if (!auth || !input.package_commitment || !input.parent_cancel_authority) return {};
+  return {
+    "x-zylith-relay-package-commitment": input.package_commitment,
+    "x-zylith-relay-parent-cancel-authority": input.parent_cancel_authority,
+    "x-zylith-relay-signer": auth.signer_public_key,
+    "x-zylith-relay-signature-r": auth.signature_r,
+    "x-zylith-relay-signature-s": auth.signature_s,
   };
 }
 
