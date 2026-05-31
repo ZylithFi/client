@@ -1092,6 +1092,8 @@ export default function App() {
       if (result.offline_package?.relay_mode === "ZylithRelay") {
         try {
           await submitManagedRenewalPackage(result.offline_package);
+          await w.markPrivateStrategyRelayRegistered?.(result.offline_package.package_id).catch(() => false);
+          setBalanceTick(v => v + 1);
         } catch (relayError) {
           await w.discardPreparedPrivateStrategy?.(result.offline_package.package_id).catch(() => false);
           setBalanceTick(v => v + 1);
@@ -1288,6 +1290,7 @@ export default function App() {
       const renewalPackage = await w.refreshPrivateStrategyPackage(strategyId);
       if (renewalPackage.relay_mode === "ZylithRelay") {
         await submitManagedRenewalPackage(renewalPackage);
+        await w.markPrivateStrategyRelayRegistered?.(renewalPackage.package_id).catch(() => false);
       }
       setBalanceTick(v => v + 1);
     } catch (error) {

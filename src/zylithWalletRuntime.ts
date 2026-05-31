@@ -129,6 +129,7 @@ type WalletRuntime = {
     order_commitment: string;
     cancellation_secret: string;
   }) => Promise<{ cancelled_at_unix_ms: number }>;
+  markPrivateStrategyRelayRegistered: (strategyId: string) => Promise<boolean>;
   cancelPrivateStrategy: (strategyId: string) => Promise<{
     cancelled_at_unix_ms: number;
     parent_cancel_transaction_hash?: string;
@@ -684,7 +685,7 @@ type PrivateStrategyRecord = {
   parent: StrategyParentMaterial;
   submitted_children: StrategyChildRecord[];
   offline_package?: OfflineRenewalPackage;
-  status: "active" | "delegated" | "paused" | "completed" | "failed" | "cancelled";
+  status: "active" | "delegated" | "pending_relay" | "paused" | "completed" | "failed" | "cancelled";
   parent_cancel_marker?: string;
   parent_cancel_transaction_hash?: string;
   parent_cancelled_at_unix_ms?: number;
@@ -1789,6 +1790,18 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return accepted;
   }
 
+  async function markPrivateStrategyRelayRegistered(strategyId: string) {
+    requireUnlocked();
+    const strategy = strategies.find((entry) => entry.id === strategyId);
+    if (!strategy || !strategy.offline_package) return false;
+    if (strategy.status !== "pending_relay") return false;
+    strategy.status = "delegated";
+    strategy.updated_at_unix_ms = Date.now();
+    await saveStrategies();
+    scheduleRecoverySnapshot(false);
+    return true;
+  }
+
   async function settlePrivateOrderLock(
     orderCommitment: string,
     outcome: "released" | "spent",
@@ -2071,11 +2084,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       throw new Error("Renewal package refresh is only supported for resting maker curves");
     }
     const offlinePackage = await createOfflineRenewalPackageForStrategy(strategy);
-    strategy.status = "delegated";
+    strategy.status = offlinePackage.relay_mode === "ZylithRelay" ? "pending_relay" : "delegated";
     strategy.updated_at_unix_ms = Date.now();
     await saveNotes();
     await saveStrategies();
-    await pushRecoverySnapshot(true);
+    scheduleRecoverySnapshot(true);
     return offlinePackage;
   }
 
@@ -2361,7 +2374,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       renewal_window_children: maxChildren,
       parent,
       submitted_children: [],
-      status: "delegated",
+      status: draft.relayMode === "ZylithRelay" ? "pending_relay" : "delegated",
       created_at_unix_ms: Date.now(),
       updated_at_unix_ms: Date.now(),
     };
@@ -2484,7 +2497,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     await saveNotes();
     await saveStrategies();
-    await pushRecoverySnapshot(true);
+    scheduleRecoverySnapshot(true);
     return offlinePackage;
   }
 
@@ -2991,6 +3004,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     submitDepositViaWallet,
     submitPrivateOrder,
     cancelPrivateOrder,
+    markPrivateStrategyRelayRegistered,
     cancelPrivateStrategy,
     discardPreparedPrivateStrategy,
     pausePrivateStrategy,
@@ -3205,7 +3219,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const payload: RecoverySnapshotPayload = {
       version: 1,
       notes,
-      strategies,
+      strategies: recoverySnapshotStrategies(),
       created_at_unix_ms: now,
     };
     const artifact = JSON.parse(
@@ -3226,6 +3240,24 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     );
     lastRecoverySnapshotAtUnixMs = now;
     return true;
+  }
+
+  function recoverySnapshotStrategies(): PrivateStrategyRecord[] {
+    return strategies.map((strategy) => {
+      if (!strategy.offline_package?.slots?.length) return strategy;
+      return {
+        ...strategy,
+        offline_package: {
+          ...strategy.offline_package,
+          // Slot ingress payloads are large and recoverable from the strategy parent.
+          // Keep recovery artifacts small enough to never block relay activation.
+          slots: strategy.offline_package.slots.map((slot) => ({
+            ...slot,
+            ingress_request: undefined,
+          })),
+        },
+      };
+    });
   }
 
   function scheduleRecoverySnapshot(force: boolean) {
@@ -3624,7 +3656,7 @@ function normalizeJitterBps(value: number | undefined) {
   return Math.max(0, Math.min(5_000, Math.round(value ?? 0)));
 }
 
-type NormalizedMakerCurvePoint = { price: bigint; base_amount: bigint };
+export type NormalizedMakerCurvePoint = { price: bigint; base_amount: bigint };
 
 function normalizeMakerCurvePoints(draft: PrivateOrderDraft) {
   return (draft.makerCurvePoints ?? [])
@@ -3655,7 +3687,7 @@ function materializeMakerCurveDraft(draft: PrivateOrderDraft): PrivateOrderDraft
   };
 }
 
-function rotateMakerCurvePoints(
+export function rotateMakerCurvePoints(
   points: NormalizedMakerCurvePoint[],
   maxAbsoluteBps: number,
 ): NormalizedMakerCurvePoint[] {
@@ -3664,10 +3696,7 @@ function rotateMakerCurvePoints(
   return enforceStrictMakerCurvePrices(
     points.map((point) => ({
       price: applyBasisPointFactor(point.price, priceFactor),
-      base_amount: applyBasisPointFactor(
-        point.base_amount,
-        BigInt(randomBasisPointsJitter(maxAbsoluteBps)),
-      ),
+      base_amount: point.base_amount,
     })),
   );
 }

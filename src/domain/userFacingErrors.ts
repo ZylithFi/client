@@ -122,6 +122,9 @@ export function userFacingErrorMessage(
   if (/^coordinator\s+\d{3}$/i.test(message) || /coordinator .*urls are required/i.test(message)) {
     return "Coordinator is unavailable. Please retry later.";
   }
+  if (/HTTP 413|payload too large|request entity too large|content too large/i.test(message)) {
+    return "Request is too large for the service. Choose a shorter window and retry.";
+  }
   if (/private ingress key registry pin mismatch/i.test(message)) {
     return "Private execution key verification failed. Please retry later.";
   }

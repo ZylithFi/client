@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { PairConfig } from "../components/OrderTicket";
-import { LiquidityCurvesScreen } from "./LiquidityScreens";
+import type { PrivateStrategySummary } from "../domain/orderLifecycle";
+import { LiquidityCurvesScreen, LiquidityWorkspace } from "./LiquidityScreens";
 
 const pairs: PairConfig[] = [
   {
@@ -363,5 +364,61 @@ describe("LiquidityCurvesScreen", () => {
     fireEvent.change(selects[2], { target: { value: "SelfRelay" } });
     expect(selects[2]).toHaveValue("SelfRelay");
     expect(selects[1]).toHaveValue("1");
+  });
+
+  it("does not show locally prepared relay curves until relay registration is confirmed", () => {
+    const pendingStrategy: PrivateStrategySummary = {
+      id: "strategy-pending",
+      mode: "Resting",
+      pair: "STRK/USDC",
+      side: "Buy",
+      status: "pending_relay",
+      total_amount: "3000000000000000000",
+      remaining_amount: "3000000000000000000",
+      child_amount: "3000000000000000000",
+      limit_price: "20000000000000000",
+      price_base_scale: "1000000000000000000",
+      max_children: 960,
+      next_child_index: 1,
+      start_epoch: 10,
+      end_epoch: 969,
+      maker_curve_points: [
+        { price: "10000000000000000", base_amount: "1000000000000000000" },
+        { price: "15000000000000000", base_amount: "1000000000000000000" },
+        { price: "20000000000000000", base_amount: "1000000000000000000" },
+      ],
+      submitted_children: [],
+    };
+
+    render(
+      <LiquidityWorkspace
+        tab="curves"
+        pairs={pairs}
+        activePairId="STRK/USDC"
+        setActivePairId={vi.fn()}
+        orders={[]}
+        strategies={[pendingStrategy]}
+        batches={[]}
+        balances={[{ asset: "USDC", available: "1170000", locked: "0" }]}
+        pendingDeposits={[]}
+        withdrawableNotes={[]}
+        settlementTranscripts={{}}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onSubmitCurve={vi.fn()}
+        onCancelOrder={vi.fn()}
+        onCancelStrategy={vi.fn()}
+        onPauseStrategy={vi.fn()}
+        onResumeStrategy={vi.fn()}
+        onRefreshStrategyPackage={vi.fn()}
+        onDeposit={vi.fn()}
+        onWithdraw={vi.fn()}
+        onNavigateCurves={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Active curves").closest(".liq-panel-hd")).toHaveTextContent("0 running");
+    expect(screen.queryByText("STRK/USDC Bid")).not.toBeInTheDocument();
   });
 });

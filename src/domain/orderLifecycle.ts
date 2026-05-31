@@ -53,7 +53,7 @@ export type PrivateStrategySummary = {
   mode: "TWAP" | "VWAP" | "Repeat" | "Resting";
   pair: string;
   side?: "Buy" | "Sell";
-  status: "active" | "delegated" | "paused" | "completed" | "failed" | "cancelled";
+  status: "active" | "delegated" | "pending_relay" | "paused" | "completed" | "failed" | "cancelled";
   total_amount: string;
   remaining_amount: string;
   child_amount: string;

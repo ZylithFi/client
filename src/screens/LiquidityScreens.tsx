@@ -262,6 +262,7 @@ function buildCurveRecords(
   const consumedOrderRefs = new Set<string>();
 
   for (const strategy of strategies.filter(strategy => strategy.mode === "Resting")) {
+    if (strategy.status === "pending_relay") continue;
     const pair = pairs.find(candidate => candidate.pair_id === strategy.pair);
     const relatedOrders = orders.filter(order => order.strategyId === strategy.id);
     for (const order of relatedOrders) consumedOrderRefs.add(order.ordRef);

@@ -82,4 +82,10 @@ describe("userFacingErrorMessage", () => {
       new Error("Zylith relay endpoint is not configured"),
     )).toBe("Zylith relay endpoint is unavailable. Refresh the app and retry.");
   });
+
+  it("explains body-size failures without a generic fallback", () => {
+    expect(userFacingErrorMessage(
+      new Error("request to coordinator failed with HTTP 413: payload too large"),
+    )).toBe("Request is too large for the service. Choose a shorter window and retry.");
+  });
 });
