@@ -1922,8 +1922,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         .map((child) => normalizeFeltForComparison(child.order_commitment))
         .filter(Boolean),
     );
+    const strategyLockRef = strategyFundingLockRef(strategy);
     notes = notes.map((note) =>
-      note.locked_by_order && childCommitments.has(normalizeFeltForComparison(note.locked_by_order))
+      note.locked_by_order && (
+        childCommitments.has(normalizeFeltForComparison(note.locked_by_order)) ||
+        normalizeFeltForComparison(note.locked_by_order) === strategyLockRef
+      )
         ? { ...note, locked_by_order: undefined }
         : note,
     );
@@ -2286,6 +2290,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
     const slots: OfflineRenewalSlot[] = [];
     const reservedNotes = new Set<string>();
+    let restingFundingNotes: LocalNoteRecord[] | null = null;
     const fundingLocks: Array<{ notes: LocalNoteRecord[]; orderCommitment: string }> = [];
     for (let offset = 0; offset < maxChildren; offset += 1) {
       const amount = strategyChildAmount(strategy);
@@ -2310,15 +2315,25 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         relayMode: draft.relayMode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
-      const fundingNotes = selectFundingNotes(materializedChildDraft, reservedNotes);
-      for (const fundingNote of fundingNotes) {
-        reservedNotes.add(fundingNote.note_commitment);
+      const fundingNotes = strategy.mode === "Resting"
+        ? (restingFundingNotes ??= selectFundingNotes(
+            materializedChildDraft,
+            new Set<string>(),
+            strategyFundingLockRef(strategy),
+          ))
+        : selectFundingNotes(materializedChildDraft, reservedNotes);
+      if (strategy.mode !== "Resting") {
+        for (const fundingNote of fundingNotes) {
+          reservedNotes.add(fundingNote.note_commitment);
+        }
       }
       const built = buildPrivateOrderForSlot(materializedChildDraft, batch, fundingNotes, registry, {
         material: strategy.parent,
         childIndex,
       });
-      fundingLocks.push({ notes: fundingNotes, orderCommitment: built.order_commitment });
+      if (strategy.mode !== "Resting" || fundingLocks.length === 0) {
+        fundingLocks.push({ notes: fundingNotes, orderCommitment: built.order_commitment });
+      }
       strategy.submitted_children.push({
         parent_child_index: childIndex,
         batch_id: batch.batch_id,
@@ -2377,9 +2392,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.offline_package = offlinePackage;
     strategies.push(strategy);
     for (const lock of fundingLocks) {
-      const orderCommitment = normalizeFeltForComparison(lock.orderCommitment);
+      const lockRef = strategy.mode === "Resting"
+        ? strategyFundingLockRef(strategy)
+        : normalizeFeltForComparison(lock.orderCommitment);
       for (const note of lock.notes) {
-        note.locked_by_order = orderCommitment;
+        note.locked_by_order = lockRef;
       }
     }
     await saveNotes();
@@ -2415,6 +2432,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     );
     const slots: OfflineRenewalSlot[] = [];
     const reservedNotes = new Set<string>();
+    let restingFundingNotes: LocalNoteRecord[] | null = null;
     const fundingLocks: Array<{ notes: LocalNoteRecord[]; orderCommitment: string }> = [];
     for (let offset = 0; offset < slotCount; offset += 1) {
       const amount = strategy.mode === "Resting"
@@ -2451,15 +2469,25 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         relayMode: strategy.offline_package?.relay_mode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
-      const fundingNotes = selectFundingNotes(materializedChildDraft, reservedNotes);
-      for (const fundingNote of fundingNotes) {
-        reservedNotes.add(fundingNote.note_commitment);
+      const fundingNotes = strategy.mode === "Resting"
+        ? (restingFundingNotes ??= selectFundingNotes(
+            materializedChildDraft,
+            new Set<string>(),
+            strategyFundingLockRef(strategy),
+          ))
+        : selectFundingNotes(materializedChildDraft, reservedNotes);
+      if (strategy.mode !== "Resting") {
+        for (const fundingNote of fundingNotes) {
+          reservedNotes.add(fundingNote.note_commitment);
+        }
       }
       const built = buildPrivateOrderForSlot(materializedChildDraft, batch, fundingNotes, registry, {
         material: strategy.parent,
         childIndex,
       });
-      fundingLocks.push({ notes: fundingNotes, orderCommitment: built.order_commitment });
+      if (strategy.mode !== "Resting" || fundingLocks.length === 0) {
+        fundingLocks.push({ notes: fundingNotes, orderCommitment: built.order_commitment });
+      }
       strategy.submitted_children.push({
         parent_child_index: childIndex,
         batch_id: batch.batch_id,
@@ -2521,9 +2549,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     strategy.end_epoch = offlinePackage.end_epoch;
     strategy.last_error = undefined;
     for (const lock of fundingLocks) {
-      const orderCommitment = normalizeFeltForComparison(lock.orderCommitment);
+      const lockRef = strategy.mode === "Resting"
+        ? strategyFundingLockRef(strategy)
+        : normalizeFeltForComparison(lock.orderCommitment);
       for (const note of lock.notes) {
-        note.locked_by_order = orderCommitment;
+        note.locked_by_order = lockRef;
       }
     }
     return offlinePackage;
@@ -3192,13 +3222,21 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return `${publicConfig?.account_id ?? "locked"}:${deploymentScope}`;
   }
 
-  function selectFundingNotes(draft: PrivateOrderDraft, reservedNoteCommitments = new Set<string>()) {
+  function selectFundingNotes(
+    draft: PrivateOrderDraft,
+    reservedNoteCommitments = new Set<string>(),
+    allowedLockedBy?: string,
+  ) {
     const asset = fundingAssetForDraft(draft);
     const required = fundingRequirement(draft);
+    const allowedLockRef = allowedLockedBy ? normalizeFeltForComparison(allowedLockedBy) : "";
     const candidates = notes
       .filter((record) =>
         !record.spent &&
-        !record.locked_by_order &&
+        (!record.locked_by_order || (
+          allowedLockRef !== "" &&
+          normalizeFeltForComparison(record.locked_by_order) === allowedLockRef
+        )) &&
         (record.source !== "deposit" || record.deposit_confirmed === true) &&
         !reservedNoteCommitments.has(record.note_commitment) &&
         record.note.asset_id === asset,
@@ -3567,6 +3605,10 @@ function strategyMakerCurveDraftPoints(strategy: PrivateStrategyRecord) {
     price: point.price,
     baseAmount: point.base_amount,
   }));
+}
+
+function strategyFundingLockRef(strategy: PrivateStrategyRecord) {
+  return normalizeFeltForComparison(strategy.parent.parent_order_commitment);
 }
 
 function makerCurveRotationBps(draft: PrivateOrderDraft) {

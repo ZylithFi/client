@@ -1015,6 +1015,9 @@ export default function App() {
       const fundingAmountAtomic = intent.side === "Buy"
         ? ((BigInt(atomicAmount) * BigInt(atomicPrice || "0")) / BigInt(priceBaseScale)).toString()
         : atomicAmount;
+      const atomicMakerInventoryCap = intent.shape === "curve" && intent.inventoryCap.trim()
+        ? toAtomicStr(intent.inventoryCap, submitPair.base_asset_id)
+        : undefined;
 
       const draft = {
         pair: submitPair.pair_id,
@@ -1026,8 +1029,8 @@ export default function App() {
         fillOrKill: intent.fillOrKill,
         batchId: currentBatch.batch_id,
         makerCurvePoints: atomicCurvePoints,
-        makerInventoryCap: intent.shape === "curve" && intent.inventoryCap.trim()
-          ? toAtomicStr(intent.inventoryCap, submitPair.base_asset_id)
+        makerInventoryCap: atomicMakerInventoryCap && BigInt(atomicMakerInventoryCap) > 0n
+          ? atomicMakerInventoryCap
           : undefined,
         priceBaseScale,
         submissionTimingPreference: userPreferences.submissionTiming,
@@ -1124,6 +1127,9 @@ export default function App() {
       ? curveBaseTotal.toString()
       : toAtomicStr(intent.amount, base);
     let mode = wm;
+    const atomicMakerInventoryCap = intent.shape === "curve" && intent.inventoryCap.trim()
+      ? toAtomicStr(intent.inventoryCap, base)
+      : undefined;
 
     if (intent.shape === "strategy") {
       const durationBatches = coordinatorStatus?.batch_window_ms && intent.durationHours
@@ -1145,8 +1151,8 @@ export default function App() {
       fillOrKill: intent.fillOrKill,
       batchId: previewBatch.batch_id,
       makerCurvePoints: atomicCurvePoints,
-      makerInventoryCap: intent.shape === "curve" && intent.inventoryCap.trim()
-        ? toAtomicStr(intent.inventoryCap, base)
+      makerInventoryCap: atomicMakerInventoryCap && BigInt(atomicMakerInventoryCap) > 0n
+        ? atomicMakerInventoryCap
         : undefined,
       priceBaseScale,
       submissionTimingPreference: userPreferences.submissionTiming,
