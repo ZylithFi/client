@@ -530,7 +530,7 @@ type StarknetWalletCall = {
   calldata: string[];
 };
 
-type LegacyStarknetWalletCall = {
+type WalletRequestInvokeCall = {
   contract_address: string;
   entry_point: string;
   calldata: string[];
@@ -4082,7 +4082,7 @@ function isWalletRequestUnavailableError(error: unknown) {
 async function executeWalletCalls(
   provider: StarknetInjectedProvider,
   accountCalls: StarknetWalletCall[],
-  walletCalls: LegacyStarknetWalletCall[],
+  walletCalls: WalletRequestInvokeCall[],
 ) {
   try {
     return await provider.account?.execute?.(accountCalls);
@@ -4094,7 +4094,7 @@ async function executeWalletCalls(
 
 async function requestWalletInvokeWithAccountFallback(
   provider: StarknetInjectedProvider,
-  walletCalls: LegacyStarknetWalletCall[],
+  walletCalls: WalletRequestInvokeCall[],
   accountCalls: StarknetWalletCall[],
 ) {
   try {
@@ -4113,7 +4113,7 @@ async function requestWalletInvokeWithAccountFallback(
 
 async function requestWalletInvoke(
   provider: StarknetInjectedProvider,
-  walletCalls: LegacyStarknetWalletCall[],
+  walletCalls: WalletRequestInvokeCall[],
   accountCalls: StarknetWalletCall[],
 ) {
   if (!provider.request) return undefined;

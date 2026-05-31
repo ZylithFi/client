@@ -127,7 +127,6 @@ export type OrderLifecycleOutputNote = {
   maker_attribution?: MakerBandAttribution;
 };
 
-const LEGACY_SESSION_ORDERS_KEY = "zylith.session.orders";
 const ORDERS_KEY_PREFIX = "zylith.local.orders";
 const VALID_ORDER_STATUSES = new Set<LocalOrderStatus>([
   "queued",
@@ -194,14 +193,7 @@ export function loadOrders(ownerKey: string | null): LocalOrder[] {
   try {
     const key = ordersKey(ownerKey);
     const stored = localStorage.getItem(key);
-    if (stored) return normalizeOrders(JSON.parse(stored));
-
-    const legacy = sessionStorage.getItem(LEGACY_SESSION_ORDERS_KEY);
-    if (!legacy) return [];
-    const migrated = normalizeOrders(JSON.parse(legacy));
-    localStorage.setItem(key, JSON.stringify(migrated));
-    sessionStorage.removeItem(LEGACY_SESSION_ORDERS_KEY);
-    return migrated;
+    return stored ? normalizeOrders(JSON.parse(stored)) : [];
   } catch {
     return [];
   }

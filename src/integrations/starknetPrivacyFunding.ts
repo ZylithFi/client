@@ -573,7 +573,7 @@ async function executeWalletCall(provider: StarknetProviderLike, call: Call) {
 }
 
 async function requestWalletInvoke(provider: StarknetProviderLike, call: Call) {
-  const legacyCall = {
+  const walletRequestCall = {
     contract_address: call.contractAddress,
     entry_point: call.entrypoint,
     calldata: call.calldata ?? [],
@@ -586,7 +586,7 @@ async function requestWalletInvoke(provider: StarknetProviderLike, call: Call) {
   try {
     return await provider.request?.({
       type: "wallet_addInvokeTransaction",
-      params: { calls: [legacyCall] },
+      params: { calls: [walletRequestCall] },
     });
   } catch (error) {
     if (!isWalletCallShapeError(error)) throw error;
