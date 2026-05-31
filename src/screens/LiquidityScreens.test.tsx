@@ -172,6 +172,44 @@ describe("LiquidityCurvesScreen", () => {
     expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeDisabled();
   });
 
+  it("blocks activation when funding preview cannot select notes", () => {
+    render(
+      <LiquidityCurvesScreen
+        pairs={pairs}
+        records={[]}
+        balances={[{ asset: "USDC", available: "1000000", locked: "0" }]}
+        pendingDeposits={[]}
+        activePairId="ETH/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onPreviewFunding={() => {
+          throw new Error("No unlocked USDC note can fund this order");
+        }}
+        onSubmitCurve={vi.fn()}
+        onCancelCurve={vi.fn()}
+        onEditCurve={vi.fn()}
+        onPauseCurve={vi.fn()}
+        onResumeCurve={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    const inputs = screen.getAllByRole("textbox");
+    fireEvent.change(inputs[0], { target: { value: "2500" } });
+    fireEvent.change(inputs[1], { target: { value: "3" } });
+    fireEvent.change(inputs[2], { target: { value: "2505" } });
+    fireEvent.change(inputs[3], { target: { value: "3" } });
+    fireEvent.change(inputs[4], { target: { value: "2510" } });
+    fireEvent.change(inputs[5], { target: { value: "3" } });
+
+    expect(screen.getByText(/No unlocked USDC note can fund this order/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeDisabled();
+  });
+
   it("shows cancel with the active curve management actions", () => {
     const onCancelCurve = vi.fn();
     const record = {

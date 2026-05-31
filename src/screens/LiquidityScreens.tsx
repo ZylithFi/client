@@ -691,10 +691,40 @@ export function LiquidityCurvesScreen({
   const renewalHours = renewalHoursForPreset(renewalDuration, customRenewalDays);
   const renewalLabel = renewalWindowLabel(renewalDuration, renewalHours);
   const localRelayTooLong = renewing && relayMode === "SelfRelay" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS;
+  const fundingPreviewErrors = sideBandSets
+    .map(([curveSide, bands]) => {
+      const filledBands = bandRowsFilled(bands);
+      if (!walletReady || filledBands.length < MIN_CURVE_BANDS || !onPreviewFunding) return null;
+      try {
+        onPreviewFunding({
+          pairId: selectedPair.pair_id,
+          side: sideFromCurveSide(curveSide),
+          shape: "curve",
+          stratKind: "TWAP",
+          resting: renewing,
+          amount: "",
+          limitPrice: "",
+          minFill: "",
+          fillOrKill: false,
+          curvePoints: filledBands,
+          inventoryCap,
+          durationHours: renewalHours.toString(),
+          childSize: "",
+          priceLimit: "",
+          jitter: 0,
+          relayMode: renewing ? relayMode : "SelfRelay",
+        });
+        return null;
+      } catch (error) {
+        return userFacingErrorMessage(error, "Funding preview unavailable.");
+      }
+    })
+    .filter((message): message is string => Boolean(message));
   const canSubmit = walletReady &&
     !submitting &&
     !localRelayTooLong &&
     missingInventoryAssets.length === 0 &&
+    fundingPreviewErrors.length === 0 &&
     sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
 
   async function submit() {
@@ -879,6 +909,9 @@ export function LiquidityCurvesScreen({
                   ? "Continuous uses rolling 90d relay packages. Refresh before expiry to extend the curve."
                   : "Zylith relay submits pre-authorized child slots for the selected window. Cancel invalidates unused slots on-chain."}
             </div>
+          )}
+          {side === "two-sided" && fundingPreviewErrors[0] && (
+            <div className="wc-note warn">{fundingPreviewErrors[0]}</div>
           )}
           {submitError && <div className="wc-note warn">{submitError}</div>}
           <button className="submit-btn curve-cta" disabled={!canSubmit} onClick={() => { void submit(); }}>
