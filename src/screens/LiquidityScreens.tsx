@@ -883,6 +883,7 @@ export function LiquidityCurvesScreen({
                   <span>{record.pair}</span>
                   <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>{record.sideLabel}</span>
                   <span className={`pill ${record.status === "Expiring" ? "warn" : record.status === "Paused" ? "muted" : "good"}`}>{record.status}</span>
+                  <button type="button" className="table-action liq-card-cancel" onClick={() => onCancelCurve(record)}>Cancel</button>
                 </div>
                 <div className="liq-active-rate">{formatPct(curveFillRate(record.relatedOrders))}</div>
                 <div className="liq-depth-bar">
@@ -927,7 +928,6 @@ export function LiquidityCurvesScreen({
                       : <button type="button" onClick={() => onPauseCurve(record)}>Pause</button>
                   )}
                   <button type="button" onClick={() => onEditCurve(record)}>Edit</button>
-                  <button type="button" onClick={() => onCancelCurve(record)}>Cancel</button>
                 </div>
               </div>
             ))
@@ -950,18 +950,47 @@ export function LiquidityOrdersScreen({
   onRefreshPackage: (record: LiquidityCurveRecord) => void;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [filter, setFilter] = useState<"active" | "history">("active");
   const batchStatus = new Map(batches.map(batch => [batch.batch_id, batch.status]));
   const parents = records.filter(record => record.strategy || record.relatedOrders.length > 0);
+  const displayedParents = filter === "active"
+    ? parents.filter(record => activeCurveRecords([record]).length > 0)
+    : parents.filter(record => activeCurveRecords([record]).length === 0);
 
   return (
     <div className="workspace-page liquidity-page">
       <div className="page-hd">
         <div className="page-title-block"><span className="page-title">ORDERS</span></div>
       </div>
+      {parents.length > 0 && (
+        <div className="filters">
+          <div className="filter-group">
+            <div className="filter-chips">
+              <button
+                className={`filter-chip ${filter === "active" ? "on" : ""}`}
+                onClick={() => setFilter("active")}
+              >Active</button>
+              <button
+                className={`filter-chip ${filter === "history" ? "on" : ""}`}
+                onClick={() => setFilter("history")}
+              >History</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="liq-sections">
-        {parents.length === 0 ? (
-          <div className="empty-zone"><div className="empty-mark">—</div><div className="empty-body">Child orders appear after a curve is activated.</div></div>
-        ) : parents.map(record => {
+        {displayedParents.length === 0 ? (
+          <div className="empty-zone">
+            <div className="empty-mark">—</div>
+            <div className="empty-body">
+              {parents.length === 0
+                ? "Child orders appear after a curve is activated."
+                : filter === "active"
+                  ? "No active maker orders."
+                  : "No maker order history yet."}
+            </div>
+          </div>
+        ) : displayedParents.map(record => {
           const expanded = open[record.id] ?? true;
           const children = record.strategy?.submitted_children ?? [];
           const filled = record.relatedOrders.filter(terminalFill).length;

@@ -114,6 +114,12 @@ export function userFacingErrorMessage(
   if (/renewal-backed child|Zylith relay mode requires|renewal package|resting maker strategy/i.test(message)) {
     return "Maker curves need renewal enabled. Choose a renewal window and retry.";
   }
+  if (/Renewal relay request failed with HTTP 401|Unauthorized/i.test(message)) {
+    return "Zylith relay is not authorized in this deployment. Use local browser renewal or configure relay access.";
+  }
+  if (/Renewal relay request failed with HTTP 4\d\d|Renewal relay request failed/i.test(message)) {
+    return "Zylith relay rejected this renewal package. Check the relay configuration and retry.";
+  }
   if (/maker curve order amount|curve envelope price|maker curve limit_price/i.test(message)) {
     return "Curve parameters are inconsistent. Check the band prices and depths, then retry.";
   }

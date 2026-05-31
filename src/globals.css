@@ -1683,8 +1683,9 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   display: flex;
   align-items: center;
   gap: 10px;
-  justify-content: space-between;
+  justify-content: flex-start;
 }
+.liq-active-top .liq-card-cancel { margin-left: auto; }
 .liq-active-top > span:first-child {
   color: var(--z-text-strong);
   font-family: var(--z-font-display);
