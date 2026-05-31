@@ -44,7 +44,7 @@ export async function submitManagedRenewalPackage(
   if (renewalPackage.relay_mode !== "ZylithRelay") return null;
   return postJson<ManagedRelayPackageStatus>(
     requiredManagedRelayUrl(),
-    "/api/relay/packages",
+    "/packages",
     renewalPackage,
   );
 }
@@ -55,7 +55,7 @@ export async function fetchManagedRenewalPackageResults(
   if (!managedRelayUrl) return null;
   return fetchJson<ManagedRelayPackageResults>(
     managedRelayUrl,
-    `/api/relay/packages/${encodeURIComponent(renewalPackage.package_id)}/results`,
+    `/packages/${encodeURIComponent(renewalPackage.package_id)}/results`,
     relayAuthorizationHeaders(renewalPackage),
   );
 }
@@ -69,7 +69,7 @@ export async function deleteManagedRenewalPackage(
   if (renewalPackage.relay_mode !== "ZylithRelay" || !managedRelayUrl) return false;
   return deleteJson(
     managedRelayUrl,
-    `/api/relay/packages/${encodeURIComponent(renewalPackage.package_id)}`,
+    `/packages/${encodeURIComponent(renewalPackage.package_id)}`,
     relayAuthorizationHeaders(renewalPackage),
   );
 }
