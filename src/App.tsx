@@ -9,6 +9,7 @@ import {
   reconcileOrderLifecycle,
   saveOrders,
 } from "./domain/orderLifecycle";
+import { retainedLocalNoteLockRefs } from "./domain/localNoteLocks";
 import { type PendingDeposit, type WalletBalance, type WithdrawableNote } from "./domain/shieldedBalances";
 import {
   assetScale,
@@ -897,21 +898,9 @@ export default function App() {
     if (!walletReady) return;
     const w = walletRuntime();
     if (!w?.isReady() || !w.releaseUnreferencedNoteLocks) return;
-    const retainedLockRefs = new Set<string>();
-    for (const order of orders) {
-      const commitment = normalizeFeltForComparison(order.orderCommitment);
-      if (commitment && commitment !== "0x0") retainedLockRefs.add(commitment);
-    }
-    for (const strategy of strategies) {
-      const parentCommitment = normalizeFeltForComparison(strategy.parent_order_commitment);
-      if (parentCommitment && parentCommitment !== "0x0") retainedLockRefs.add(parentCommitment);
-      for (const child of strategy.submitted_children) {
-        const childCommitment = normalizeFeltForComparison(child.order_commitment);
-        if (childCommitment && childCommitment !== "0x0") retainedLockRefs.add(childCommitment);
-      }
-    }
+    const retainedLockRefs = retainedLocalNoteLockRefs(orders, strategies);
     let cancelled = false;
-    void w.releaseUnreferencedNoteLocks([...retainedLockRefs])
+    void w.releaseUnreferencedNoteLocks(retainedLockRefs)
       .then((changed) => {
         if (!cancelled && changed) setBalanceTick(value => value + 1);
       })
