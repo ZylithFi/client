@@ -210,6 +210,82 @@ describe("LiquidityCurvesScreen", () => {
     expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeDisabled();
   });
 
+  it("allows a small USDC bid curve when preview can select the available quote note", async () => {
+    const onSubmitCurve = vi.fn().mockResolvedValue(true);
+    const onPreviewFunding = vi.fn(() => ({
+      asset: "USDC",
+      required: "45000",
+      selected_total: "1170000",
+      expected_change: "1125000",
+      notes: [{
+        note_commitment: "0xquote",
+        asset: "USDC",
+        amount: "1170000",
+        source: "deposit" as const,
+      }],
+    }));
+
+    render(
+      <LiquidityCurvesScreen
+        pairs={pairs}
+        records={[]}
+        balances={[{ asset: "USDC", available: "1170000", locked: "829668" }]}
+        pendingDeposits={[]}
+        activePairId="STRK/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onPreviewFunding={onPreviewFunding}
+        onSubmitCurve={onSubmitCurve}
+        onCancelCurve={vi.fn()}
+        onEditCurve={vi.fn()}
+        onPauseCurve={vi.fn()}
+        onResumeCurve={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    const inputs = screen.getAllByRole("textbox");
+    fireEvent.change(inputs[0], { target: { value: "0.01" } });
+    fireEvent.change(inputs[1], { target: { value: "1" } });
+    fireEvent.change(inputs[2], { target: { value: "0.015" } });
+    fireEvent.change(inputs[3], { target: { value: "1" } });
+    fireEvent.change(inputs[4], { target: { value: "0.02" } });
+    fireEvent.change(inputs[5], { target: { value: "1" } });
+
+    expect(screen.getByText("1.17 USDC")).toBeInTheDocument();
+    expect(screen.queryByText(/No available USDC note/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeEnabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Activate bid curve" }));
+    });
+
+    expect(onPreviewFunding).toHaveBeenCalledWith(expect.objectContaining({
+      pairId: "STRK/USDC",
+      side: "Buy",
+      relayMode: "ZylithRelay",
+      curvePoints: [
+        { price: "0.01", baseAmount: "1" },
+        { price: "0.015", baseAmount: "1" },
+        { price: "0.02", baseAmount: "1" },
+      ],
+    }));
+    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
+      pairId: "STRK/USDC",
+      side: "Buy",
+      relayMode: "ZylithRelay",
+      curvePoints: [
+        { price: "0.01", baseAmount: "1" },
+        { price: "0.015", baseAmount: "1" },
+        { price: "0.02", baseAmount: "1" },
+      ],
+    }));
+  });
+
   it("shows cancel with the active curve management actions", () => {
     const onCancelCurve = vi.fn();
     const record = {

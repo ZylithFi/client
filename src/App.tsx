@@ -990,6 +990,30 @@ export default function App() {
     return activePair;
   }
 
+  function curveFieldsForIntent(intent: TicketSubmitIntent, pair: PairConfig) {
+    const atomicCurvePoints = intent.curvePoints
+      .filter(pt => pt.price.trim() && pt.baseAmount.trim())
+      .map(pt => ({
+        price: toPriceAtomicStr(pt.price, pair.quote_asset_id),
+        baseAmount: toAtomicStr(pt.baseAmount, pair.base_asset_id),
+      }));
+    const sortedCurvePoints = [...atomicCurvePoints]
+      .sort((a, b) => (BigInt(a.price) < BigInt(b.price) ? -1 : BigInt(a.price) > BigInt(b.price) ? 1 : 0));
+    const curveBaseTotal = sortedCurvePoints.reduce((total, pt) => total + BigInt(pt.baseAmount), 0n);
+    const curveEnvelopePrice = sortedCurvePoints.length > 0
+      ? (intent.side === "Buy" ? sortedCurvePoints[sortedCurvePoints.length - 1].price : sortedCurvePoints[0].price)
+      : "0";
+    const atomicMakerInventoryCap = intent.inventoryCap.trim()
+      ? toAtomicStr(intent.inventoryCap, pair.base_asset_id)
+      : undefined;
+    return {
+      atomicCurvePoints,
+      curveBaseTotal,
+      curveEnvelopePrice,
+      atomicMakerInventoryCap,
+    };
+  }
+
   async function handleSubmit(intent: TicketSubmitIntent): Promise<boolean> {
     const w = walletRuntime();
     if (!w || !w.isReady()) { setSubmitError("Unlock Zylith wallet first."); return false; }
@@ -1014,25 +1038,14 @@ export default function App() {
       }
 
       const wm = wireMode(intent.shape, intent.resting, intent.stratKind);
-      const atomicCurvePoints = intent.shape === "curve"
-        ? intent.curvePoints
-            .filter(pt => pt.price.trim() && pt.baseAmount.trim())
-            .map(pt => ({
-              price: toPriceAtomicStr(pt.price, submitPair.quote_asset_id),
-              baseAmount: toAtomicStr(pt.baseAmount, submitPair.base_asset_id),
-            }))
-        : undefined;
-      const sortedCurvePoints = [...(atomicCurvePoints ?? [])]
-        .sort((a, b) => (BigInt(a.price) < BigInt(b.price) ? -1 : BigInt(a.price) > BigInt(b.price) ? 1 : 0));
-      const curveBaseTotal = sortedCurvePoints.reduce((total, pt) => total + BigInt(pt.baseAmount), 0n);
-      const curveEnvelopePrice = sortedCurvePoints.length > 0
-        ? (intent.side === "Buy" ? sortedCurvePoints[sortedCurvePoints.length - 1].price : sortedCurvePoints[0].price)
-        : "0";
+      const curveFields = intent.shape === "curve" ? curveFieldsForIntent(intent, submitPair) : null;
+      const atomicCurvePoints = curveFields?.atomicCurvePoints;
+      const curveBaseTotal = curveFields?.curveBaseTotal ?? 0n;
       const atomicAmount = intent.shape === "curve"
         ? curveBaseTotal.toString()
         : toAtomicStr(intent.amount, submitPair.base_asset_id);
       const atomicPrice = intent.shape === "curve"
-        ? curveEnvelopePrice
+        ? curveFields?.curveEnvelopePrice ?? "0"
         : toPriceAtomicStr(intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0", submitPair.quote_asset_id);
       const atomicMinFill = toAtomicStr(intent.minFill || "0", submitPair.base_asset_id);
       const priceBaseScale = submitPair.price_base_scale ?? assetScale(submitPair.base_asset_id).toString();
@@ -1040,9 +1053,7 @@ export default function App() {
       const fundingAmountAtomic = intent.side === "Buy"
         ? ((BigInt(atomicAmount) * BigInt(atomicPrice || "0")) / BigInt(priceBaseScale)).toString()
         : atomicAmount;
-      const atomicMakerInventoryCap = intent.shape === "curve" && intent.inventoryCap.trim()
-        ? toAtomicStr(intent.inventoryCap, submitPair.base_asset_id)
-        : undefined;
+      const atomicMakerInventoryCap = curveFields?.atomicMakerInventoryCap;
 
       const draft = {
         pair: submitPair.pair_id,
@@ -1137,30 +1148,17 @@ export default function App() {
     const priceBaseScale = previewPair.price_base_scale ?? assetScale(previewPair.base_asset_id).toString();
     const base = previewPair.base_asset_id;
     const quote = previewPair.quote_asset_id;
-    const atomicCurvePoints = intent.shape === "curve"
-      ? intent.curvePoints
-          .filter(pt => pt.price.trim() && pt.baseAmount.trim())
-          .map(pt => ({
-            price: toPriceAtomicStr(pt.price, quote),
-            baseAmount: toAtomicStr(pt.baseAmount, base),
-          }))
-      : undefined;
-    const sortedCurvePoints = [...(atomicCurvePoints ?? [])]
-      .sort((a, b) => (BigInt(a.price) < BigInt(b.price) ? -1 : BigInt(a.price) > BigInt(b.price) ? 1 : 0));
-    const curveBaseTotal = sortedCurvePoints.reduce((total, pt) => total + BigInt(pt.baseAmount), 0n);
-    const curveEnvelopePrice = sortedCurvePoints.length > 0
-      ? (intent.side === "Buy" ? sortedCurvePoints[sortedCurvePoints.length - 1].price : sortedCurvePoints[0].price)
-      : "0";
+    const curveFields = intent.shape === "curve" ? curveFieldsForIntent(intent, previewPair) : null;
+    const atomicCurvePoints = curveFields?.atomicCurvePoints;
+    const curveBaseTotal = curveFields?.curveBaseTotal ?? 0n;
     const atomicPrice = intent.shape === "curve"
-      ? curveEnvelopePrice
+      ? curveFields?.curveEnvelopePrice ?? "0"
       : toPriceAtomicStr(intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0", quote);
     let atomicAmount = intent.shape === "curve"
       ? curveBaseTotal.toString()
       : toAtomicStr(intent.amount, base);
     let mode = wm;
-    const atomicMakerInventoryCap = intent.shape === "curve" && intent.inventoryCap.trim()
-      ? toAtomicStr(intent.inventoryCap, base)
-      : undefined;
+    const atomicMakerInventoryCap = curveFields?.atomicMakerInventoryCap;
 
     if (intent.shape === "strategy") {
       const durationBatches = coordinatorStatus?.batch_window_ms && intent.durationHours
