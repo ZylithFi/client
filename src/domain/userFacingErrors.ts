@@ -111,14 +111,29 @@ export function userFacingErrorMessage(
   if (/maker curve band depth|band depth .*below|minimum band/i.test(message)) {
     return "Each curve band needs more depth for this pair.";
   }
-  if (/renewal-backed child|Zylith relay mode requires|renewal package|resting maker strategy/i.test(message)) {
-    return "Maker curves need renewal enabled. Choose a renewal window and retry.";
-  }
   if (/Renewal relay request failed with HTTP 401|Unauthorized/i.test(message)) {
     return "Zylith relay could not verify this renewal package. Refresh, unlock, and retry.";
   }
+  if (/Renewal relay request failed with HTTP 404/i.test(message)) {
+    return "Zylith relay endpoint is unavailable. Refresh the app and retry.";
+  }
+  if (/Renewal relay request failed.*exceeds slot limit/i.test(message)) {
+    return "Renewal window is too large for the managed relay. Choose a shorter window and retry.";
+  }
+  if (/Renewal relay request failed.*Managed relay only accepts ZylithRelay packages/i.test(message)) {
+    return "Select Zylith relay as the renewal operator and retry.";
+  }
+  if (/Renewal relay request failed.*coordinator and prover URLs/i.test(message)) {
+    return "Zylith relay is not configured correctly. Refresh the app and retry.";
+  }
+  if (/Renewal relay request failed.*slot_count|Renewal relay request failed.*epoch range|Renewal relay request failed.*Duplicate renewal slot/i.test(message)) {
+    return "Renewal package could not be verified. Refresh, unlock, and retry.";
+  }
   if (/Renewal relay request failed with HTTP 4\d\d|Renewal relay request failed/i.test(message)) {
     return "Zylith relay rejected this renewal package. Check the relay configuration and retry.";
+  }
+  if (/renewal-backed child|Zylith relay mode requires|renewal package|resting maker strategy/i.test(message)) {
+    return "Maker curves need renewal enabled. Choose a renewal window and retry.";
   }
   if (/maker curve order amount|curve envelope price|maker curve limit_price/i.test(message)) {
     return "Curve parameters are inconsistent. Check the band prices and depths, then retry.";

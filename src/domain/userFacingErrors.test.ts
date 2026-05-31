@@ -56,4 +56,18 @@ describe("userFacingErrorMessage", () => {
     expect(message).toBe("Zylith relay could not verify this renewal package. Refresh, unlock, and retry.");
     expect(message).not.toMatch(/token|bearer|signature|authorization/i);
   });
+
+  it("keeps relayer HTTP failures out of the generic renewal-package bucket", () => {
+    expect(userFacingErrorMessage(
+      new Error("Renewal relay request failed with HTTP 400: Managed relay only accepts ZylithRelay packages"),
+    )).toBe("Select Zylith relay as the renewal operator and retry.");
+
+    expect(userFacingErrorMessage(
+      new Error("Renewal relay request failed with HTTP 400: Renewal package exceeds slot limit"),
+    )).toBe("Renewal window is too large for the managed relay. Choose a shorter window and retry.");
+
+    expect(userFacingErrorMessage(
+      new Error("Renewal relay request failed with HTTP 404: <html><body>not found</body></html>"),
+    )).toBe("Zylith relay endpoint is unavailable. Refresh the app and retry.");
+  });
 });
