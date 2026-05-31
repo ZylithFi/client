@@ -132,6 +132,7 @@ type WalletRuntime = {
     cancelled_at_unix_ms: number;
     parent_cancel_transaction_hash?: string;
   }>;
+  discardPreparedPrivateStrategy: (strategyId: string) => Promise<boolean>;
   pausePrivateStrategy: (strategyId: string) => Promise<{ paused_at_unix_ms: number }>;
   resumePrivateStrategy: (strategyId: string) => Promise<{ resumed_at_unix_ms: number }>;
   refreshPrivateStrategyPackage: (strategyId: string) => Promise<OfflineRenewalPackage>;
@@ -1940,6 +1941,35 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
   }
 
+  async function discardPreparedPrivateStrategy(strategyId: string) {
+    requireUnlocked();
+    const strategy = strategies.find((entry) => entry.id === strategyId);
+    if (!strategy || !strategy.offline_package) return false;
+    const hasSubmittedChild = strategy.submitted_children.some(child => child.submitted_at_unix_ms > 0);
+    if (hasSubmittedChild || strategy.parent_cancel_marker) {
+      return false;
+    }
+    const childCommitments = new Set(
+      strategy.submitted_children
+        .map((child) => normalizeFeltForComparison(child.order_commitment))
+        .filter(Boolean),
+    );
+    const strategyLockRef = strategyFundingLockRef(strategy);
+    notes = notes.map((note) =>
+      note.locked_by_order && (
+        childCommitments.has(normalizeFeltForComparison(note.locked_by_order)) ||
+        normalizeFeltForComparison(note.locked_by_order) === strategyLockRef
+      )
+        ? { ...note, locked_by_order: undefined }
+        : note,
+    );
+    strategies = strategies.filter((entry) => entry.id !== strategyId);
+    await saveNotes();
+    await saveStrategies();
+    scheduleRecoverySnapshot(false);
+    return true;
+  }
+
   async function pausePrivateStrategy(strategyId: string) {
     requireUnlocked();
     const strategy = strategies.find((entry) => entry.id === strategyId);
@@ -2898,6 +2928,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     submitPrivateOrder,
     cancelPrivateOrder,
     cancelPrivateStrategy,
+    discardPreparedPrivateStrategy,
     pausePrivateStrategy,
     resumePrivateStrategy,
     refreshPrivateStrategyPackage,

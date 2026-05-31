@@ -1375,6 +1375,7 @@ export function LiquidityWorkspace({
   onPreviewFunding,
   onSubmitCurve,
   onCancelOrder,
+  onCancelStrategy,
   onPauseStrategy,
   onResumeStrategy,
   onRefreshStrategyPackage,
@@ -1399,6 +1400,7 @@ export function LiquidityWorkspace({
   onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
   onSubmitCurve: (intent: TicketSubmitIntent) => Promise<boolean | void>;
   onCancelOrder: (order: LocalOrder) => void;
+  onCancelStrategy: (strategyId: string) => Promise<void>;
   onPauseStrategy: (strategyId: string) => Promise<void>;
   onResumeStrategy: (strategyId: string) => Promise<void>;
   onRefreshStrategyPackage: (strategyId: string) => Promise<void>;
@@ -1411,6 +1413,10 @@ export function LiquidityWorkspace({
   const activeEpochId = batches.reduce<number | null>((latest, batch) => latest === null ? batch.epoch_id : Math.max(latest, batch.epoch_id), null);
 
   function cancelCurve(record: LiquidityCurveRecord) {
+    if (record.strategy) {
+      void onCancelStrategy(record.strategy.id);
+      return;
+    }
     const firstActive = record.relatedOrders.find(order => activeStatuses(order)) ?? record.relatedOrders[0];
     if (firstActive) onCancelOrder(firstActive);
   }

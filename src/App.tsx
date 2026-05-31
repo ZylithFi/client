@@ -1054,7 +1054,13 @@ export default function App() {
       );
       const result = await w.submitPrivateOrder(draft);
       if (result.offline_package?.relay_mode === "ZylithRelay") {
-        await submitManagedRenewalPackage(result.offline_package);
+        try {
+          await submitManagedRenewalPackage(result.offline_package);
+        } catch (relayError) {
+          await w.discardPreparedPrivateStrategy?.(result.offline_package.package_id).catch(() => false);
+          setBalanceTick(v => v + 1);
+          throw relayError;
+        }
       }
       const submittedAt = Date.now();
 
@@ -1193,6 +1199,20 @@ export default function App() {
       } catch { /* noop — still mark locally */ }
     }
     markCancelled();
+  }
+
+  async function handleCancelStrategy(strategyId: string) {
+    const w = walletRuntime();
+    if (!w || !w.isReady()) {
+      setSubmitError("Unlock Zylith wallet before cancelling this strategy.");
+      return;
+    }
+    try {
+      await w.cancelPrivateStrategy(strategyId);
+      setBalanceTick(v => v + 1);
+    } catch (error) {
+      setSubmitError(userFacingErrorMessage(error));
+    }
   }
 
   async function handlePauseStrategy(strategyId: string) {
@@ -1441,6 +1461,7 @@ export default function App() {
               onPreviewFunding={handleFundingPreview}
               onSubmitCurve={handleSubmit}
               onCancelOrder={order => { void handleCancelOrder(order); }}
+              onCancelStrategy={handleCancelStrategy}
               onPauseStrategy={handlePauseStrategy}
               onResumeStrategy={handleResumeStrategy}
               onRefreshStrategyPackage={handleRefreshStrategyPackage}
