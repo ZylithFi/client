@@ -2224,7 +2224,7 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 
 @media (max-width: 860px) {
   body { overflow: auto; }
-  .app-shell { height: auto; min-height: 100vh; }
+  .app-shell { grid-template-rows: auto 1fr; height: auto; min-height: 100vh; }
   .top-nav { position: sticky; top: 0; z-index: 50; grid-template-columns: 1fr; gap: 8px; height: auto; padding: 10px 14px; }
   .wallet-area,
   .nav-tabs { justify-content: flex-start; }

@@ -19,6 +19,12 @@ type CoordinatorAccepted = {
   accepted_at_unix_ms: number;
 };
 
+type PublicProofJobStatus = {
+  state?: string;
+  matched_order_count?: number;
+  failure?: string;
+};
+
 // Browser-side relay for exact-slot offline renewal packages produced by the
 // embedded wallet. This is intentionally separate from normal strategy
 // execution: it lets a delegated operator submit prebuilt child orders for
@@ -50,6 +56,7 @@ export type OfflineRenewalSlot = {
   epoch_id: number;
   parent_child_index: number;
   order_commitment: string;
+  funding_note_commitments?: string[];
   ingress_request: unknown;
 };
 
@@ -74,6 +81,8 @@ export type OfflineRenewalRelayResult = {
     | "not_due"
     | "batch_not_open"
     | "safety_buffer"
+    | "awaiting_settlement"
+    | "awaiting_wallet_refresh"
     | "missed"
     | "failed";
   detail?: string;
@@ -136,6 +145,11 @@ export async function relayOfflineRenewalPackage(
         results.push(slotResult(slot, "safety_buffer"));
         continue;
       }
+      const guard = await priorSlotReuseGuard(fetcher, proverUrl, renewalPackage, slot, alreadySubmitted);
+      if (guard) {
+        results.push(guard);
+        continue;
+      }
       const ingress = await postJson<IngressResponse>(fetcher, proverUrl, "/api/private/orders", slot.ingress_request);
       const accepted = await postJson<CoordinatorAccepted>(
         fetcher,
@@ -154,6 +168,52 @@ export async function relayOfflineRenewalPackage(
   }
   dispatchRelayResults(renewalPackage, results);
   return results;
+}
+
+async function priorSlotReuseGuard(
+  fetcher: typeof fetch,
+  proverUrl: string,
+  renewalPackage: OfflineRenewalPackage,
+  slot: OfflineRenewalSlot,
+  alreadySubmitted: Set<string>,
+): Promise<OfflineRenewalRelayResult | null> {
+  const priorSlots = renewalPackage.slots.filter(candidate =>
+    candidate.parent_child_index < slot.parent_child_index &&
+    alreadySubmitted.has(candidate.order_commitment) &&
+    slotsReuseFundingNotes(candidate, slot),
+  );
+  for (const prior of priorSlots) {
+    const status = await fetchJson<PublicProofJobStatus>(
+      fetcher,
+      proverUrl,
+      `/api/public/proof-jobs/${encodeURIComponent(prior.batch_id)}`,
+    );
+    if (!status) {
+      return slotResult(slot, "awaiting_settlement", `Waiting for prior child batch ${prior.batch_id} proof status.`);
+    }
+    if (proofJobFailed(status)) continue;
+    if (proofJobConfirmed(status)) {
+      if ((status.matched_order_count ?? 0) === 0) continue;
+      return slotResult(slot, "awaiting_wallet_refresh", `Prior child batch ${prior.batch_id} settled; refresh this package before reusing maker capital.`);
+    }
+    return slotResult(slot, "awaiting_settlement", `Waiting for prior child batch ${prior.batch_id} to settle.`);
+  }
+  return null;
+}
+
+function slotsReuseFundingNotes(candidate: OfflineRenewalSlot, slot: OfflineRenewalSlot): boolean {
+  const current = new Set(slot.funding_note_commitments ?? []);
+  const prior = candidate.funding_note_commitments ?? [];
+  if (current.size === 0 || prior.length === 0) return true;
+  return prior.some(commitment => current.has(commitment));
+}
+
+function proofJobConfirmed(status: PublicProofJobStatus): boolean {
+  return status.state?.toLowerCase() === "confirmed-onchain";
+}
+
+function proofJobFailed(status: PublicProofJobStatus): boolean {
+  return Boolean(status.failure) || Boolean(status.state?.toLowerCase().includes("failed"));
 }
 
 function validateOfflineRenewalPackage(renewalPackage: OfflineRenewalPackage) {

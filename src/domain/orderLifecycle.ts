@@ -43,6 +43,8 @@ export type PrivateStrategyChildSummary = {
   cancellation_secret?: string;
   expected_output_metadata_commitment?: string;
   funding_note_commitments?: string[];
+  relay_status?: string;
+  relay_detail?: string;
   submitted_at_unix_ms: number;
   delegated?: boolean;
 };

@@ -140,6 +140,7 @@ const PRIVATE_REPORT_READY_STATUSES = new Set<LocalOrderStatus>([
   "filled",
   "partial",
 ]);
+const PRIVATE_SETTLEMENT_REPORTS_EVENT = "zylith-private-settlement-reports";
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const LAST_LIQUIDITY_ROUTE_KEY = "zylith.nav.last_liquidity_route";
 
@@ -509,6 +510,7 @@ export default function App() {
   const privateReportSyncedOrders = useRef<Set<string>>(new Set());
   const privateReportLastAttemptAt = useRef<Map<string, number>>(new Map());
   const [privateReportRetryTick, setPrivateReportRetryTick] = useState(0);
+  const [balanceTick, setBalanceTick] = useState(0);
   const saveAndSet = useCallback((next: LocalOrder[]) => {
     ordersRef.current = next;
     setOrders(next);
@@ -522,6 +524,89 @@ export default function App() {
       return next;
     });
   }, [deployment, orderOwnerKey]);
+
+  const applyPrivateSettlementReports = useCallback((reports: PrivateSettlementReportForApp[]) => {
+    if (reports.length === 0) return;
+    setPrivateSettlementTranscripts(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (const report of reports) {
+        const candidate: PublicSettlementTranscript = {
+          batch_id: report.batch_id,
+          pair_id: report.pair_id,
+          batch_epoch: report.batch_epoch,
+          clearing_price: report.clearing_price,
+          price_base_scale: report.price_base_scale,
+          settled_at_unix_ms: report.settled_at_unix_ms,
+          loaded_at_unix_ms: Date.now(),
+        };
+        const existing = next[report.batch_id];
+        if (
+          existing?.clearing_price === candidate.clearing_price &&
+          existing?.price_base_scale === candidate.price_base_scale &&
+          existing?.settled_at_unix_ms === candidate.settled_at_unix_ms
+        ) {
+          continue;
+        }
+        next[report.batch_id] = candidate;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+
+    const reportByOrder = new Map<string, { report: PrivateSettlementReportForApp; execution: PrivateExecutionReportForApp }>();
+    for (const report of reports) {
+      for (const execution of report.order_execution_reports ?? []) {
+        reportByOrder.set(normalizeFeltForComparison(execution.order_commitment), { report, execution });
+      }
+    }
+
+    const successfulOrderKeys = new Set<string>();
+    let changed = false;
+    const nextOrders = ordersRef.current.map(order => {
+      const matched = reportByOrder.get(normalizeFeltForComparison(order.orderCommitment));
+      if (!matched) return order;
+      const pair = pairs.find(candidate => candidate.pair_id === matched.report.pair_id);
+      if (!pair) return order;
+      const syncKey = privateReportOrderSyncKey(matched.report.batch_id, matched.execution.order_commitment);
+      const filledAtomic = BigInt(matched.execution.filled_amount || "0");
+      const unfilledAtomic = BigInt(matched.execution.unfilled_amount || "0");
+      const clearingPrice = formatClearingPrice({
+        batchId: matched.report.batch_id,
+        epochId: matched.report.batch_epoch,
+        clearingPrice: matched.execution.execution_price || matched.report.clearing_price,
+        priceBaseScale: matched.report.price_base_scale,
+      }, pair);
+      if (filledAtomic <= 0n) {
+        if (syncKey) successfulOrderKeys.add(syncKey);
+        if (order.status === "no_fill" && order.clearingPrice === clearingPrice) return order;
+        changed = true;
+        return { ...order, status: "no_fill" as LocalOrderStatus, clearingPrice };
+      }
+      const nextStatus: LocalOrderStatus = unfilledAtomic > 0n ? "partial" : "filled";
+      const filledAmount = fromAtomicStr(filledAtomic.toString(), pair.base_asset_id);
+      if (syncKey) successfulOrderKeys.add(syncKey);
+      if (
+        order.status === nextStatus &&
+        order.clearingPrice === clearingPrice &&
+        order.filledAmount === filledAmount
+      ) {
+        return order;
+      }
+      changed = true;
+      return {
+        ...order,
+        status: nextStatus,
+        clearingPrice,
+        filledAmount,
+      };
+    });
+    successfulOrderKeys.forEach(syncKey => privateReportSyncedOrders.current.add(syncKey));
+    if (changed) {
+      saveAndSet(nextOrders);
+    }
+    setBalanceTick(value => value + 1);
+  }, [pairs, saveAndSet]);
 
   useEffect(() => {
     const nextOwnerKey = walletReady ? walletOrderOwnerKey(deployment) : null;
@@ -584,103 +669,22 @@ export default function App() {
         .catch(() => [] as PrivateSettlementReportForApp[]);
       requests.forEach(request => privateReportRequestsInFlight.current.delete(request.batch_id));
       if (cancelled) return;
-      const requestedByBatch = new Map(
-        requests.map(request => [
-          request.batch_id,
-          new Set(request.order_commitments.map(normalizeFeltForComparison)),
-        ]),
-      );
-      const successfulOrderKeys = new Set<string>();
-      for (const report of reports as PrivateSettlementReportForApp[]) {
-        const requested = requestedByBatch.get(report.batch_id);
-        if (!requested || requested.size === 0) continue;
-        for (const execution of report.order_execution_reports ?? []) {
-          const commitment = normalizeFeltForComparison(execution.order_commitment);
-          if (!requested.has(commitment)) continue;
-          const syncKey = privateReportOrderSyncKey(report.batch_id, execution.order_commitment);
-          if (syncKey) successfulOrderKeys.add(syncKey);
-        }
-      }
-      successfulOrderKeys.forEach(syncKey => privateReportSyncedOrders.current.add(syncKey));
       if (reports.length === 0) return;
-      setPrivateSettlementTranscripts(prev => {
-        let changed = false;
-        const next = { ...prev };
-        for (const report of reports as PrivateSettlementReportForApp[]) {
-          const candidate: PublicSettlementTranscript = {
-            batch_id: report.batch_id,
-            pair_id: report.pair_id,
-            batch_epoch: report.batch_epoch,
-            clearing_price: report.clearing_price,
-            price_base_scale: report.price_base_scale,
-            settled_at_unix_ms: report.settled_at_unix_ms,
-            loaded_at_unix_ms: Date.now(),
-          };
-          const existing = next[report.batch_id];
-          if (
-            existing?.clearing_price === candidate.clearing_price &&
-            existing?.price_base_scale === candidate.price_base_scale &&
-            existing?.settled_at_unix_ms === candidate.settled_at_unix_ms
-          ) {
-            continue;
-          }
-          next[report.batch_id] = candidate;
-          changed = true;
-        }
-        return changed ? next : prev;
-      });
-      const reportByOrder = new Map<string, { report: PrivateSettlementReportForApp; execution: PrivateExecutionReportForApp }>();
-      for (const report of reports as PrivateSettlementReportForApp[]) {
-        for (const execution of report.order_execution_reports ?? []) {
-          reportByOrder.set(normalizeFeltForComparison(execution.order_commitment), { report, execution });
-        }
-      }
-      let changed = false;
-      const nextOrders = ordersRef.current.map(order => {
-        const matched = reportByOrder.get(normalizeFeltForComparison(order.orderCommitment));
-        if (!matched) return order;
-        const pair = pairs.find(candidate => candidate.pair_id === matched.report.pair_id);
-        if (!pair) return order;
-        const filledAtomic = BigInt(matched.execution.filled_amount || "0");
-        const unfilledAtomic = BigInt(matched.execution.unfilled_amount || "0");
-        const clearingPrice = formatClearingPrice({
-          batchId: matched.report.batch_id,
-          epochId: matched.report.batch_epoch,
-          clearingPrice: matched.execution.execution_price || matched.report.clearing_price,
-          priceBaseScale: matched.report.price_base_scale,
-        }, pair);
-        if (filledAtomic <= 0n) {
-          if (order.status === "no_fill" && order.clearingPrice === clearingPrice) return order;
-          changed = true;
-          return { ...order, status: "no_fill" as LocalOrderStatus, clearingPrice };
-        }
-        const nextStatus: LocalOrderStatus = unfilledAtomic > 0n ? "partial" : "filled";
-        const filledAmount = fromAtomicStr(filledAtomic.toString(), pair.base_asset_id);
-        if (
-          order.status === nextStatus &&
-          order.clearingPrice === clearingPrice &&
-          order.filledAmount === filledAmount
-        ) {
-          return order;
-        }
-        changed = true;
-        return {
-          ...order,
-          status: nextStatus,
-          clearingPrice,
-          filledAmount,
-        };
-      });
-      if (changed || reports.length > 0) {
-        if (changed) {
-          saveAndSet(nextOrders);
-        }
-        setBalanceTick(value => value + 1);
-      }
+      applyPrivateSettlementReports(reports as PrivateSettlementReportForApp[]);
     }
     void syncReports();
     return () => { cancelled = true; };
-  }, [orders, pairs, privateReportRetryTick, proofStatuses, saveAndSet, settlementTranscripts, walletReady]);
+  }, [applyPrivateSettlementReports, orders, pairs, privateReportRetryTick, proofStatuses, settlementTranscripts, walletReady]);
+
+  useEffect(() => {
+    const onPrivateSettlementReports = (event: Event) => {
+      const reports = (event as CustomEvent<{ reports?: PrivateSettlementReportForApp[] }>).detail?.reports;
+      if (!Array.isArray(reports) || reports.length === 0) return;
+      applyPrivateSettlementReports(reports);
+    };
+    window.addEventListener(PRIVATE_SETTLEMENT_REPORTS_EVENT, onPrivateSettlementReports);
+    return () => window.removeEventListener(PRIVATE_SETTLEMENT_REPORTS_EVENT, onPrivateSettlementReports);
+  }, [applyPrivateSettlementReports]);
 
   useEffect(() => {
     if (!walletReady || orders.length === 0) return;
@@ -705,7 +709,6 @@ export default function App() {
   }, [orders, proofStatuses, settlementTranscripts, walletReady]);
 
   // Balance polling
-  const [balanceTick, setBalanceTick] = useState(0);
   useEffect(() => {
     if (!walletReady) return;
     let cancelled = false;

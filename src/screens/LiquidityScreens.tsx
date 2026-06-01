@@ -38,7 +38,7 @@ type LiquidityCurveRecord = {
   pair: string;
   side: "Buy" | "Sell";
   sideLabel: "Bid" | "Ask";
-  status: "Active" | "Paused" | "Expiring" | "Cancelled" | "Historical";
+  status: "Active" | "Pending" | "Paused" | "Expiring" | "Cancelled" | "Historical";
   points: CurvePoint[];
   submittedAt: number;
   endEpoch?: number;
@@ -262,11 +262,10 @@ function buildCurveRecords(
   const consumedOrderRefs = new Set<string>();
 
   for (const strategy of strategies.filter(strategy => strategy.mode === "Resting")) {
-    if (strategy.status === "pending_relay") continue;
     const pair = pairs.find(candidate => candidate.pair_id === strategy.pair);
     const relatedOrders = orders.filter(order => order.strategyId === strategy.id);
     for (const order of relatedOrders) consumedOrderRefs.add(order.ordRef);
-    const active = strategy.status === "active" || strategy.status === "delegated";
+    const active = strategy.status === "active" || strategy.status === "delegated" || strategy.status === "pending_relay";
     const expiring = active && strategy.max_children - strategy.next_child_index + 1 <= 8;
     records.push({
       id: strategy.id,
@@ -277,11 +276,13 @@ function buildCurveRecords(
         ? "Cancelled"
         : strategy.status === "paused"
           ? "Paused"
-          : expiring
-            ? "Expiring"
-            : active
-              ? "Active"
-              : "Historical",
+          : strategy.status === "pending_relay"
+            ? "Pending"
+            : expiring
+              ? "Expiring"
+              : active
+                ? "Active"
+                : "Historical",
       points: strategyPoints(strategy, pair),
       submittedAt: relatedOrders[0]?.submittedAt ?? Date.now(),
       endEpoch: strategy.end_epoch,
@@ -321,7 +322,46 @@ function buildCurveRecords(
 }
 
 function activeCurveRecords(records: LiquidityCurveRecord[]): LiquidityCurveRecord[] {
-  return records.filter(record => record.status === "Active" || record.status === "Expiring" || record.status === "Paused");
+  return records.filter(record =>
+    record.status === "Active" ||
+    record.status === "Pending" ||
+    record.status === "Expiring" ||
+    record.status === "Paused",
+  );
+}
+
+function curveStatusPillTone(status: LiquidityCurveRecord["status"]): string {
+  if (status === "Active") return "good";
+  if (status === "Pending") return "info";
+  if (status === "Expiring") return "warn";
+  if (status === "Cancelled") return "danger";
+  return "muted";
+}
+
+function relayChildStatusDisplay(
+  child: { order_commitment?: string; relay_status?: string; relay_detail?: string },
+  fallback?: string,
+): { label: string; tone: string } {
+  switch (child.relay_status) {
+    case "submitted":
+    case "already_submitted":
+    case "not_due":
+      return { label: "Queued", tone: "info" };
+    case "awaiting_settlement":
+      return { label: "Awaiting settlement", tone: "info" };
+    case "awaiting_wallet_refresh":
+      return { label: "Refresh needed", tone: "warn" };
+    case "batch_not_open":
+      return { label: "Batch closed", tone: "warn" };
+    case "safety_buffer":
+      return { label: "Safety buffer", tone: "warn" };
+    case "missed":
+      return { label: "Missed", tone: "warn" };
+    case "failed":
+      return { label: "Relay failed", tone: "danger" };
+    default:
+      return { label: fallback ?? "Queued", tone: "info" };
+  }
 }
 
 function renewalPackageStatus(record: LiquidityCurveRecord): {
@@ -935,7 +975,7 @@ export function LiquidityCurvesScreen({
                 <div className="liq-active-top">
                   <span>{record.pair}</span>
                   <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>{record.sideLabel}</span>
-                  <span className={`pill ${record.status === "Expiring" ? "warn" : record.status === "Paused" ? "muted" : "good"}`}>{record.status}</span>
+                  <span className={`pill ${curveStatusPillTone(record.status)}`}>{record.status}</span>
                 </div>
                 <div className="liq-active-rate">{formatPct(curveFillRate(record.relatedOrders))}</div>
                 <div className="liq-depth-bar">
@@ -1096,8 +1136,9 @@ export function LiquidityOrdersScreen({
                         order_commitment: order.orderCommitment,
                       }))).map(child => {
                         const related = record.relatedOrders.find(order => order.batchId === child.batch_id || order.orderCommitment === child.order_commitment);
-                        const label = related ? statusLabel(related.status) : batchStatus.get(child.batch_id) ?? "Queued";
-                        const tone = related ? statusTone(related.status) : "info";
+                        const relayStatus = relayChildStatusDisplay(child, batchStatus.get(child.batch_id));
+                        const label = related ? statusLabel(related.status) : relayStatus.label;
+                        const tone = related ? statusTone(related.status) : relayStatus.tone;
                         return (
                           <tr key={`${record.id}:${child.parent_child_index}`}>
                             <td className="num">Epoch {child.epoch_id}</td>

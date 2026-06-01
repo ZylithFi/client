@@ -93,11 +93,12 @@ export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
 const STARK_FIELD_PRIME =
   3618502788666131213697322783095070105623107215331596699973092056135872020481n;
 const STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS = 10;
-const STARKNET_PRIVACY_ADAPTIVE_PROOF_DELAY_START_BLOCKS = 8;
-const STARKNET_PRIVACY_PROOF_DELAY_RETRY_BLOCKS = 8;
-const STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS = 3;
+const STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS = [8, 16, 24, 4, 0] as const;
 const STARKNET_PRIVACY_REPLAY_GUARD_ATOMS = 1n;
 const STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT = (1n << 128n) - 1n;
+const STARKNET_PRIVACY_SETUP_READY_TIMEOUT_MS = 180_000;
+const STARKNET_PRIVACY_SETUP_READY_POLL_MS = 3_000;
+const STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS = 8 * 60_000;
 
 export async function warmUpStarknetPrivacyFunding(
   input: WarmUpStarknetPrivacyFundingInput,
@@ -128,10 +129,21 @@ export async function warmUpStarknetPrivacyFunding(
       paymasterUrl: input.paymasterUrl,
       allowanceThreshold: STARKNET_PRIVACY_REPLAY_GUARD_ATOMS,
     });
-    if (txHash) approvalTransactionHashes.push(txHash);
-  }
-  if (approvalTransactionHashes.length > 0) {
-    await waitForTransactionsAndProvingDelay(rpcProvider, approvalTransactionHashes, delayBlocks);
+    if (txHash) {
+      approvalTransactionHashes.push(txHash);
+      await waitForStateAndProvingDelay(
+        rpcProvider,
+        () =>
+          readTokenAllowance(
+            rpcProvider,
+            tokenAddress,
+            account.address,
+            input.privacyPoolAddress,
+          ).then((allowance) => allowance >= STARKNET_PRIVACY_REPLAY_GUARD_ATOMS),
+        delayBlocks,
+        "embedded signer warmup approval",
+      );
+    }
   }
   return {
     signerAddress: account.address,
@@ -151,7 +163,7 @@ export async function submitPrivacyBridgeDeposit(
     input.minProvingDelayBlocks,
     STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS,
   );
-  const baseProofDelayBlocks = STARKNET_PRIVACY_ADAPTIVE_PROOF_DELAY_START_BLOCKS;
+  const proofDelayScheduleBlocks = STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS;
   const sdkDepositAmount = input.plan.amount + STARKNET_PRIVACY_REPLAY_GUARD_ATOMS;
   const account = await runFundingStage(
     "Private deposit signer setup failed",
@@ -189,10 +201,9 @@ export async function submitPrivacyBridgeDeposit(
   });
   const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
   let lastRetryableError: unknown = null;
-  for (let attempt = 0; attempt < STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < proofDelayScheduleBlocks.length; attempt += 1) {
     try {
-      const proofDelayBlocks =
-        baseProofDelayBlocks + (attempt * STARKNET_PRIVACY_PROOF_DELAY_RETRY_BLOCKS);
+      const proofDelayBlocks = proofDelayScheduleBlocks[attempt];
       const provingBlockId = await runFundingStage(
         "Private deposit proof setup failed",
         () => provingBlock(rpcProvider, proofDelayBlocks),
@@ -219,35 +230,39 @@ export async function submitPrivacyBridgeDeposit(
       const execution = await runFundingStage(
         "Private deposit proof failed",
         () =>
-          transfers
-            .build({
-              autoRegister: true,
-              autoSetup: true,
-              autoDiscover: { notes: "refresh", channels: "refresh" },
-              registry: sdkRegistry,
-              registryConst: true,
-            })
-            .with(input.tokenAddress, (token) =>
-              token
-                .deposit({ amount: sdkDepositAmount })
-                .withdraw({ recipient: input.bridgeAddress, amount: input.plan.amount })
-            )
-            .surplusTo(account.address)
-            .invoke(({ withdrawals }) => {
-              const withdrawal = withdrawals.find((entry) =>
-                sameFelt(entry.recipient, input.bridgeAddress) &&
-                sameFelt(entry.token, input.tokenAddress) &&
-                entry.amount === input.plan.amount
-              );
-              if (!withdrawal) {
-                throw new Error("Private deposit bridge action was not built correctly");
-              }
-              return {
-                contractAddress: input.bridgeAddress,
-                calldata: privacyBridgeDepositCalldata(input.plan),
-              };
-            })
-            .execute({ provingBlockId }),
+          withTimeout(
+            transfers
+              .build({
+                autoRegister: true,
+                autoSetup: true,
+                autoDiscover: { notes: "refresh", channels: "refresh" },
+                registry: sdkRegistry,
+                registryConst: true,
+              })
+              .with(input.tokenAddress, (token) =>
+                token
+                  .deposit({ amount: sdkDepositAmount })
+                  .withdraw({ recipient: input.bridgeAddress, amount: input.plan.amount })
+              )
+              .surplusTo(account.address)
+              .invoke(({ withdrawals }) => {
+                const withdrawal = withdrawals.find((entry) =>
+                  sameFelt(entry.recipient, input.bridgeAddress) &&
+                  sameFelt(entry.token, input.tokenAddress) &&
+                  entry.amount === input.plan.amount
+                );
+                if (!withdrawal) {
+                  throw new Error("Private deposit bridge action was not built correctly");
+                }
+                return {
+                  contractAddress: input.bridgeAddress,
+                  calldata: privacyBridgeDepositCalldata(input.plan),
+                };
+              })
+              .execute({ provingBlockId }),
+            STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS,
+            "Private deposit proof generation timed out before the proof service returned.",
+          ),
       );
       assertNoSdkPrivacyWarnings(execution.warnings);
 
@@ -267,12 +282,15 @@ export async function submitPrivacyBridgeDeposit(
         sdkRegistry: execution.registry,
       };
     } catch (error) {
+      const retryableContractVisibilityLag =
+        isProofProviderContractVisibilityLag(error) &&
+        await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(() => false);
       if (
-        attempt < STARKNET_PRIVACY_PROOF_RETRY_ATTEMPTS - 1 &&
-        isProofBlockTooRecent(error)
+        attempt < proofDelayScheduleBlocks.length - 1 &&
+        (isProofBlockTooRecent(error) || retryableContractVisibilityLag)
       ) {
         lastRetryableError = error;
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        await new Promise((resolve) => setTimeout(resolve, retryableContractVisibilityLag ? 15_000 : 5_000));
         continue;
       }
       throw error;
@@ -282,9 +300,13 @@ export async function submitPrivacyBridgeDeposit(
 }
 
 async function runFundingStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+  setFundingStage(stage);
   try {
-    return await operation();
+    const result = await operation();
+    setFundingStage(`${stage}: complete`);
+    return result;
   } catch (error) {
+    setFundingStage(`${stage}: failed`);
     if (isUserRejected(error)) throw error;
     const wrapped = new Error(`${stage}: ${summarizeFundingError(error)}`);
     (wrapped as Error & { cause?: unknown }).cause = error;
@@ -382,7 +404,6 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
   paymasterUrl?: string;
   minProvingDelayBlocks: number;
 }) {
-  const setupTransactions: string[] = [];
   const balance = await withFundingSetupStep("reading embedded signer token balance", () =>
     readTokenBalance(
       input.rpcProvider,
@@ -425,7 +446,21 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     if (!txHash) {
       throw new Error("Starknet wallet did not return a funding transaction hash");
     }
-    setupTransactions.push(txHash);
+    await withFundingSetupStep(
+      "waiting for embedded signer funding",
+      () =>
+        waitForStateAndProvingDelay(
+          input.rpcProvider,
+          () =>
+            readTokenBalance(
+              input.rpcProvider,
+              input.tokenAddress,
+              input.account.address,
+            ).then((latestBalance) => latestBalance >= input.amount),
+          input.minProvingDelayBlocks,
+          "embedded signer token balance",
+        ),
+    );
   } else {
     // Ensure the connected wallet is still the intended funding source before proving.
     const connected = await resolveConnectedStarknetAddress(input.provider);
@@ -455,17 +490,20 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     if (!txHash) {
       throw new Error("Deposit relay did not return an approval transaction hash");
     }
-    setupTransactions.push(txHash);
-  }
-
-  if (setupTransactions.length > 0) {
     await withFundingSetupStep(
-      "waiting for embedded signer setup transactions",
+      "waiting for embedded signer approval",
       () =>
-        waitForTransactionsAndProvingDelay(
+        waitForStateAndProvingDelay(
           input.rpcProvider,
-          setupTransactions,
+          () =>
+            readTokenAllowance(
+              input.rpcProvider,
+              input.tokenAddress,
+              input.account.address,
+              input.privacyPoolAddress,
+            ).then((latestAllowance) => latestAllowance >= input.amount),
           input.minProvingDelayBlocks,
+          "embedded signer token allowance",
         ),
     );
   }
@@ -537,13 +575,39 @@ async function ensureReusablePrivacyPoolApproval(input: {
 }
 
 async function withFundingSetupStep<T>(step: string, operation: () => Promise<T>): Promise<T> {
+  setFundingStage(`setup: ${step}`);
   try {
-    return await operation();
+    const result = await operation();
+    setFundingStage(`setup: ${step}: complete`);
+    return result;
   } catch (error) {
+    setFundingStage(`setup: ${step}: failed`);
     const message = summarizeFundingError(error);
     const wrapped = new Error(`Failed while ${step}: ${message}`);
     (wrapped as Error & { cause?: unknown }).cause = error;
     throw wrapped;
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function setFundingStage(stage: string) {
+  try {
+    (globalThis as typeof globalThis & {
+      __zylithPrivacyFundingStage?: { stage: string; at: number };
+    }).__zylithPrivacyFundingStage = { stage, at: Date.now() };
+  } catch {
+    // Best-effort diagnostic state only.
   }
 }
 
@@ -740,11 +804,12 @@ async function ensurePrivacyProofSignerContract(input: {
   if (!address) {
     throw new Error("Deposit relay did not return a proof signer address");
   }
-  if (json.deployed && json.transaction_hash) {
-    await waitForTransactionAndProvingDelay(
+  if (json.deployed) {
+    await waitForStateAndProvingDelay(
       input.rpcProvider,
-      json.transaction_hash,
+      () => isClassDeployed(input.rpcProvider, address),
       input.minProvingDelayBlocks,
+      "embedded proof signer deployment",
     );
   }
   return address;
@@ -778,52 +843,54 @@ async function provingBlock(provider: RpcProvider, minDelayBlocks: number) {
   return Math.max(0, latest - Math.max(0, minDelayBlocks));
 }
 
-async function waitForBlock(provider: RpcProvider, targetBlock: number) {
+async function waitForStateAndProvingDelay(
+  provider: RpcProvider,
+  isReady: () => Promise<boolean>,
+  minProvingDelayBlocks: number,
+  label: string,
+) {
+  const deadline = Date.now() + STARKNET_PRIVACY_SETUP_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await isReady()) {
+      const visibleBlock = await provider.getBlockNumber();
+      await waitForBlock(
+        provider,
+        visibleBlock + Math.max(0, minProvingDelayBlocks),
+        deadline,
+        label,
+      );
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, STARKNET_PRIVACY_SETUP_READY_POLL_MS));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function isClassDeployed(provider: RpcProvider, contractAddress: string) {
+  return (
+    await provider.getClassHashAt(contractAddress, "pre_confirmed").catch(() => null)
+  ) ?? (
+    await provider.getClassHashAt(contractAddress, "latest").catch(() => null)
+  )
+    ? true
+    : false;
+}
+
+async function waitForBlock(
+  provider: RpcProvider,
+  targetBlock: number,
+  deadline: number,
+  label: string,
+) {
   if (!Number.isFinite(targetBlock) || targetBlock <= 0) return;
   for (;;) {
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out waiting for ${label} proving delay`);
+    }
     const latest = await provider.getBlockNumber();
     if (latest >= targetBlock) return;
     await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
-}
-
-async function waitForTransactionAndProvingDelay(
-  provider: RpcProvider,
-  txHash: string,
-  minProvingDelayBlocks: number,
-) {
-  await waitForTransactionsAndProvingDelay(provider, [txHash], minProvingDelayBlocks);
-}
-
-async function waitForTransactionsAndProvingDelay(
-  provider: RpcProvider,
-  txHashes: string[],
-  minProvingDelayBlocks: number,
-) {
-  const receipts = await Promise.all(
-    txHashes.map((txHash) =>
-      provider.waitForTransaction(txHash, {
-        retryInterval: 5_000,
-      })
-    ),
-  );
-  const receiptBlocks = receipts
-    .map(receiptBlockNumber)
-    .filter((block): block is number => block !== null);
-  const latestBlock = await provider.getBlockNumber();
-  const targetBlock = receiptBlocks.length === 0
-    ? latestBlock + minProvingDelayBlocks
-    : Math.max(...receiptBlocks) + minProvingDelayBlocks;
-  await waitForBlock(provider, targetBlock);
-}
-
-function receiptBlockNumber(receipt: unknown) {
-  if (!receipt || typeof receipt !== "object") return null;
-  const value = (receipt as Record<string, unknown>).block_number ??
-    (receipt as Record<string, unknown>).blockNumber;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value) return Number(value);
-  return null;
 }
 
 function randomFelt() {
@@ -1042,6 +1109,23 @@ function isProofBlockTooRecent(error: unknown): boolean {
   }
   if (error && typeof error === "object" && "cause" in error) {
     return isProofBlockTooRecent((error as { cause?: unknown }).cause);
+  }
+  return false;
+}
+
+function isProofProviderContractVisibilityLag(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (
+    /requested contract address .* is not deployed|contract.*not.*found|not deployed|class hash: 0x0{8,}/i
+      .test(message)
+  ) {
+    return true;
+  }
+  if (error instanceof Error && "cause" in error) {
+    return isProofProviderContractVisibilityLag((error as Error & { cause?: unknown }).cause);
+  }
+  if (error && typeof error === "object" && "cause" in error) {
+    return isProofProviderContractVisibilityLag((error as { cause?: unknown }).cause);
   }
   return false;
 }

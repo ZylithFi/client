@@ -22,9 +22,9 @@ use zylith_core::{
     renewal_cancel_authority_from_raw_key_hex, renewal_parent_commitment,
     renewal_parent_secret_commitment, sign_note_consolidation_authorization,
     sign_order_authorization, sign_renewal_relay_package_authorization,
-    spend_auth_key_felt_from_raw_key_hex,
-    spend_authority_from_raw_key_hex, verify_output_note_membership,
-    withdraw_auth_key_felt_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
+    spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
+    verify_output_note_membership, withdraw_auth_key_felt_from_raw_key_hex,
+    withdraw_authority_from_raw_key_hex,
 };
 
 #[wasm_bindgen(start)]

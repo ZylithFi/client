@@ -366,7 +366,7 @@ describe("LiquidityCurvesScreen", () => {
     expect(selects[1]).toHaveValue("1");
   });
 
-  it("does not show locally prepared relay curves until relay registration is confirmed", () => {
+  it("keeps pending relay curves visible while relay registration catches up", () => {
     const pendingStrategy: PrivateStrategySummary = {
       id: "strategy-pending",
       mode: "Resting",
@@ -418,7 +418,8 @@ describe("LiquidityCurvesScreen", () => {
       />,
     );
 
-    expect(screen.getByText("Active curves").closest(".liq-panel-hd")).toHaveTextContent("0 running");
-    expect(screen.queryByText("STRK/USDC Bid")).not.toBeInTheDocument();
+    expect(screen.getByText("Active curves").closest(".liq-panel-hd")).toHaveTextContent("1 running");
+    expect(screen.getAllByText("STRK/USDC").length).toBeGreaterThan(1);
+    expect(screen.getByText("Pending")).toBeInTheDocument();
   });
 });

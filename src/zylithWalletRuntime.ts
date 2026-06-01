@@ -4,7 +4,6 @@ import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import type { MakerBandAttribution } from "./domain/shieldedBalances";
 import {
   submitPrivacyBridgeDeposit,
-  warmUpStarknetPrivacyFunding,
   type SubmitPrivacyBridgeDepositResult,
 } from "./integrations/starknetPrivacyFunding";
 import {
@@ -617,6 +616,8 @@ type StrategyChildRecord = {
   cancellation_secret: string;
   expected_output_metadata_commitment?: string;
   funding_note_commitments?: string[];
+  relay_status?: string;
+  relay_detail?: string;
   submitted_at_unix_ms: number;
   delegated?: boolean;
 };
@@ -654,6 +655,7 @@ type OfflineRenewalSlot = {
   epoch_id: number;
   parent_child_index: number;
   order_commitment: string;
+  funding_note_commitments?: string[];
   ingress_request: unknown;
 };
 
@@ -727,6 +729,7 @@ const PRIVATE_REPORT_OUTPUT_TAG_COUNT = boundedInteger(
   8,
   512,
 );
+const PRIVATE_SETTLEMENT_REPORTS_EVENT = "zylith-private-settlement-reports";
 const MAX_STRATEGY_CHILDREN = boundedInteger(
   import.meta.env.VITE_ZYLITH_MAX_STRATEGY_CHILDREN,
   86_400,
@@ -769,7 +772,6 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   let strategyWorkerInFlight = false;
   let recoverySyncInFlight = false;
   let postUnlockSyncInFlight = false;
-  let privacyWarmupInFlight = false;
   let sessionChannel: BroadcastChannel | null = null;
   let pendingSessionUnlock: {
     nonce: string;
@@ -903,12 +905,31 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   async function saveStrategies() {
     if (!seedHex || !publicConfig) return;
     const encrypted = await encryptLocalStore(
-      strategies.map(strategy => ({ ...strategy, deployment_scope: deploymentScope })),
+      strategies.map(strategy => compactStrategyForLocalStore({
+        ...strategy,
+        deployment_scope: deploymentScope,
+      })),
       seedHex,
       publicConfig.account_id,
       "strategies",
     );
     localStorage.setItem(`${STRATEGIES_PREFIX}${localStateScope()}`, JSON.stringify(encrypted));
+  }
+
+  function compactStrategyForLocalStore(strategy: PrivateStrategyRecord): PrivateStrategyRecord {
+    if (strategy.offline_package?.relay_mode !== "ZylithRelay") return strategy;
+    return {
+      ...strategy,
+      offline_package: {
+        ...strategy.offline_package,
+        // Managed-relay packages are submitted to the relay immediately. Persist only
+        // slot identifiers locally so long windows do not exceed browser storage quota.
+        slots: strategy.offline_package.slots.map((slot) => ({
+          ...slot,
+          ingress_request: undefined,
+        })),
+      },
+    };
   }
 
   async function loadScanState() {
@@ -983,7 +1004,6 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     await loadNotes();
     await loadStrategies();
     await loadScanState();
-    void warmUpStarknetPrivacyFundingForDeployment().catch(() => undefined);
     void runPostUnlockSync();
     startStrategyWorker();
     return true;
@@ -1000,38 +1020,6 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       await pushRecoverySnapshot(false).catch(() => undefined);
     } finally {
       postUnlockSyncInFlight = false;
-    }
-  }
-
-  async function warmUpStarknetPrivacyFundingForDeployment() {
-    if (privacyWarmupInFlight || !seedHex) return;
-    privacyWarmupInFlight = true;
-    try {
-      const deployment = await loadDeploymentConfig();
-      const fundingRail = selectedDepositFundingRail(deployment);
-      const privacyPoolAddress = requiredNonZeroFelt(fundingRail.privacyPool, "privacy_pool_address");
-      const chainId = requiredString(configuredChainId || deployment.chain_id, "chain_id");
-      const rpcUrl = requiredString(deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL, "rpc_url");
-      const paymasterUrl = fundingRail.paymasterUrl || configuredPaymasterUrl;
-      const tokenAddresses = Object.values(deployment.token_addresses ?? {})
-        .map((address) => normalizeText(address))
-        .filter((address): address is string => Boolean(address));
-      if (!paymasterUrl || !fundingRail.privacyProofSignerClassHash || tokenAddresses.length === 0) {
-        return;
-      }
-      await warmUpStarknetPrivacyFunding({
-        seedHex,
-        chainId,
-        rpcUrl,
-        privacyPoolAddress,
-        tokenAddresses,
-        paymasterUrl,
-        privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-        minProvingDelayBlocks:
-          fundingRail.minProvingDelayBlocks ?? DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
-      });
-    } finally {
-      privacyWarmupInFlight = false;
     }
   }
 
@@ -1307,6 +1295,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (notesChanged) {
       await saveNotes();
       scheduleRecoverySnapshot(false);
+    }
+    if (reports.length > 0 && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent(PRIVATE_SETTLEMENT_REPORTS_EVENT, {
+        detail: { reports },
+      }));
     }
     return reports;
   }
@@ -2100,6 +2093,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       batch_id?: string;
       epoch_id?: number;
       status?: string;
+      detail?: string;
       accepted?: { order_commitment?: string; batch_id?: string; accepted_at_unix_ms?: number };
     }>,
   ): Promise<boolean> {
@@ -2107,8 +2101,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const strategy = strategies.find((entry) => entry.id === packageId);
     if (!strategy || results.length === 0) return false;
     let changed = false;
+    let relayNeedsRefresh = false;
     for (const result of results) {
-      if (result.status !== "submitted" && result.status !== "already_submitted") continue;
       const commitment = result.accepted?.order_commitment ?? result.order_commitment;
       const child = strategy.submitted_children.find((entry) =>
         (commitment && entry.order_commitment === commitment) ||
@@ -2116,6 +2110,19 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         (result.slot_id && result.slot_id === `${strategy.id}:${entry.parent_child_index}`),
       );
       if (!child) continue;
+      if (result.status && child.relay_status !== result.status) {
+        child.relay_status = result.status;
+        changed = true;
+      }
+      if (child.relay_detail !== result.detail) {
+        child.relay_detail = result.detail;
+        changed = true;
+      }
+      if (result.status === "awaiting_wallet_refresh") {
+        relayNeedsRefresh = true;
+        continue;
+      }
+      if (result.status !== "submitted" && result.status !== "already_submitted") continue;
       const acceptedAt = result.accepted?.accepted_at_unix_ms ?? Date.now();
       if (commitment && child.order_commitment !== commitment) {
         child.order_commitment = commitment;
@@ -2143,7 +2150,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     if (!changed) return false;
     strategy.updated_at_unix_ms = Date.now();
-    strategy.last_error = undefined;
+    if (relayNeedsRefresh) {
+      if (strategy.status !== "paused") {
+        strategy.status = "paused";
+      }
+      strategy.last_error = "Renewal relay is paused until this package is refreshed from the wallet.";
+    } else {
+      if (strategy.status === "pending_relay") {
+        strategy.status = "delegated";
+      }
+      strategy.last_error = undefined;
+    }
     await saveStrategies();
     scheduleRecoverySnapshot(false);
     return true;
@@ -2405,9 +2422,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         relayMode: draft.relayMode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
+      const fundingSelectionDraft = strategy.mode === "Resting"
+        ? makerCurveFundingSelectionDraft(childDraft)
+        : materializedChildDraft;
       const fundingNotes = strategy.mode === "Resting"
         ? (restingFundingNotes ??= selectFundingNotes(
-            materializedChildDraft,
+            fundingSelectionDraft,
             new Set<string>(),
             strategyFundingLockRef(strategy),
           ))
@@ -2442,6 +2462,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         epoch_id: batch.epoch_id,
         parent_child_index: childIndex,
         order_commitment: built.order_commitment,
+        funding_note_commitments: fundingNotes.map((note) => note.note_commitment),
         ingress_request: built.ingress_request,
       });
       if (strategy.mode !== "Resting") {
@@ -2566,9 +2587,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         relayMode: strategy.offline_package?.relay_mode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
+      const fundingSelectionDraft = strategy.mode === "Resting"
+        ? makerCurveFundingSelectionDraft(childDraft)
+        : materializedChildDraft;
       const fundingNotes = strategy.mode === "Resting"
         ? (restingFundingNotes ??= selectFundingNotes(
-            materializedChildDraft,
+            fundingSelectionDraft,
             new Set<string>(),
             strategyFundingLockRef(strategy),
           ))
@@ -2603,6 +2627,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         epoch_id: batch.epoch_id,
         parent_child_index: childIndex,
         order_commitment: built.order_commitment,
+        funding_note_commitments: fundingNotes.map((note) => note.note_commitment),
         ingress_request: built.ingress_request,
       });
       if (strategy.mode !== "Resting") {
@@ -2947,6 +2972,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         cancellation_secret: child.cancellation_secret,
         expected_output_metadata_commitment: child.expected_output_metadata_commitment,
         funding_note_commitments: child.funding_note_commitments,
+        relay_status: child.relay_status,
+        relay_detail: child.relay_detail,
         submitted_at_unix_ms: child.submitted_at_unix_ms,
         delegated: child.delegated,
       })),
@@ -2954,12 +2981,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   function previewFundingNotes(draft: PrivateOrderDraft): FundingPreview {
-    const materializedDraft = materializeMakerCurveDraft(draft);
-    const selected = selectFundingNotes(materializedDraft);
-    const required = fundingRequirement(materializedDraft);
+    const fundingDraft = makerCurveFundingSelectionDraft(draft);
+    const selected = selectFundingNotes(fundingDraft);
+    const required = fundingRequirement(fundingDraft);
     const selectedTotal = selected.reduce((total, record) => total + BigInt(record.note.amount), 0n);
     return {
-      asset: fundingAssetForDraft(materializedDraft),
+      asset: fundingAssetForDraft(fundingDraft),
       required: required.toString(),
       selected_total: selectedTotal.toString(),
       expected_change: (selectedTotal - required).toString(),
@@ -3687,6 +3714,25 @@ function materializeMakerCurveDraft(draft: PrivateOrderDraft): PrivateOrderDraft
   };
 }
 
+function makerCurveFundingSelectionDraft(draft: PrivateOrderDraft): PrivateOrderDraft {
+  if (draft.mode !== "Maker Curve") return draft;
+  const points = normalizeMakerCurvePoints(draft);
+  if (points.length === 0) return draft;
+  const reservePoints = makerCurveFundingReservePoints(points, draft.side, makerCurveRotationBps(draft));
+  const amount = makerCurveTotalBaseAmount(reservePoints);
+  const minFill = normalizeOrderMinFill(draft, amount);
+  return {
+    ...draft,
+    amount: amount.toString(),
+    limitPrice: makerCurveEnvelopePrice(draft.side, reservePoints).toString(),
+    minFill: minFill.toString(),
+    makerCurvePoints: reservePoints.map((point) => ({
+      price: point.price.toString(),
+      baseAmount: point.base_amount.toString(),
+    })),
+  };
+}
+
 export function rotateMakerCurvePoints(
   points: NormalizedMakerCurvePoint[],
   maxAbsoluteBps: number,
@@ -3696,6 +3742,21 @@ export function rotateMakerCurvePoints(
   return enforceStrictMakerCurvePrices(
     points.map((point) => ({
       price: applyBasisPointFactor(point.price, priceFactor),
+      base_amount: point.base_amount,
+    })),
+  );
+}
+
+export function makerCurveFundingReservePoints(
+  points: NormalizedMakerCurvePoint[],
+  side: Side,
+  maxAbsoluteBps: number,
+): NormalizedMakerCurvePoint[] {
+  if (side !== "Buy" || maxAbsoluteBps <= 0) return enforceStrictMakerCurvePrices(points);
+  const maxPriceFactor = 10_000n + BigInt(maxAbsoluteBps);
+  return enforceStrictMakerCurvePrices(
+    points.map((point) => ({
+      price: applyBasisPointFactor(point.price, maxPriceFactor),
       base_amount: point.base_amount,
     })),
   );
