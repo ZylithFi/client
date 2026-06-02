@@ -4,10 +4,10 @@ import {
   type LocalOrder,
   type LocalOrderStatus,
   type PrivateStrategySummary,
+  deleteOrders,
   loadOrders,
   ordersChanged,
   reconcileOrderLifecycle,
-  saveOrders,
 } from "./domain/orderLifecycle";
 import { retainedLocalNoteLockRefs } from "./domain/localNoteLocks";
 import { type PendingDeposit, type WalletBalance, type WithdrawableNote } from "./domain/shieldedBalances";
@@ -67,6 +67,14 @@ import {
   fetchManagedRenewalPackageResults,
   submitManagedRenewalPackage,
 } from "./domain/managedRenewalRelay";
+import {
+  deleteSelfHostedRenewalPackage,
+  fetchSelfHostedRenewalPackageResults,
+  normalizeSelfRelayUrl,
+  readSelfHostedRelayUrl,
+  storeSelfHostedRelayUrl,
+  submitSelfHostedRenewalPackage,
+} from "./domain/selfHostedRenewalRelay";
 
 const ReportsScreen = lazy(() =>
   import("./screens/ReportsScreen").then(module => ({ default: module.ReportsScreen })),
@@ -125,6 +133,7 @@ const PROOF_TRACKED_ORDER_STATUSES = new Set<LocalOrderStatus>([
   "stalled",
 ]);
 const PRIVATE_REPORT_RECOVERY_STATUSES = new Set<LocalOrderStatus>([
+  "in_batch",
   "proving",
   "settling",
   "settled_pending_output",
@@ -409,6 +418,14 @@ export default function App() {
     });
   }, []);
 
+  const updateRedactSensitiveUi = useCallback((value: boolean) => {
+    setUserPreferences(previous => {
+      const next = { ...previous, redactSensitiveUi: value };
+      saveUserPreferences(next);
+      return next;
+    });
+  }, []);
+
   // UI state
   const [openSlide, setOpenSlide] = useState<"wallet" | "deposit" | "withdraw" | "recovery" | null>(null);
   const [slideAsset, setSlideAsset] = useState("USDC");
@@ -511,19 +528,25 @@ export default function App() {
   const privateReportLastAttemptAt = useRef<Map<string, number>>(new Map());
   const [privateReportRetryTick, setPrivateReportRetryTick] = useState(0);
   const [balanceTick, setBalanceTick] = useState(0);
+  const persistOrders = useCallback((next: LocalOrder[]) => {
+    const w = walletRuntime();
+    if (w?.isReady() && w.saveLocalOrders) {
+      void w.saveLocalOrders(next).catch(() => undefined);
+    }
+  }, []);
   const saveAndSet = useCallback((next: LocalOrder[]) => {
     ordersRef.current = next;
     setOrders(next);
-    saveOrders(next, orderOwnerKey ?? walletOrderOwnerKey(deployment));
-  }, [deployment, orderOwnerKey]);
+    persistOrders(next);
+  }, [persistOrders]);
   const prependAndSaveOrder = useCallback((order: LocalOrder) => {
     setOrders(previous => {
       const next = [order, ...previous];
       ordersRef.current = next;
-      saveOrders(next, orderOwnerKey ?? walletOrderOwnerKey(deployment));
+      persistOrders(next);
       return next;
     });
-  }, [deployment, orderOwnerKey]);
+  }, [persistOrders]);
 
   const applyPrivateSettlementReports = useCallback((reports: PrivateSettlementReportForApp[]) => {
     if (reports.length === 0) return;
@@ -562,6 +585,8 @@ export default function App() {
     }
 
     const successfulOrderKeys = new Set<string>();
+    const lockUpdates: Promise<unknown>[] = [];
+    const walletForLockUpdates = walletRuntime();
     let changed = false;
     const nextOrders = ordersRef.current.map(order => {
       const matched = reportByOrder.get(normalizeFeltForComparison(order.orderCommitment));
@@ -577,8 +602,27 @@ export default function App() {
         clearingPrice: matched.execution.execution_price || matched.report.clearing_price,
         priceBaseScale: matched.report.price_base_scale,
       }, pair);
+      const reportFundingCommitments = [
+        ...(matched.execution.funding_note_commitments ?? []),
+        matched.execution.funding_note_commitment,
+      ].filter((value): value is string => Boolean(value));
+      const fundingFallback = {
+        asset: order.fundingAsset,
+        amount: order.fundingAmount,
+        batchId: order.batchId,
+        noteCommitments: reportFundingCommitments.length > 0
+          ? reportFundingCommitments
+          : order.fundingNoteCommitments,
+      };
       if (filledAtomic <= 0n) {
         if (syncKey) successfulOrderKeys.add(syncKey);
+        if (walletForLockUpdates?.settlePrivateOrderLock) {
+          lockUpdates.push(walletForLockUpdates.settlePrivateOrderLock(
+            order.orderCommitment,
+            "released",
+            fundingFallback,
+          ).catch(() => false));
+        }
         if (order.status === "no_fill" && order.clearingPrice === clearingPrice) return order;
         changed = true;
         return { ...order, status: "no_fill" as LocalOrderStatus, clearingPrice };
@@ -586,6 +630,13 @@ export default function App() {
       const nextStatus: LocalOrderStatus = unfilledAtomic > 0n ? "partial" : "filled";
       const filledAmount = fromAtomicStr(filledAtomic.toString(), pair.base_asset_id);
       if (syncKey) successfulOrderKeys.add(syncKey);
+      if (walletForLockUpdates?.settlePrivateOrderLock) {
+        lockUpdates.push(walletForLockUpdates.settlePrivateOrderLock(
+          order.orderCommitment,
+          "spent",
+          fundingFallback,
+        ).catch(() => false));
+      }
       if (
         order.status === nextStatus &&
         order.clearingPrice === clearingPrice &&
@@ -606,19 +657,37 @@ export default function App() {
       saveAndSet(nextOrders);
     }
     setBalanceTick(value => value + 1);
+    if (lockUpdates.length > 0) {
+      void Promise.all(lockUpdates).finally(() => setBalanceTick(value => value + 1));
+    }
   }, [pairs, saveAndSet]);
 
   useEffect(() => {
     const nextOwnerKey = walletReady ? walletOrderOwnerKey(deployment) : null;
     if (nextOwnerKey === orderOwnerKey) return;
     setOrderOwnerKey(nextOwnerKey);
-    const loadedOrders = loadOrders(nextOwnerKey);
-    ordersRef.current = loadedOrders;
-    setOrders(loadedOrders);
+    let cancelled = false;
+    async function loadWalletOrders() {
+      const w = walletRuntime();
+      const encryptedOrders = w?.isReady() && w.loadLocalOrders
+        ? await w.loadLocalOrders().catch(() => [] as LocalOrder[])
+        : [];
+      const legacyOrders = loadOrders(nextOwnerKey);
+      const loadedOrders = encryptedOrders.length > 0 ? encryptedOrders : legacyOrders;
+      if (legacyOrders.length > 0 && w?.isReady() && w.saveLocalOrders) {
+        await w.saveLocalOrders(loadedOrders).catch(() => undefined);
+        deleteOrders(nextOwnerKey);
+      }
+      if (cancelled) return;
+      ordersRef.current = loadedOrders;
+      setOrders(loadedOrders);
+    }
+    void loadWalletOrders();
     privateReportRequestsInFlight.current.clear();
     privateReportSyncedOrders.current.clear();
     privateReportLastAttemptAt.current.clear();
     setPrivateSettlementTranscripts({});
+    return () => { cancelled = true; };
   }, [deployment, walletReady, runtimeStatus, orderOwnerKey]);
 
   useEffect(() => {
@@ -824,7 +893,7 @@ export default function App() {
     }
     void reconcileLocks();
     return () => { cancelled = true; };
-  }, [orders, walletReady]);
+  }, [balanceTick, orders, walletReady]);
 
   useEffect(() => {
     if (!walletReady) return;
@@ -859,37 +928,50 @@ export default function App() {
     const renewalPackages = Array.from(
       new Map(
       strategies
+        .filter(strategy => ["active", "delegated", "pending_relay", "paused"].includes(strategy.status))
         .map(strategy => strategy.offline_package)
-        .filter((pkg): pkg is NonNullable<typeof pkg> => pkg?.relay_mode === "ZylithRelay")
+        .filter((pkg): pkg is NonNullable<typeof pkg> =>
+          pkg?.relay_mode === "ZylithRelay" ||
+          (pkg?.relay_mode === "SelfRelay" && Boolean(readSelfHostedRelayUrl(pkg.package_id)))
+        )
         .map(pkg => [pkg.package_id, pkg] as const),
       ).values(),
     );
     if (renewalPackages.length === 0) return;
     let cancelled = false;
+    let timer: number | null = null;
     async function syncManagedRelayResults() {
       const w = walletRuntime();
       if (!w?.isReady()) return;
       let changed = false;
       for (const renewalPackage of renewalPackages) {
-        const response = await fetchManagedRenewalPackageResults(renewalPackage).catch((error: unknown) => {
+        const response = await (
+          renewalPackage.relay_mode === "ZylithRelay"
+            ? fetchManagedRenewalPackageResults(renewalPackage)
+            : fetchSelfHostedRenewalPackageResults(readSelfHostedRelayUrl(renewalPackage.package_id), renewalPackage)
+        ).catch((error: unknown) => {
           setSubmitError(userFacingErrorMessage(error));
           return undefined;
         });
         if (response === undefined) continue;
-        if (!response) {
-          changed = await w.discardPreparedPrivateStrategy?.(renewalPackage.package_id).catch(() => false) || changed;
-          continue;
-        }
+        if (!response) continue;
         if (!response?.results?.length || cancelled) continue;
         changed = await w.recordOfflineRenewalRelayResults(renewalPackage.package_id, response.results).catch(() => false) || changed;
       }
       if (!cancelled && changed) setBalanceTick(value => value + 1);
     }
-    void syncManagedRelayResults();
-    const timer = window.setInterval(() => { void syncManagedRelayResults(); }, 15_000);
+    function scheduleNextRelayPoll(initial = false) {
+      if (cancelled) return;
+      const baseDelay = initial ? 2_000 : 18_000;
+      const jitter = Math.floor(Math.random() * 9_000);
+      timer = window.setTimeout(() => {
+        void syncManagedRelayResults().finally(() => scheduleNextRelayPoll(false));
+      }, baseDelay + jitter);
+    }
+    scheduleNextRelayPoll(true);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [walletReady, strategies]);
 
@@ -1083,7 +1165,10 @@ export default function App() {
         childAmount: intent.childSize ? toAtomicStr(intent.childSize, submitPair.base_asset_id) : undefined,
         randomizedSlicing: intent.jitter > 0,
         randomizedSlicingBps: intent.jitter * 100,
-        offlineDelegation: intent.shape === "curve" && intent.resting && intent.relayMode === "ZylithRelay",
+        offlineDelegation: intent.shape === "curve" && intent.resting && (
+          intent.relayMode === "ZylithRelay" ||
+          intent.relayOperator === "SelfHostedRelay"
+        ),
         relayMode: intent.relayMode ?? "SelfRelay",
       };
 
@@ -1103,11 +1188,35 @@ export default function App() {
           throw relayError;
         }
       }
+      if (result.offline_package?.relay_mode === "SelfRelay" && intent.relayOperator === "SelfHostedRelay") {
+        const endpointUrl = normalizeSelfRelayUrl(intent.selfRelayUrl ?? "");
+        if (!endpointUrl) {
+          await w.discardPreparedPrivateStrategy?.(result.offline_package.package_id).catch(() => false);
+          setBalanceTick(v => v + 1);
+          throw new Error("Self-hosted relay endpoint is invalid or missing");
+        }
+        try {
+          await submitSelfHostedRenewalPackage(endpointUrl, result.offline_package);
+          storeSelfHostedRelayUrl(result.offline_package.package_id, endpointUrl);
+          await w.markPrivateStrategyRelayRegistered?.(result.offline_package.package_id).catch(() => false);
+          setBalanceTick(v => v + 1);
+        } catch (relayError) {
+          await w.discardPreparedPrivateStrategy?.(result.offline_package.package_id).catch(() => false);
+          setBalanceTick(v => v + 1);
+          throw relayError;
+        }
+      }
+      const materializedOrderCommitment = result.order_commitment ?? result.first_child_order_commitment ?? "";
+      if (!materializedOrderCommitment) {
+        setBalanceTick(v => v + 1);
+        return true;
+      }
+
       const submittedAt = Date.now();
 
       const newOrder: LocalOrder = {
         ordRef: genRef(),
-        orderCommitment: result.order_commitment ?? result.first_child_order_commitment ?? "",
+        orderCommitment: materializedOrderCommitment,
         cancellationSecret: result.cancellation_secret ?? result.first_child_cancellation_secret ?? "",
         expectedOutputMetadataCommitment: result.expected_output_metadata_commitment,
         fundingNoteCommitments: result.funding_note_commitments,
@@ -1196,8 +1305,17 @@ export default function App() {
   // Cancel order
   async function cleanupManagedRelayStrategyPackage(strategyId: string) {
     const renewalPackage = strategies.find(strategy => strategy.id === strategyId)?.offline_package;
-    if (renewalPackage?.relay_mode !== "ZylithRelay") return;
-    await deleteManagedRenewalPackage(renewalPackage);
+    if (!renewalPackage) return;
+    if (renewalPackage.relay_mode === "ZylithRelay") {
+      await deleteManagedRenewalPackage(renewalPackage);
+      return;
+    }
+    if (renewalPackage.relay_mode === "SelfRelay") {
+      await deleteSelfHostedRenewalPackage(
+        readSelfHostedRelayUrl(renewalPackage.package_id),
+        renewalPackage,
+      );
+    }
   }
 
   async function handleCancelOrder(order: LocalOrder) {
@@ -1294,6 +1412,12 @@ export default function App() {
       if (renewalPackage.relay_mode === "ZylithRelay") {
         await submitManagedRenewalPackage(renewalPackage);
         await w.markPrivateStrategyRelayRegistered?.(renewalPackage.package_id).catch(() => false);
+      } else if (renewalPackage.relay_mode === "SelfRelay") {
+        const endpointUrl = readSelfHostedRelayUrl(renewalPackage.package_id);
+        if (endpointUrl) {
+          await submitSelfHostedRenewalPackage(endpointUrl, renewalPackage);
+          await w.markPrivateStrategyRelayRegistered?.(renewalPackage.package_id).catch(() => false);
+        }
       }
       setBalanceTick(v => v + 1);
     } catch (error) {
@@ -1342,7 +1466,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${userPreferences.redactSensitiveUi ? "redact-sensitive-ui" : ""}`}>
       <TopNav
         workspace={workspace}
         tab={tab}
@@ -1358,6 +1482,8 @@ export default function App() {
         setSubmissionTimingPreference={updateSubmissionTiming}
         withdrawalRoutePreference={userPreferences.withdrawalRoute}
         setWithdrawalRoutePreference={updateWithdrawalRoute}
+        redactSensitiveUi={userPreferences.redactSensitiveUi}
+        setRedactSensitiveUi={updateRedactSensitiveUi}
         starknetAddress={starknetAddress}
         onOpenWallet={() => setOpenSlide("wallet")}
         onDeposit={() => setOpenSlide("deposit")}

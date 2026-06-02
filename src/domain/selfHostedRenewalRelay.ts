@@ -1,20 +1,20 @@
 import type { OfflineRenewalPackage, OfflineRenewalRelayResult } from "../offlineRenewalOperator";
 
-type ManagedRelayPackageStatus = {
+type RelayPackageStatus = {
   package_id: string;
   package_commitment: string;
   pair: string;
   start_epoch: number;
   end_epoch: number;
   slot_count: number;
-  relay_mode: "ZylithRelay";
+  relay_mode: "SelfRelay";
   pending_slots: number;
   submitted_slots: number;
   failed_slots: number;
   updated_at_unix_ms: number;
 };
 
-type ManagedRelayPackageResults = {
+type RelayPackageResults = {
   package_id: string;
   package_commitment: string;
   results: OfflineRenewalRelayResult[];
@@ -30,45 +30,74 @@ type RelayAuthorizationHeaders = {
   };
 };
 
-const managedRelayUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_RENEWAL_RELAY_URL || localServiceUrl(3400),
-);
+const SELF_RELAY_URL_PREFIX = "zylith.self-relay-url.v1:";
 
-export function managedRenewalRelayConfigured(): boolean {
-  return Boolean(managedRelayUrl);
+export function normalizeSelfRelayUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "https:" && !isLocalHost(url.hostname)) return "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
 }
 
-export async function submitManagedRenewalPackage(
+export function storeSelfHostedRelayUrl(packageId: string, endpointUrl: string): void {
+  const normalized = normalizeSelfRelayUrl(endpointUrl);
+  if (!packageId || !normalized) return;
+  try {
+    sessionStorage.setItem(selfRelayUrlKey(packageId), normalized);
+    localStorage.removeItem(selfRelayUrlKey(packageId));
+  } catch {
+    /* noop */
+  }
+}
+
+export function readSelfHostedRelayUrl(packageId: string): string {
+  if (!packageId) return "";
+  try {
+    return sessionStorage.getItem(selfRelayUrlKey(packageId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export async function submitSelfHostedRenewalPackage(
+  endpointUrl: string,
   renewalPackage: OfflineRenewalPackage,
-): Promise<ManagedRelayPackageStatus | null> {
-  if (renewalPackage.relay_mode !== "ZylithRelay") return null;
-  return postJson<ManagedRelayPackageStatus>(
-    requiredManagedRelayUrl(),
-    "/packages",
-    renewalPackage,
-  );
+): Promise<RelayPackageStatus | null> {
+  const baseUrl = requiredSelfRelayUrl(endpointUrl);
+  if (renewalPackage.relay_mode !== "SelfRelay") return null;
+  return postJson<RelayPackageStatus>(baseUrl, "/packages", renewalPackage);
 }
 
-export async function fetchManagedRenewalPackageResults(
+export async function fetchSelfHostedRenewalPackageResults(
+  endpointUrl: string,
   renewalPackage: RelayAuthorizationHeaders & { package_id: string },
-): Promise<ManagedRelayPackageResults | null> {
-  if (!managedRelayUrl) return null;
-  return fetchJson<ManagedRelayPackageResults>(
-    managedRelayUrl,
+): Promise<RelayPackageResults | null> {
+  const baseUrl = normalizeSelfRelayUrl(endpointUrl);
+  if (!baseUrl) return null;
+  return fetchJson<RelayPackageResults>(
+    baseUrl,
     `/packages/${encodeURIComponent(renewalPackage.package_id)}/results`,
     relayAuthorizationHeaders(renewalPackage),
   );
 }
 
-export async function deleteManagedRenewalPackage(
+export async function deleteSelfHostedRenewalPackage(
+  endpointUrl: string,
   renewalPackage: RelayAuthorizationHeaders & {
     package_id: string;
     relay_mode?: "SelfRelay" | "ZylithRelay";
   },
 ): Promise<boolean> {
-  if (renewalPackage.relay_mode !== "ZylithRelay" || !managedRelayUrl) return false;
+  const baseUrl = normalizeSelfRelayUrl(endpointUrl);
+  if (renewalPackage.relay_mode !== "SelfRelay" || !baseUrl) return false;
   return deleteJson(
-    managedRelayUrl,
+    baseUrl,
     `/packages/${encodeURIComponent(renewalPackage.package_id)}`,
     relayAuthorizationHeaders(renewalPackage),
   );
@@ -81,14 +110,12 @@ async function fetchJson<T>(
 ): Promise<T | null> {
   const response = await fetch(`${baseUrl}${path}`, {
     headers: {
-      ...relayHeaders(),
+      accept: "application/json",
       ...authHeaders,
     },
   });
   if (response.status === 404) return null;
-  if (!response.ok) {
-    throw new Error(await relayErrorMessage(response));
-  }
+  if (!response.ok) throw new Error(await relayErrorMessage(response));
   return (await response.json()) as T;
 }
 
@@ -100,14 +127,12 @@ async function deleteJson(
   const response = await fetch(`${baseUrl}${path}`, {
     method: "DELETE",
     headers: {
-      ...relayHeaders(),
+      accept: "application/json",
       ...authHeaders,
     },
   });
   if (response.status === 404) return false;
-  if (!response.ok) {
-    throw new Error(await relayErrorMessage(response));
-  }
+  if (!response.ok) throw new Error(await relayErrorMessage(response));
   return true;
 }
 
@@ -115,20 +140,18 @@ async function postJson<T>(baseUrl: string, path: string, body: unknown): Promis
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
-      ...relayHeaders(),
+      accept: "application/json",
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
   });
-  if (!response.ok) {
-    throw new Error(await relayErrorMessage(response));
-  }
+  if (!response.ok) throw new Error(await relayErrorMessage(response));
   return (await response.json()) as T;
 }
 
 async function relayErrorMessage(response: Response) {
   const detail = await relayErrorDetail(response);
-  return `Renewal relay request failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+  return `Self-hosted relay request failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
 }
 
 async function relayErrorDetail(response: Response) {
@@ -143,18 +166,6 @@ async function relayErrorDetail(response: Response) {
   }
 }
 
-function relayHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    accept: "application/json",
-  };
-  return headers;
-}
-
-function requiredManagedRelayUrl() {
-  if (managedRelayUrl) return managedRelayUrl;
-  throw new Error("Zylith relay endpoint is not configured");
-}
-
 function relayAuthorizationHeaders(input: RelayAuthorizationHeaders): Record<string, string> {
   const auth = input.relay_authorization;
   if (!auth || !input.package_commitment || !input.parent_cancel_authority) return {};
@@ -167,14 +178,14 @@ function relayAuthorizationHeaders(input: RelayAuthorizationHeaders): Record<str
   };
 }
 
-function localServiceUrl(port: number) {
-  if (typeof window === "undefined") return "";
-  if (!isLocalHost(window.location.hostname)) return "";
-  return `${window.location.protocol}//${window.location.hostname}:${port}`;
+function requiredSelfRelayUrl(endpointUrl: string) {
+  const normalized = normalizeSelfRelayUrl(endpointUrl);
+  if (normalized) return normalized;
+  throw new Error("Self-hosted relay endpoint is invalid or missing");
 }
 
-function normalizeUrl(value: string) {
-  return value.replace(/\/+$/, "");
+function selfRelayUrlKey(packageId: string) {
+  return `${SELF_RELAY_URL_PREFIX}${packageId}`;
 }
 
 function isLocalHost(hostname: string) {

@@ -12,7 +12,7 @@ export function normalizeLocalLockRef(value: string | undefined | null): string 
 
 export function retainedLocalNoteLockRefs(
   orders: Pick<LocalOrder, "orderCommitment">[],
-  strategies: Pick<PrivateStrategySummary, "parent_order_commitment" | "submitted_children">[],
+  strategies: Pick<PrivateStrategySummary, "parent_order_commitment" | "submitted_children" | "status">[],
 ): string[] {
   const retained = new Set<string>();
   const retain = (value: string | undefined | null) => {
@@ -24,6 +24,13 @@ export function retainedLocalNoteLockRefs(
     retain(order.orderCommitment);
   }
   for (const strategy of strategies) {
+    if (
+      strategy.status === "completed" ||
+      strategy.status === "failed" ||
+      strategy.status === "cancelled"
+    ) {
+      continue;
+    }
     retain(strategy.parent_order_commitment);
     for (const child of strategy.submitted_children) {
       retain(child.order_commitment);

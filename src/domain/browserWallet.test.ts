@@ -102,8 +102,8 @@ describe("browser wallet selection", () => {
     const wallet = providerWithoutAccount("ready");
     wallet.name = "ReadyX";
     (window as typeof window & { starknet?: unknown }).starknet = wallet;
-    window.localStorage.setItem(selectedWalletKey, wallet.id);
-    window.localStorage.setItem(connectedAddressKey, "0xstale");
+    window.sessionStorage.setItem(selectedWalletKey, wallet.id);
+    window.sessionStorage.setItem(connectedAddressKey, "0xstale");
 
     expect(selectedStarknetProvider()).toBe(wallet);
     expect(connectedStarknetAddress()).toBeNull();
@@ -124,7 +124,7 @@ describe("browser wallet selection", () => {
       request,
     };
     (window as typeof window & { starknet_braavos?: unknown }).starknet_braavos = wallet;
-    window.localStorage.setItem(selectedWalletKey, wallet.id);
+    window.sessionStorage.setItem(selectedWalletKey, wallet.id);
 
     await expect(restoreConnectedStarknetWallet()).resolves.toBe("0xrestored");
 

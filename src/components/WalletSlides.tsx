@@ -37,6 +37,7 @@ export function WalletSlide({
     hasVault ? "unlock" : "create",
   );
   const [passphrase, setPassphrase] = useState("");
+  const [passphraseConfirm, setPassphraseConfirm] = useState("");
   const [phrase, setPhrase] = useState("");
   const [mnemonic, setMnemonic] = useState("");
   const [error, setError] = useState("");
@@ -133,6 +134,7 @@ export function WalletSlide({
   async function handleCreate() {
     if (!w) { setError("Zylith wallet is still loading. Please retry later."); return; }
     if (!passphrase) { setError("Enter a passphrase"); return; }
+    if (passphrase !== passphraseConfirm) { setError("Passphrases do not match."); return; }
     setWorking(true);
     setError("");
     try {
@@ -153,6 +155,7 @@ export function WalletSlide({
     if (!w) { setError("Zylith wallet is still loading. Please retry later."); return; }
     if (!phrase.trim()) { setError("Enter your recovery phrase"); return; }
     if (!passphrase) { setError("Enter a passphrase"); return; }
+    if (passphrase !== passphraseConfirm) { setError("Passphrases do not match."); return; }
     setWorking(true);
     setError("");
     try {
@@ -293,6 +296,7 @@ export function WalletSlide({
                 setPrivKeyTab("import");
                 setError("");
                 setPassphrase("");
+                setPassphraseConfirm("");
               }}
             >
               Recover with Zylith phrase
@@ -304,6 +308,7 @@ export function WalletSlide({
                 setPrivKeyTab("create");
                 setError("");
                 setPassphrase("");
+                setPassphraseConfirm("");
               }}
             >
               Reset local wallet
@@ -330,9 +335,24 @@ export function WalletSlide({
                 />
               </div>
             </div>
+            <div className="f-row">
+              <label className="f-label">Confirm passphrase</label>
+              <div className="f-input-box">
+                <input
+                  className="f-input"
+                  type="password"
+                  placeholder="Re-enter passphrase"
+                  value={passphraseConfirm}
+                  onChange={e => setPassphraseConfirm(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="slide-note">
+              Use at least 12 characters with mixed character types. This encrypts the local Zylith seed in this browser.
+            </div>
             <button
               className="slide-submit"
-              disabled={!passphrase || working || !w}
+              disabled={!passphrase || !passphraseConfirm || working || !w}
               onClick={() => { void handleCreate(); }}
             >
               {working ? "Creating…" : hasVault ? "Replace with new Zylith wallet" : "Create Zylith wallet"}
@@ -345,6 +365,7 @@ export function WalletSlide({
                   setPrivKeyTab("unlock");
                   setError("");
                   setPassphrase("");
+                  setPassphraseConfirm("");
                 }}
               >
                 Back to passphrase unlock
@@ -405,9 +426,24 @@ export function WalletSlide({
                 />
               </div>
             </div>
+            <div className="f-row">
+              <label className="f-label">Confirm passphrase</label>
+              <div className="f-input-box">
+                <input
+                  className="f-input"
+                  type="password"
+                  placeholder="Re-enter passphrase"
+                  value={passphraseConfirm}
+                  onChange={e => setPassphraseConfirm(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="slide-note">
+              Use at least 12 characters with mixed character types. This encrypts the recovered Zylith seed locally.
+            </div>
             <button
               className="slide-submit"
-              disabled={!phrase.trim() || !passphrase || working || !w}
+              disabled={!phrase.trim() || !passphrase || !passphraseConfirm || working || !w}
               onClick={() => { void handleImport(); }}
             >
               {working ? "Importing…" : hasVault ? "Replace local Zylith wallet" : "Import Zylith wallet"}
@@ -421,6 +457,7 @@ export function WalletSlide({
                   setError("");
                   setPhrase("");
                   setPassphrase("");
+                  setPassphraseConfirm("");
                 }}
               >
                 Back to passphrase unlock
@@ -784,6 +821,9 @@ export function WithdrawSlide({
                 : "largest claim-ready note selected first"}
             </>
           )}
+        </div>
+        <div className="slide-note">
+          This setting only chooses which local note to withdraw first. The paymaster can still observe relay timing, recipient, and withdrawal transaction metadata.
         </div>
         {assetNotes.length > 0 && (
           <div className="f-row">

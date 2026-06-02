@@ -66,7 +66,7 @@ describe("LiquidityCurvesScreen", () => {
     expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
       pairId: "ETH/USDC",
       resting: true,
-      relayMode: "ZylithRelay",
+      relayMode: "SelfRelay",
       curvePoints: [
         { price: "2500", baseAmount: "3" },
         { price: "2505", baseAmount: "3" },
@@ -268,7 +268,7 @@ describe("LiquidityCurvesScreen", () => {
     expect(onPreviewFunding).toHaveBeenCalledWith(expect.objectContaining({
       pairId: "STRK/USDC",
       side: "Buy",
-      relayMode: "ZylithRelay",
+      relayMode: "SelfRelay",
       curvePoints: [
         { price: "0.01", baseAmount: "1" },
         { price: "0.015", baseAmount: "1" },
@@ -278,7 +278,7 @@ describe("LiquidityCurvesScreen", () => {
     expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
       pairId: "STRK/USDC",
       side: "Buy",
-      relayMode: "ZylithRelay",
+      relayMode: "SelfRelay",
       curvePoints: [
         { price: "0.01", baseAmount: "1" },
         { price: "0.015", baseAmount: "1" },
@@ -361,9 +361,64 @@ describe("LiquidityCurvesScreen", () => {
     expect(selects[2]).not.toBeDisabled();
     fireEvent.change(selects[1], { target: { value: "720" } });
     expect(selects[1]).toHaveValue("720");
-    fireEvent.change(selects[2], { target: { value: "SelfRelay" } });
-    expect(selects[2]).toHaveValue("SelfRelay");
+    fireEvent.change(selects[2], { target: { value: "SelfHostedRelay" } });
+    expect(selects[2]).toHaveValue("SelfHostedRelay");
+    expect(selects[1]).toHaveValue("720");
+    expect(screen.getByPlaceholderText("https://relay.example.com")).toBeInTheDocument();
+
+    fireEvent.change(selects[2], { target: { value: "LocalBrowser" } });
+    expect(selects[2]).toHaveValue("LocalBrowser");
     expect(selects[1]).toHaveValue("1");
+  });
+
+  it("submits self-hosted relay curves as SelfRelay packages with a relay endpoint", async () => {
+    const onSubmitCurve = vi.fn().mockResolvedValue(true);
+    render(
+      <LiquidityCurvesScreen
+        pairs={pairs}
+        records={[]}
+        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
+        pendingDeposits={[]}
+        activePairId="STRK/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onSubmitCurve={onSubmitCurve}
+        onCancelCurve={vi.fn()}
+        onEditCurve={vi.fn()}
+        onPauseCurve={vi.fn()}
+        onResumeCurve={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Advanced/ }));
+    const selects = screen.getAllByRole("combobox") as HTMLSelectElement[];
+    fireEvent.change(selects[2], { target: { value: "SelfHostedRelay" } });
+    fireEvent.change(screen.getByPlaceholderText("https://relay.example.com"), {
+      target: { value: "https://maker-relay.example.com/" },
+    });
+
+    const inputs = screen.getAllByRole("textbox");
+    fireEvent.change(inputs[0], { target: { value: "0.01" } });
+    fireEvent.change(inputs[1], { target: { value: "1" } });
+    fireEvent.change(inputs[2], { target: { value: "0.015" } });
+    fireEvent.change(inputs[3], { target: { value: "1" } });
+    fireEvent.change(inputs[4], { target: { value: "0.02" } });
+    fireEvent.change(inputs[5], { target: { value: "1" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Activate bid curve" }));
+    });
+
+    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
+      relayMode: "SelfRelay",
+      relayOperator: "SelfHostedRelay",
+      selfRelayUrl: "https://maker-relay.example.com",
+    }));
   });
 
   it("keeps pending relay curves visible while relay registration catches up", () => {

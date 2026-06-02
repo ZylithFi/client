@@ -19,6 +19,9 @@ import {
 import { msToCountdown } from "../domain/uiFormat";
 import { noteConsolidationPlans, type NoteConsolidationPlan } from "../domain/noteConsolidation";
 
+const hostedNoteConsolidationEnabled =
+  String(import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_NOTE_CONSOLIDATION ?? "").toLowerCase() === "true";
+
 function fmtAddr(value?: string): string {
   if (!value) return "—";
   if (value.length < 12) return value;
@@ -345,12 +348,16 @@ export function AssetsScreen({
         </div>
       </section>
 
-      {consolidationPlans.length > 0 && (
+      {hostedNoteConsolidationEnabled && consolidationPlans.length > 0 && (
         <section className="asset-lifecycle">
           <div className="asset-section-hd">
             <h2>Note consolidation</h2>
             <span>{consolidationPlans.length} merge {consolidationPlans.length === 1 ? "plan" : "plans"}</span>
           </div>
+          <p className="asset-disclosure">
+            Hosted consolidation sends selected note preimages to the private service to build a
+            maintenance proof. Use it only when you accept that service-side linkage.
+          </p>
 
           <div className="table-zone compact assets-table-zone">
             <table className="data-table asset-consolidation-table">

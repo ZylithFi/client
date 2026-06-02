@@ -175,7 +175,7 @@ function ordersKey(ownerKey: string): string {
   return `${ORDERS_KEY_PREFIX}.${ownerKey}`;
 }
 
-function normalizeOrders(raw: unknown): LocalOrder[] {
+export function normalizeOrders(raw: unknown): LocalOrder[] {
   return Array.isArray(raw)
     ? raw.flatMap((order) => {
         if (!order || typeof order !== "object") return [];
@@ -206,6 +206,11 @@ export function saveOrders(orders: LocalOrder[], ownerKey: string | null): void 
   try { localStorage.setItem(ordersKey(ownerKey), JSON.stringify(orders)); } catch { /* noop */ }
 }
 
+export function deleteOrders(ownerKey: string | null): void {
+  if (!ownerKey) return;
+  try { localStorage.removeItem(ordersKey(ownerKey)); } catch { /* noop */ }
+}
+
 export function ordersChanged(before: LocalOrder[], after: LocalOrder[]): boolean {
   if (before.length !== after.length) return true;
   return after.some((order, index) => {
@@ -231,6 +236,7 @@ export function reconcileOrderLifecycle({
   withdrawableNotes,
   pairs,
   noFillFallbackEpochs = 10,
+  closedNoProofFallbackEpochs = 2,
   settlementBlockedFallbackEpochs = 10,
   formatClearingPrice,
   toAtomicStr,
@@ -244,6 +250,7 @@ export function reconcileOrderLifecycle({
   withdrawableNotes: OrderLifecycleOutputNote[];
   pairs: OrderLifecyclePair[];
   noFillFallbackEpochs?: number;
+  closedNoProofFallbackEpochs?: number;
   settlementBlockedFallbackEpochs?: number;
   formatClearingPrice: (price: {
     batchId: string;
@@ -401,6 +408,15 @@ export function reconcileOrderLifecycle({
         return { ...order, status: "settling" as LocalOrderStatus };
       }
       const batchEpoch = batch.epoch_id ?? order.epochId;
+      if (
+        batch.status === "Closed" &&
+        !proofStatus &&
+        latestEpoch > 0 &&
+        Number.isFinite(batchEpoch) &&
+        latestEpoch - batchEpoch >= closedNoProofFallbackEpochs
+      ) {
+        return { ...order, status: "no_fill" as LocalOrderStatus };
+      }
       if (
         latestEpoch > 0 &&
         Number.isFinite(batchEpoch) &&

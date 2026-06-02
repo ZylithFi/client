@@ -39,6 +39,12 @@ export type OfflineRenewalPackage = {
   end_epoch: number;
   slot_count: number;
   relay_mode?: "SelfRelay" | "ZylithRelay";
+  parent_cancel_authority?: string;
+  relay_authorization?: {
+    signer_public_key: string;
+    signature_r: string;
+    signature_s: string;
+  };
   ingress_key_registry_fingerprint?: string;
   relay_policy: {
     prover_url: string;

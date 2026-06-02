@@ -1612,6 +1612,14 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .asset-consolidation-table td:nth-child(4) { width: 14%; }
 .asset-consolidation-table th:nth-child(5),
 .asset-consolidation-table td:nth-child(5) { width: 46%; }
+.asset-disclosure {
+  color: var(--assets-muted);
+  font-family: var(--assets-font);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 14px;
+  max-width: 720px;
+}
 .asset-dash {
   color: var(--assets-muted) !important;
 }
@@ -1901,6 +1909,35 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   grid-template-columns: 1fr 1fr;
   gap: 10px;
   margin-bottom: 14px;
+}
+.liq-self-relay-field {
+  grid-column: 1 / -1;
+}
+.liq-relay-service-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.liq-relay-service-grid > div {
+  padding: 8px 9px;
+  background: var(--z-app-inset);
+  box-shadow: inset 0 0 0 1px var(--z-border);
+}
+.liq-relay-service-grid span {
+  display: block;
+  color: var(--z-text-strong);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.liq-relay-service-grid em {
+  display: block;
+  margin-top: 5px;
+  color: var(--z-text-body);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.4;
 }
 .liq-renew-check {
   grid-column: 1 / -1;
@@ -2207,6 +2244,29 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   text-transform: uppercase;
 }
 .recovery-copy { width: 100%; margin-top: 10px; }
+
+.redact-sensitive-ui .data-table td,
+.redact-sensitive-ui .amount-value,
+.redact-sensitive-ui .balance-value,
+.redact-sensitive-ui .asset-balance-amount,
+.redact-sensitive-ui .capital-state-value,
+.redact-sensitive-ui .liq-stat-strip em,
+.redact-sensitive-ui .liq-package-row em,
+.redact-sensitive-ui .liq-parent-head em,
+.redact-sensitive-ui .kpi-value,
+.redact-sensitive-ui .tca-stat-value,
+.redact-sensitive-ui .curve-preview-val,
+.redact-sensitive-ui .wallet-pill .meta,
+.redact-sensitive-ui .right-asset-amount {
+  color: transparent !important;
+  text-shadow: 0 0 8px rgba(232, 238, 255, 0.64);
+  user-select: none;
+}
+
+.redact-sensitive-ui .data-table td::selection,
+.redact-sensitive-ui .curve-preview-val::selection {
+  background: transparent;
+}
 
 @media (max-width: 1100px) {
   .top-nav { grid-template-columns: auto 1fr auto; }

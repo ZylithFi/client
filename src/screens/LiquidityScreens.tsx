@@ -11,9 +11,11 @@ import type {
   PairConfig,
   TicketSubmitIntent,
 } from "../components/OrderTicket";
+import { normalizeSelfRelayUrl } from "../domain/selfHostedRenewalRelay";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 
 type CurveSide = "bid" | "ask" | "two-sided";
+type RelayOperator = "ZylithRelay" | "SelfHostedRelay" | "LocalBrowser";
 type Period = "7d" | "30d" | "90d" | "all";
 type LiquidityPageTab = "curves" | "orders" | "inventory" | "analytics";
 type RenewalDurationPreset = "1" | "4" | "12" | "24" | "720" | "2160" | "continuous" | "custom";
@@ -21,6 +23,7 @@ const MIN_CURVE_BANDS = 3;
 const LOCAL_BROWSER_MAX_RENEWAL_HOURS = 1;
 const MAX_RELAY_RENEWAL_DAYS = 90;
 const CONTINUOUS_ROLLING_WINDOW_HOURS = MAX_RELAY_RENEWAL_DAYS * 24;
+const SELF_RELAY_ENDPOINT_KEY = "zylith.self-relay-endpoint.v1";
 
 const RENEWAL_DURATION_OPTIONS: Array<{ value: RenewalDurationPreset; label: string; relayOnly?: boolean }> = [
   { value: "1", label: "1h" },
@@ -86,6 +89,34 @@ function renewalWindowLabel(preset: RenewalDurationPreset, hours: number): strin
     return `${days.toLocaleString("en-US", { maximumFractionDigits: 1 })}d package`;
   }
   return `${hours}h window`;
+}
+
+function relayModeForOperator(operator: RelayOperator): "SelfRelay" | "ZylithRelay" {
+  return operator === "ZylithRelay" ? "ZylithRelay" : "SelfRelay";
+}
+
+function relayOperatorForMode(mode?: "SelfRelay" | "ZylithRelay"): RelayOperator {
+  if (mode === "ZylithRelay") return "ZylithRelay";
+  if (mode === "SelfRelay") return "SelfHostedRelay";
+  return "LocalBrowser";
+}
+
+function loadSelfRelayEndpoint(): string {
+  try {
+    return sessionStorage.getItem(SELF_RELAY_ENDPOINT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function persistSelfRelayEndpoint(value: string): void {
+  try {
+    if (value.trim()) sessionStorage.setItem(SELF_RELAY_ENDPOINT_KEY, value.trim());
+    else sessionStorage.removeItem(SELF_RELAY_ENDPOINT_KEY);
+    localStorage.removeItem(SELF_RELAY_ENDPOINT_KEY);
+  } catch {
+    /* noop */
+  }
 }
 
 function formatPct(value: number): string {
@@ -263,7 +294,7 @@ function buildCurveRecords(
 
   for (const strategy of strategies.filter(strategy => strategy.mode === "Resting")) {
     const pair = pairs.find(candidate => candidate.pair_id === strategy.pair);
-    const relatedOrders = orders.filter(order => order.strategyId === strategy.id);
+    const relatedOrders = orders.filter(order => order.strategyId === strategy.id && order.orderCommitment);
     for (const order of relatedOrders) consumedOrderRefs.add(order.ordRef);
     const active = strategy.status === "active" || strategy.status === "delegated" || strategy.status === "pending_relay";
     const expiring = active && strategy.max_children - strategy.next_child_index + 1 <= 8;
@@ -526,6 +557,8 @@ function CurvePreview({
   renewalWindowHours,
   renewalWindowLabelText,
   relayMode,
+  relayOperator,
+  selfRelayUrl,
   onPreviewFunding,
 }: {
   pair: PairConfig;
@@ -537,6 +570,8 @@ function CurvePreview({
   renewalWindowHours: string;
   renewalWindowLabelText: string;
   relayMode: "SelfRelay" | "ZylithRelay";
+  relayOperator: RelayOperator;
+  selfRelayUrl?: string;
   onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
 }) {
   const activeBandSets = side === "two-sided"
@@ -569,6 +604,8 @@ function CurvePreview({
         priceLimit: "",
         jitter: 0,
         relayMode: renewing ? relayMode : "SelfRelay",
+        relayOperator: renewing ? relayOperator : "LocalBrowser",
+        selfRelayUrl: relayOperator === "SelfHostedRelay" ? selfRelayUrl : undefined,
       });
     } catch (error) {
       previewError = userFacingErrorMessage(error, "Funding preview unavailable.");
@@ -598,10 +635,10 @@ function CurvePreview({
         <span
           className={`curve-preview-val ${eligible ? "good" : "warn"}`}
           title={eligible
-            ? "Batch has enough participation to protect privacy."
-            : "Waiting for more participants before this batch can clear privately."}
+            ? "Curve satisfies local maker quote constraints."
+            : "Curve needs the required bands, spread, and funding before it can be submitted."}
         >
-          {eligible ? "Privacy gate passing" : "Privacy gate pending"}
+          {eligible ? "Quote eligible" : "Quote incomplete"}
         </span>
       </div>
       {preview && (
@@ -667,9 +704,10 @@ export function LiquidityCurvesScreen({
   const [advanced, setAdvanced] = useState(false);
   const [inventoryCap, setInventoryCap] = useState("");
   const [renewing, setRenewing] = useState(true);
-  const [renewalDuration, setRenewalDuration] = useState<RenewalDurationPreset>("24");
+  const [renewalDuration, setRenewalDuration] = useState<RenewalDurationPreset>("1");
   const [customRenewalDays, setCustomRenewalDays] = useState("30");
-  const [relayMode, setRelayMode] = useState<"SelfRelay" | "ZylithRelay">("ZylithRelay");
+  const [relayOperator, setRelayOperator] = useState<RelayOperator>("LocalBrowser");
+  const [selfRelayEndpoint, setSelfRelayEndpoint] = useState(() => loadSelfRelayEndpoint());
 
   function prefillBuilder(record: LiquidityCurveRecord) {
     setActivePairId(record.pair);
@@ -690,7 +728,7 @@ export function LiquidityCurvesScreen({
     } else {
       setInventoryCap("");
     }
-    setRelayMode(record.strategy?.offline_package?.relay_mode ?? "ZylithRelay");
+    setRelayOperator(relayOperatorForMode(record.strategy?.offline_package?.relay_mode));
   }
 
   useEffect(() => {
@@ -731,7 +769,10 @@ export function LiquidityCurvesScreen({
     : [[side, side === "bid" ? bidBands : askBands] as [Exclude<CurveSide, "two-sided">, CurvePoint[]]];
   const renewalHours = renewalHoursForPreset(renewalDuration, customRenewalDays);
   const renewalLabel = renewalWindowLabel(renewalDuration, renewalHours);
-  const localRelayTooLong = renewing && relayMode === "SelfRelay" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS;
+  const relayMode = relayModeForOperator(relayOperator);
+  const normalizedSelfRelayEndpoint = normalizeSelfRelayUrl(selfRelayEndpoint);
+  const localRelayTooLong = renewing && relayOperator === "LocalBrowser" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS;
+  const selfHostedRelayMissing = renewing && relayOperator === "SelfHostedRelay" && !normalizedSelfRelayEndpoint;
   const fundingPreviewErrors = sideBandSets
     .map(([curveSide, bands]) => {
       const filledBands = bandRowsFilled(bands);
@@ -754,6 +795,8 @@ export function LiquidityCurvesScreen({
           priceLimit: "",
           jitter: 0,
           relayMode: renewing ? relayMode : "SelfRelay",
+          relayOperator: renewing ? relayOperator : "LocalBrowser",
+          selfRelayUrl: relayOperator === "SelfHostedRelay" ? normalizedSelfRelayEndpoint : undefined,
         });
         return null;
       } catch (error) {
@@ -764,6 +807,7 @@ export function LiquidityCurvesScreen({
   const canSubmit = walletReady &&
     !submitting &&
     !localRelayTooLong &&
+    !selfHostedRelayMissing &&
     missingInventoryAssets.length === 0 &&
     fundingPreviewErrors.length === 0 &&
     sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
@@ -787,10 +831,13 @@ export function LiquidityCurvesScreen({
         priceLimit: "",
         jitter: 0,
         relayMode: renewing ? relayMode : "SelfRelay",
+        relayOperator: renewing ? relayOperator : "LocalBrowser",
+        selfRelayUrl: relayOperator === "SelfHostedRelay" ? normalizedSelfRelayEndpoint : undefined,
       });
       if (ok === false) return;
     }
     setInventoryCap("");
+    if (normalizedSelfRelayEndpoint) persistSelfRelayEndpoint(normalizedSelfRelayEndpoint);
   }
 
   return (
@@ -883,7 +930,7 @@ export function LiquidityCurvesScreen({
                     <option
                       key={option.value}
                       value={option.value}
-                      disabled={relayMode === "SelfRelay" && option.relayOnly}
+                      disabled={relayOperator === "LocalBrowser" && option.relayOnly}
                     >
                       {option.label}
                     </option>
@@ -910,19 +957,41 @@ export function LiquidityCurvesScreen({
                 <label className="f-label">Renewal operator</label>
                 <select
                   className="liq-select compact"
-                  value={relayMode}
+                  value={relayOperator}
                   onChange={event => {
-                    const next = event.target.value as "SelfRelay" | "ZylithRelay";
-                    setRelayMode(next);
-                    if (next === "SelfRelay" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS) {
+                    const next = event.target.value as RelayOperator;
+                    setRelayOperator(next);
+                    if (next === "LocalBrowser" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS) {
                       setRenewalDuration("1");
                     }
                   }}
                 >
                   <option value="ZylithRelay">Zylith relay</option>
-                  <option value="SelfRelay">Local browser</option>
+                  <option value="SelfHostedRelay">Self-hosted relay</option>
+                  <option value="LocalBrowser">Local browser</option>
                 </select>
               </div>
+              {relayOperator === "SelfHostedRelay" && (
+                <div className="curve-risk-field liq-self-relay-field">
+                  <label className="f-label">Self relay endpoint</label>
+                  <div className="f-input-box" style={{ height: 34 }}>
+                    <input
+                      className="f-input"
+                      type="url"
+                      placeholder="https://relay.example.com"
+                      value={selfRelayEndpoint}
+                      onChange={event => setSelfRelayEndpoint(event.target.value)}
+                      onBlur={() => {
+                        const normalized = normalizeSelfRelayUrl(selfRelayEndpoint);
+                        if (normalized) {
+                          setSelfRelayEndpoint(normalized);
+                          persistSelfRelayEndpoint(normalized);
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
               <label className="f-check liq-renew-check">
                 <input type="checkbox" checked={renewing} onChange={event => setRenewing(event.target.checked)} />
                 Renew each epoch
@@ -940,16 +1009,43 @@ export function LiquidityCurvesScreen({
             renewalWindowHours={renewalHours.toString()}
             renewalWindowLabelText={renewalLabel}
             relayMode={relayMode}
+            relayOperator={relayOperator}
+            selfRelayUrl={normalizedSelfRelayEndpoint}
             onPreviewFunding={onPreviewFunding}
           />
           {renewing && (
-            <div className={`wc-note ${localRelayTooLong ? "warn" : ""}`}>
-              {relayMode === "SelfRelay"
+            <div className={`wc-note ${localRelayTooLong || selfHostedRelayMissing ? "warn" : ""}`}>
+              {relayOperator === "LocalBrowser"
                 ? "Local browser renewal is capped at 1h and stops if this tab closes or the machine sleeps."
+                : relayOperator === "SelfHostedRelay"
+                  ? "Self-hosted relay uses your operator endpoint and pays 0bps managed-relay fee. You operate uptime, gas, monitoring, and package refresh."
                 : renewalDuration === "continuous"
                   ? "Continuous uses rolling 90d relay packages. Refresh before expiry to extend the curve."
-                  : "Zylith relay submits pre-authorized child slots for the selected window. Cancel invalidates unused slots on-chain."}
+                  : "Zylith relay manages renewals, monitoring, retries, gas operations, reporting, alerts, and privacy-safe timing defaults."}
             </div>
+          )}
+          {renewing && relayOperator !== "LocalBrowser" && (
+            <div className="liq-relay-service-grid">
+              <div>
+                <span>{relayOperator === "ZylithRelay" ? "Managed operation" : "Self operation"}</span>
+                <em>
+                  {relayOperator === "ZylithRelay"
+                    ? "Zylith operates uptime, retries, monitoring, gas handling, and maker reports."
+                    : "You run the relay binary, metrics, RPCs, gas, upgrades, and incident response."}
+                </em>
+              </div>
+              <div>
+                <span>{relayOperator === "ZylithRelay" ? "Relay fee" : "Managed fee"}</span>
+                <em>
+                  {relayOperator === "ZylithRelay"
+                    ? "1-2bps on matched maker volume, with managed service and support."
+                    : "0bps. The operational burden and failure response are yours."}
+                </em>
+              </div>
+            </div>
+          )}
+          {selfHostedRelayMissing && (
+            <div className="wc-note warn">Enter a valid HTTPS self-hosted relay endpoint before activating this curve.</div>
           )}
           {side === "two-sided" && fundingPreviewErrors[0] && (
             <div className="wc-note warn">{fundingPreviewErrors[0]}</div>

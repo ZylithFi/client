@@ -527,12 +527,12 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("proof_failed");
   });
 
-  it("marks unresolved old closed batches as stalled", () => {
+  it("marks closed batches with no proof job as no_fill after the grace window", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
       batches: [
         { batch_id: "batch-1", epoch_id: 10, status: "Closed" },
-        { batch_id: "batch-latest", epoch_id: 25, status: "Open" },
+        { batch_id: "batch-latest", epoch_id: 12, status: "Open" },
       ],
       settlementTranscripts: {},
       withdrawableNotes: [],
@@ -540,6 +540,6 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated[0].status).toBe("stalled");
+    expect(updated[0].status).toBe("no_fill");
   });
 });

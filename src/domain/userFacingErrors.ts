@@ -149,10 +149,25 @@ export function userFacingErrorMessage(
   if (/Zylith relay endpoint is not configured|managed relay.*not configured/i.test(message)) {
     return "Zylith relay endpoint is unavailable. Refresh the app and retry.";
   }
+  if (/Self-hosted relay endpoint is invalid or missing/i.test(message)) {
+    return "Enter a valid self-hosted relay endpoint and retry.";
+  }
+  if (/Self-hosted relay request failed with HTTP 401|Self-hosted relay request failed.*Unauthorized/i.test(message)) {
+    return "Self-hosted relay could not verify this renewal package. Check the relay configuration and retry.";
+  }
+  if (/Self-hosted relay request failed with HTTP 404/i.test(message)) {
+    return "Self-hosted relay endpoint is unavailable. Check the endpoint and retry.";
+  }
+  if (/Self-hosted relay request failed.*accepts ZylithRelay|Self-hosted relay request failed.*got ZylithRelay|Self-hosted relay request failed.*got SelfRelay/i.test(message)) {
+    return "Relay mode does not match the selected renewal operator. Check the relay configuration and retry.";
+  }
+  if (/Self-hosted relay request failed with HTTP 4\d\d|Self-hosted relay request failed/i.test(message)) {
+    return "Self-hosted relay rejected this renewal package. Check the relay configuration and retry.";
+  }
   if (/Renewal relay request failed.*exceeds slot limit/i.test(message)) {
     return "Renewal window is too large for the managed relay. Choose a shorter window and retry.";
   }
-  if (/Renewal relay request failed.*Managed relay only accepts ZylithRelay packages/i.test(message)) {
+  if (/Renewal relay request failed.*Managed relay only accepts ZylithRelay packages|Renewal relay request failed.*got SelfRelay/i.test(message)) {
     return "Select Zylith relay as the renewal operator and retry.";
   }
   if (/Renewal relay request failed.*coordinator and prover URLs/i.test(message)) {
@@ -167,6 +182,9 @@ export function userFacingErrorMessage(
   if (/renewal-backed child|Zylith relay mode requires|renewal package|resting maker strategy/i.test(message)) {
     return "Maker curves need renewal enabled. Choose a renewal window and retry.";
   }
+  if (/Cancellation witness/i.test(message)) {
+    return "Curve cancellation is not ready yet. Wait for the latest settlement to sync, then retry.";
+  }
   if (/maker curve order amount|curve envelope price|maker curve limit_price/i.test(message)) {
     return "Curve parameters are inconsistent. Check the band prices and depths, then retry.";
   }
@@ -179,8 +197,8 @@ export function userFacingErrorMessage(
   if (/deployment\.json missing|deployment configuration/i.test(message)) {
     return "Deployment configuration is unavailable.";
   }
-  if (/paymaster URL is not configured/i.test(message)) {
-    return "Withdrawal relay is not configured.";
+  if (/paymaster URL is not configured|Transaction relay is not configured/i.test(message)) {
+    return "Transaction relay is not configured.";
   }
   if (/RPC:|Starknet RPC/i.test(message)) {
     return "Starknet network returned an error. Please retry later.";

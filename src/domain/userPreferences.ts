@@ -4,6 +4,7 @@ export type WithdrawalRoutePreference = "privacy_window" | "immediate";
 export type UserPreferences = {
   submissionTiming: SubmissionTimingPreference;
   withdrawalRoute: WithdrawalRoutePreference;
+  redactSensitiveUi: boolean;
 };
 
 const USER_PREFERENCES_KEY = "zylith.user.preferences.v1";
@@ -11,6 +12,7 @@ const USER_PREFERENCES_KEY = "zylith.user.preferences.v1";
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   submissionTiming: "balanced",
   withdrawalRoute: "privacy_window",
+  redactSensitiveUi: false,
 };
 
 function isSubmissionTiming(value: unknown): value is SubmissionTimingPreference {
@@ -23,7 +25,7 @@ function isWithdrawalRoute(value: unknown): value is WithdrawalRoutePreference {
 
 export function loadUserPreferences(): UserPreferences {
   try {
-    const raw = localStorage.getItem(USER_PREFERENCES_KEY);
+    const raw = sessionStorage.getItem(USER_PREFERENCES_KEY);
     if (!raw) return DEFAULT_USER_PREFERENCES;
     const parsed = JSON.parse(raw) as Partial<UserPreferences>;
     return {
@@ -33,6 +35,7 @@ export function loadUserPreferences(): UserPreferences {
       withdrawalRoute: isWithdrawalRoute(parsed.withdrawalRoute)
         ? parsed.withdrawalRoute
         : DEFAULT_USER_PREFERENCES.withdrawalRoute,
+      redactSensitiveUi: parsed.redactSensitiveUi === true,
     };
   } catch {
     return DEFAULT_USER_PREFERENCES;
@@ -41,8 +44,9 @@ export function loadUserPreferences(): UserPreferences {
 
 export function saveUserPreferences(preferences: UserPreferences): void {
   try {
-    localStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(preferences));
+    sessionStorage.setItem(USER_PREFERENCES_KEY, JSON.stringify(preferences));
+    localStorage.removeItem(USER_PREFERENCES_KEY);
   } catch {
-    /* local preference persistence is non-critical */
+    /* Session preference persistence is non-critical. */
   }
 }

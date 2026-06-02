@@ -220,6 +220,7 @@ pub fn zylith_wallet_build_renewal_parent_cancel_submission_plan(
         parent_cancel_authority: request.parent_cancel_authority,
         renewal_cancel_auth_key,
         prior_renewal_entries: request.prior_renewal_entries,
+        renewal_cancel_sparse_witness: request.renewal_cancel_sparse_witness,
     })
     .map_err(js_error)?;
     to_json(&plan)
@@ -822,6 +823,8 @@ pub struct BuildRenewalParentCancelSubmissionPlanRequest {
     pub parent_cancel_authority: String,
     #[serde(default)]
     pub prior_renewal_entries: Vec<String>,
+    #[serde(default)]
+    pub renewal_cancel_sparse_witness: Option<zylith_core::NullifierSparseUpdateWitness>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

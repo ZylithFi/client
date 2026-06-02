@@ -98,25 +98,33 @@ function isSupportedWalletCandidate(key: string, provider: StarknetProviderWithM
     normalized.includes("ready");
 }
 
-function safeLocalStorageGet(key: string): string | null {
+function safeLocalStorageRemove(key: string) {
   try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeLocalStorageSet(key: string, value: string) {
-  try {
-    window.localStorage.setItem(key, value);
+    window.localStorage.removeItem(key);
   } catch {
     // Storage can be unavailable in locked-down browsers. The in-memory provider still works for this session.
   }
 }
 
-function safeLocalStorageRemove(key: string) {
+function safeSessionStorageGet(key: string): string | null {
   try {
-    window.localStorage.removeItem(key);
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionStorageSet(key: string, value: string) {
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable in locked-down browsers. The in-memory provider still works for this session.
+  }
+}
+
+function safeSessionStorageRemove(key: string) {
+  try {
+    window.sessionStorage.removeItem(key);
   } catch {
     // Storage can be unavailable in locked-down browsers. The in-memory provider still works for this session.
   }
@@ -249,7 +257,7 @@ export function injectedStarknet(): StarknetProvider | null {
 export function selectedStarknetProvider(): StarknetProvider | null {
   const selected = (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider;
   if (selected) return selected;
-  const storedId = safeLocalStorageGet(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  const storedId = safeSessionStorageGet(SELECTED_STARKNET_WALLET_STORAGE_KEY);
   const wallets = discoverStarknetWallets();
   const wallet = wallets.find(option => option.id === storedId) ?? null;
   if (wallet) {
@@ -295,8 +303,10 @@ function addressFromProviderResult(
 function rememberSelectedProvider(provider: StarknetProvider, walletId?: string, address?: string) {
   (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider = provider;
   if (address) (window as WindowWithSelectedWallet).zylithSelectedStarknetAddress = address;
-  if (walletId) safeLocalStorageSet(SELECTED_STARKNET_WALLET_STORAGE_KEY, walletId);
-  if (address) safeLocalStorageSet(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY, address);
+  if (walletId) safeSessionStorageSet(SELECTED_STARKNET_WALLET_STORAGE_KEY, walletId);
+  if (address) safeSessionStorageSet(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY, address);
+  safeLocalStorageRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  safeLocalStorageRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
 }
 
 export function connectedStarknetAddress(): string | null {
@@ -308,7 +318,7 @@ export function connectedStarknetAddress(): string | null {
 }
 
 export async function restoreConnectedStarknetWallet(): Promise<string | null> {
-  const storedId = safeLocalStorageGet(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  const storedId = safeSessionStorageGet(SELECTED_STARKNET_WALLET_STORAGE_KEY);
   if (!storedId) return connectedStarknetAddress();
 
   let provider = selectedStarknetProvider();
@@ -365,6 +375,8 @@ export function clearSelectedStarknetProvider({
   (window as WindowWithSelectedWallet).zylithSelectedStarknetAddress = undefined;
   safeLocalStorageRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
   safeLocalStorageRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
+  safeSessionStorageRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  safeSessionStorageRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
 }
 
 export function disconnectStarknetProvider() {

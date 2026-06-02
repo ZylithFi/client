@@ -81,6 +81,14 @@ describe("userFacingErrorMessage", () => {
     expect(userFacingErrorMessage(
       new Error("Zylith relay endpoint is not configured"),
     )).toBe("Zylith relay endpoint is unavailable. Refresh the app and retry.");
+
+    expect(userFacingErrorMessage(
+      new Error("Self-hosted relay endpoint is invalid or missing"),
+    )).toBe("Enter a valid self-hosted relay endpoint and retry.");
+
+    expect(userFacingErrorMessage(
+      new Error("Self-hosted relay request failed with HTTP 400: Relay accepts SelfRelay packages, got ZylithRelay"),
+    )).toBe("Relay mode does not match the selected renewal operator. Check the relay configuration and retry.");
   });
 
   it("explains body-size failures without a generic fallback", () => {

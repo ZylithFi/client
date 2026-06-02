@@ -17,6 +17,7 @@ describe("local note lock retention", () => {
       ],
       [
         {
+          status: "active",
           parent_order_commitment: "0x02",
           submitted_children: [
             {
@@ -33,5 +34,34 @@ describe("local note lock retention", () => {
     );
 
     expect(refs.sort()).toEqual(["0x1", "0x2", "0x3"]);
+  });
+
+  it("does not retain terminal strategy lock refs", () => {
+    const refs = retainedLocalNoteLockRefs(
+      [],
+      [
+        {
+          status: "completed",
+          parent_order_commitment: "0x02",
+          submitted_children: [
+            {
+              parent_child_index: 0,
+              batch_id: "batch-a",
+              epoch_id: 1,
+              order_commitment: "0x03",
+              cancellation_secret: "0x04",
+              submitted_at_unix_ms: 1,
+            },
+          ],
+        },
+        {
+          status: "cancelled",
+          parent_order_commitment: "0x04",
+          submitted_children: [],
+        },
+      ],
+    );
+
+    expect(refs).toEqual([]);
   });
 });

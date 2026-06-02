@@ -30,6 +30,8 @@ export function TopNav({
   setSubmissionTimingPreference,
   withdrawalRoutePreference,
   setWithdrawalRoutePreference,
+  redactSensitiveUi,
+  setRedactSensitiveUi,
   starknetAddress,
   onOpenWallet,
   onDeposit,
@@ -52,6 +54,8 @@ export function TopNav({
   setSubmissionTimingPreference: (v: SubmissionTimingPreference) => void;
   withdrawalRoutePreference: WithdrawalRoutePreference;
   setWithdrawalRoutePreference: (v: WithdrawalRoutePreference) => void;
+  redactSensitiveUi: boolean;
+  setRedactSensitiveUi: (v: boolean) => void;
   starknetAddress: string | null;
   onOpenWallet: () => void;
   onDeposit: () => void;
@@ -236,8 +240,8 @@ export function TopNav({
                   </div>
                   <div className="wallet-pref">
                     <div className="wallet-pref-head">
-                      <span>Withdrawal default</span>
-                      <span>{withdrawalRoutePreference === "privacy_window" ? "privacy window" : "immediate"}</span>
+                      <span>Withdrawal note selection</span>
+                      <span>{withdrawalRoutePreference === "privacy_window" ? "oldest ready" : "largest ready"}</span>
                     </div>
                     <div
                       className="wallet-pref-options"
@@ -245,8 +249,8 @@ export function TopNav({
                       aria-label="Withdrawal note preference"
                     >
                       {([
-                        ["privacy_window", "Privacy"],
-                        ["immediate", "Immediate"],
+                        ["privacy_window", "Oldest ready"],
+                        ["immediate", "Largest ready"],
                       ] as Array<[WithdrawalRoutePreference, string]>).map(([option, label]) => (
                         <button
                           key={option}
@@ -257,6 +261,34 @@ export function TopNav({
                           {label}
                         </button>
                       ))}
+                    </div>
+                  </div>
+                  <div className="wallet-pref">
+                    <div className="wallet-pref-head">
+                      <span>Screen privacy</span>
+                      <span>{redactSensitiveUi ? "redacted" : "visible"}</span>
+                    </div>
+                    <div
+                      className="wallet-pref-options"
+                      style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+                      aria-label="Screen privacy mode"
+                    >
+                      {([
+                        [true, "Redact"],
+                        [false, "Show"],
+                      ] as Array<[boolean, string]>).map(([option, label]) => (
+                        <button
+                          key={String(option)}
+                          type="button"
+                          className={`wallet-pref-chip ${redactSensitiveUi === option ? "on" : ""}`}
+                          onClick={() => setRedactSensitiveUi(option)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="wallet-pref-note">
+                      Hides amounts, refs, commitments, and detailed timelines for screen sharing.
                     </div>
                   </div>
                   <button

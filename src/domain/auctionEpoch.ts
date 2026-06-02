@@ -85,7 +85,8 @@ export type PublicSettlementTranscript = {
 export type PublicProofJobStatus = {
   batch_id: string;
   state: string;
-  matched_order_count: number;
+  matched_order_count?: number;
+  matched_order_count_bucket?: string;
   witness_available: boolean;
   proof_artifact_available: boolean;
   onchain_submission_available: boolean;
