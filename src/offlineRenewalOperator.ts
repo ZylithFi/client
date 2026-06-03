@@ -22,7 +22,12 @@ type CoordinatorAccepted = {
 type PublicProofJobStatus = {
   state?: string;
   matched_order_count?: number;
+  reuse_state?: "no_fill" | "matched" | "unknown";
   failure?: string;
+};
+
+type RenewalCancelMarkerStatus = {
+  recorded?: boolean;
 };
 
 // Browser-side relay for exact-slot offline renewal packages produced by the
@@ -39,7 +44,8 @@ export type OfflineRenewalPackage = {
   end_epoch: number;
   slot_count: number;
   relay_mode?: "SelfRelay" | "ZylithRelay";
-  parent_cancel_authority?: string;
+  parent_cancel_authority: string;
+  parent_cancel_marker: string;
   relay_authorization?: {
     signer_public_key: string;
     signature_r: string;
@@ -71,6 +77,7 @@ export type OfflineRenewalOperatorOptions = {
   proverUrl?: string;
   submittedOrderCommitments?: Iterable<string>;
   fetchImpl?: typeof fetch;
+  verifyPackage?: (renewalPackage: OfflineRenewalPackage) => Promise<boolean> | boolean;
   now?: () => number;
 };
 
@@ -108,7 +115,10 @@ export const OFFLINE_RENEWAL_RELAY_RESULTS_EVENT = "zylith:offline-renewal-relay
 export function installOfflineRenewalOperatorRuntime() {
   if (typeof window === "undefined") return;
   window.zylithOfflineRenewalOperator = {
-    relayPackage: relayOfflineRenewalPackage,
+    relayPackage: (renewalPackage, options = {}) => relayOfflineRenewalPackage(renewalPackage, {
+      verifyPackage: verifyOfflineRenewalPackageWithWalletRuntime,
+      ...options,
+    }),
   };
 }
 
@@ -117,6 +127,10 @@ export async function relayOfflineRenewalPackage(
   options: OfflineRenewalOperatorOptions = {},
 ): Promise<OfflineRenewalRelayResult[]> {
   validateOfflineRenewalPackage(renewalPackage);
+  if (options.verifyPackage) {
+    const verified = await options.verifyPackage(renewalPackage);
+    if (!verified) throw new Error("Offline renewal package authorization is invalid");
+  }
   const fetcher = options.fetchImpl ?? fetch;
   const coordinatorUrl = normalizeUrl(options.coordinatorUrl || renewalPackage.relay_policy.coordinator_url);
   const proverUrl = normalizeUrl(options.proverUrl || renewalPackage.relay_policy.prover_url);
@@ -140,6 +154,15 @@ export async function relayOfflineRenewalPackage(
         results.push(slotResult(slot, "batch_not_open", currentBatch.status));
         continue;
       }
+      const cancelStatus = await fetchRenewalCancelMarkerStatus(fetcher, coordinatorUrl, renewalPackage);
+      if (!cancelStatus) {
+        results.push(slotResult(slot, "awaiting_settlement", "Waiting for renewal cancellation status before submitting child orders."));
+        continue;
+      }
+      if (cancelStatus.recorded) {
+        results.push(slotResult(slot, "missed", "Renewal parent cancellation marker is recorded."));
+        continue;
+      }
       const now = options.now?.() ?? Date.now();
       if (currentBatch.close_time_unix_ms - now <= renewalPackage.relay_policy.submission_safety_buffer_ms) {
         results.push(slotResult(slot, "safety_buffer"));
@@ -156,13 +179,20 @@ export async function relayOfflineRenewalPackage(
         results.push(guard);
         continue;
       }
-      const ingress = await postJson<IngressResponse>(fetcher, proverUrl, "/api/private/orders", slot.ingress_request);
+      const ingress = await postJson<IngressResponse>(
+        fetcher,
+        proverUrl,
+        "/api/private/orders",
+        attestedIngressRequest(renewalPackage, slot),
+      );
+      validateIngressForSlot(renewalPackage, slot, ingress.receipt);
       const accepted = await postJson<CoordinatorAccepted>(
         fetcher,
         coordinatorUrl,
         "/api/orders",
         ingress.coordinator_submission,
       );
+      validateAcceptedForSlot(slot, accepted);
       alreadySubmitted.add(slot.order_commitment);
       results.push({
         ...slotResult(slot, "submitted"),
@@ -174,6 +204,12 @@ export async function relayOfflineRenewalPackage(
   }
   dispatchRelayResults(renewalPackage, results);
   return results;
+}
+
+async function verifyOfflineRenewalPackageWithWalletRuntime(renewalPackage: OfflineRenewalPackage): Promise<boolean> {
+  const wallet = typeof window !== "undefined" ? window.zylithWallet : undefined;
+  if (!wallet?.verifyOfflineRenewalPackage) return false;
+  return wallet.verifyOfflineRenewalPackage(renewalPackage).catch(() => false);
 }
 
 async function priorSlotReuseGuard(
@@ -197,9 +233,14 @@ async function priorSlotReuseGuard(
     if (!status) {
       return slotResult(slot, "awaiting_settlement", `Waiting for prior child batch ${prior.batch_id} proof status.`);
     }
-    if (proofJobFailed(status)) continue;
+    if (proofJobFailed(status)) {
+      return slotResult(slot, "awaiting_settlement", `Prior child batch ${prior.batch_id} proof failed; refresh this package before reusing maker capital.`);
+    }
     if (proofJobConfirmed(status)) {
-      if ((status.matched_order_count ?? 0) === 0) continue;
+      if (status.reuse_state === "no_fill") continue;
+      if (status.reuse_state === "matched") {
+        return slotResult(slot, "awaiting_wallet_refresh", `Prior child batch ${prior.batch_id} settled; refresh this package before reusing maker capital.`);
+      }
       return slotResult(slot, "awaiting_wallet_refresh", `Prior child batch ${prior.batch_id} settled; refresh this package before reusing maker capital.`);
     }
     return slotResult(slot, "awaiting_settlement", `Waiting for prior child batch ${prior.batch_id} to settle.`);
@@ -212,6 +253,41 @@ function slotsReuseFundingNotes(candidate: OfflineRenewalSlot, slot: OfflineRene
   const prior = candidate.funding_note_commitments ?? [];
   if (current.size === 0 || prior.length === 0) return true;
   return prior.some(commitment => current.has(commitment));
+}
+
+function attestedIngressRequest(renewalPackage: OfflineRenewalPackage, slot: OfflineRenewalSlot): Record<string, unknown> {
+  if (!slot.ingress_request || typeof slot.ingress_request !== "object" || Array.isArray(slot.ingress_request)) {
+    throw new Error("Offline renewal slot ingress request must be an object");
+  }
+  return {
+    ...(slot.ingress_request as Record<string, unknown>),
+    renewal_package_id: renewalPackage.package_id,
+    renewal_package_commitment: renewalPackage.package_commitment,
+    renewal_relay_mode: renewalPackage.relay_mode,
+    renewal_slot_order_commitment: slot.order_commitment,
+    renewal_slot_pair: slot.pair,
+    renewal_slot_batch_id: slot.batch_id,
+    renewal_slot_epoch_id: slot.epoch_id,
+  };
+}
+
+function validateIngressForSlot(renewalPackage: OfflineRenewalPackage, slot: OfflineRenewalSlot, receipt: unknown) {
+  if (!receipt || typeof receipt !== "object") throw new Error("Private ingress response is missing receipt");
+  const record = receipt as Record<string, unknown>;
+  if (record.order_commitment !== slot.order_commitment) throw new Error("Private ingress receipt order commitment mismatch");
+  if (record.pair_id !== slot.pair) throw new Error("Private ingress receipt pair mismatch");
+  if (record.batch_id !== slot.batch_id) throw new Error("Private ingress receipt batch mismatch");
+  if (record.epoch_id !== slot.epoch_id) throw new Error("Private ingress receipt epoch mismatch");
+  if (record.relay_mode !== renewalPackage.relay_mode) throw new Error("Private ingress receipt relay mode mismatch");
+  if (record.renewal_package_id !== renewalPackage.package_id) throw new Error("Private ingress receipt package id mismatch");
+  if (record.renewal_package_commitment !== renewalPackage.package_commitment) {
+    throw new Error("Private ingress receipt package commitment mismatch");
+  }
+}
+
+function validateAcceptedForSlot(slot: OfflineRenewalSlot, accepted: CoordinatorAccepted) {
+  if (accepted.order_commitment !== slot.order_commitment) throw new Error("Coordinator accepted order commitment mismatch");
+  if (accepted.batch_id !== slot.batch_id) throw new Error("Coordinator accepted batch mismatch");
 }
 
 function proofJobConfirmed(status: PublicProofJobStatus): boolean {
@@ -232,6 +308,9 @@ function validateOfflineRenewalPackage(renewalPackage: OfflineRenewalPackage) {
   }
   if (renewalPackage.relay_mode === "ZylithRelay") {
     throw new Error("Zylith relay packages must be submitted to the managed renewal relay");
+  }
+  if (!renewalPackage.parent_cancel_authority || !renewalPackage.parent_cancel_marker) {
+    throw new Error("Offline renewal package cancellation marker is missing");
   }
   const seen = new Set<string>();
   for (const slot of renewalPackage.slots) {
@@ -279,6 +358,18 @@ function dispatchRelayResults(
 async function fetchCurrentPairBatch(fetcher: typeof fetch, coordinatorUrl: string, pair: string) {
   const [base, quote] = pair.split("/");
   return fetchJson<BatchSummary>(fetcher, coordinatorUrl, `/api/pairs/${base}/${quote}/batches/current`);
+}
+
+async function fetchRenewalCancelMarkerStatus(
+  fetcher: typeof fetch,
+  coordinatorUrl: string,
+  renewalPackage: OfflineRenewalPackage,
+) {
+  return fetchJson<RenewalCancelMarkerStatus>(
+    fetcher,
+    coordinatorUrl,
+    `/api/renewal/cancel-markers/${encodeURIComponent(renewalPackage.parent_cancel_marker ?? "")}`,
+  );
 }
 
 async function fetchJson<T>(fetcher: typeof fetch, baseUrl: string, path: string): Promise<T | null> {

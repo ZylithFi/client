@@ -1,4 +1,7 @@
-import type { OfflineRenewalPackage, OfflineRenewalRelayResult } from "../offlineRenewalOperator";
+import type {
+  OfflineRenewalPackage,
+  OfflineRenewalRelayResult,
+} from "../offlineRenewalOperator";
 
 type ManagedRelayPackageStatus = {
   package_id: string;
@@ -20,18 +23,8 @@ type ManagedRelayPackageResults = {
   results: OfflineRenewalRelayResult[];
 };
 
-type RelayAuthorizationHeaders = {
-  package_commitment?: string;
-  parent_cancel_authority?: string;
-  relay_authorization?: {
-    signer_public_key: string;
-    signature_r: string;
-    signature_s: string;
-  };
-};
-
 const managedRelayUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_RENEWAL_RELAY_URL || localServiceUrl(3400),
+  import.meta.env.VITE_ZYLITH_RENEWAL_RELAY_URL || localServiceUrl(3400)
 );
 
 export function managedRenewalRelayConfigured(): boolean {
@@ -39,45 +32,50 @@ export function managedRenewalRelayConfigured(): boolean {
 }
 
 export async function submitManagedRenewalPackage(
-  renewalPackage: OfflineRenewalPackage,
+  renewalPackage: OfflineRenewalPackage
 ): Promise<ManagedRelayPackageStatus | null> {
   if (renewalPackage.relay_mode !== "ZylithRelay") return null;
   return postJson<ManagedRelayPackageStatus>(
     requiredManagedRelayUrl(),
     "/packages",
-    renewalPackage,
+    renewalPackage
   );
 }
 
 export async function fetchManagedRenewalPackageResults(
-  renewalPackage: RelayAuthorizationHeaders & { package_id: string },
+  renewalPackage: PackageAccessFields & { package_id: string }
 ): Promise<ManagedRelayPackageResults | null> {
-  if (!managedRelayUrl) return null;
   return fetchJson<ManagedRelayPackageResults>(
-    managedRelayUrl,
+    requiredManagedRelayUrl(),
     `/packages/${encodeURIComponent(renewalPackage.package_id)}/results`,
-    relayAuthorizationHeaders(renewalPackage),
-  );
+    relayAuthorizationHeaders(renewalPackage)
+  ).catch(() => null);
 }
 
 export async function deleteManagedRenewalPackage(
-  renewalPackage: RelayAuthorizationHeaders & {
+  renewalPackage: PackageAccessFields & {
     package_id: string;
     relay_mode?: "SelfRelay" | "ZylithRelay";
-  },
+  }
 ): Promise<boolean> {
-  if (renewalPackage.relay_mode !== "ZylithRelay" || !managedRelayUrl) return false;
+  if (renewalPackage.relay_mode !== "ZylithRelay") return false;
   return deleteJson(
-    managedRelayUrl,
+    requiredManagedRelayUrl(),
     `/packages/${encodeURIComponent(renewalPackage.package_id)}`,
-    relayAuthorizationHeaders(renewalPackage),
-  );
+    relayAuthorizationHeaders(renewalPackage)
+  ).catch(() => false);
 }
+
+type PackageAccessFields = {
+  package_commitment?: string;
+  parent_cancel_authority?: string;
+  relay_authorization?: OfflineRenewalPackage["relay_authorization"];
+};
 
 async function fetchJson<T>(
   baseUrl: string,
   path: string,
-  authHeaders: Record<string, string> = {},
+  authHeaders: Record<string, string> = {}
 ): Promise<T | null> {
   const response = await fetch(`${baseUrl}${path}`, {
     headers: {
@@ -86,16 +84,14 @@ async function fetchJson<T>(
     },
   });
   if (response.status === 404) return null;
-  if (!response.ok) {
-    throw new Error(await relayErrorMessage(response));
-  }
+  if (!response.ok) throw new Error(await relayErrorMessage(response));
   return (await response.json()) as T;
 }
 
 async function deleteJson(
   baseUrl: string,
   path: string,
-  authHeaders: Record<string, string> = {},
+  authHeaders: Record<string, string> = {}
 ): Promise<boolean> {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "DELETE",
@@ -105,13 +101,15 @@ async function deleteJson(
     },
   });
   if (response.status === 404) return false;
-  if (!response.ok) {
-    throw new Error(await relayErrorMessage(response));
-  }
+  if (!response.ok) throw new Error(await relayErrorMessage(response));
   return true;
 }
 
-async function postJson<T>(baseUrl: string, path: string, body: unknown): Promise<T> {
+async function postJson<T>(
+  baseUrl: string,
+  path: string,
+  body: unknown
+): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
@@ -128,14 +126,20 @@ async function postJson<T>(baseUrl: string, path: string, body: unknown): Promis
 
 async function relayErrorMessage(response: Response) {
   const detail = await relayErrorDetail(response);
-  return `Renewal relay request failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+  return `Renewal relay request failed with HTTP ${response.status}${
+    detail ? `: ${detail}` : ""
+  }`;
 }
 
 async function relayErrorDetail(response: Response) {
   const text = await response.text().catch(() => "");
   if (!text.trim()) return "";
   try {
-    const parsed = JSON.parse(text) as { error?: unknown; detail?: unknown; message?: unknown };
+    const parsed = JSON.parse(text) as {
+      error?: unknown;
+      detail?: unknown;
+      message?: unknown;
+    };
     const error = parsed.error ?? parsed.detail ?? parsed.message;
     return typeof error === "string" ? error : text;
   } catch {
@@ -150,21 +154,32 @@ function relayHeaders(): Record<string, string> {
   return headers;
 }
 
-function requiredManagedRelayUrl() {
-  if (managedRelayUrl) return managedRelayUrl;
-  throw new Error("Zylith relay endpoint is not configured");
-}
-
-function relayAuthorizationHeaders(input: RelayAuthorizationHeaders): Record<string, string> {
-  const auth = input.relay_authorization;
-  if (!auth || !input.package_commitment || !input.parent_cancel_authority) return {};
+function relayAuthorizationHeaders(
+  renewalPackage: PackageAccessFields
+): Record<string, string> {
+  const auth = renewalPackage.relay_authorization;
+  if (
+    !renewalPackage.package_commitment ||
+    !renewalPackage.parent_cancel_authority ||
+    !auth?.signer_public_key ||
+    !auth.signature_r ||
+    !auth.signature_s
+  ) {
+    return {};
+  }
   return {
-    "x-zylith-relay-package-commitment": input.package_commitment,
-    "x-zylith-relay-parent-cancel-authority": input.parent_cancel_authority,
+    "x-zylith-relay-package-commitment": renewalPackage.package_commitment,
+    "x-zylith-relay-parent-cancel-authority":
+      renewalPackage.parent_cancel_authority,
     "x-zylith-relay-signer": auth.signer_public_key,
     "x-zylith-relay-signature-r": auth.signature_r,
     "x-zylith-relay-signature-s": auth.signature_s,
   };
+}
+
+function requiredManagedRelayUrl() {
+  if (managedRelayUrl) return managedRelayUrl;
+  throw new Error("Zylith relay endpoint is not configured");
 }
 
 function localServiceUrl(port: number) {
@@ -178,5 +193,7 @@ function normalizeUrl(value: string) {
 }
 
 function isLocalHost(hostname: string) {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  return (
+    hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
+  );
 }

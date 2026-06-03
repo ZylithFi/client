@@ -31,12 +31,9 @@ type StarknetProviderLike = {
 export type PrivacyBridgeDepositPlan = {
   amount: bigint;
   encodedArgs: {
-    asset_id: string;
-    total_amount: string;
-    amounts: string[];
-    deposit_nonces: string[];
-    note_commitments: string[];
-    withdraw_authorities: string[];
+    funding_commitments: string[];
+    deposit_roots: string[];
+    encrypted_note_activations: string[];
   };
 };
 
@@ -81,12 +78,9 @@ export type SubmitPrivacyBridgeDepositResult = {
 
 export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
   return [
-    plan.encodedArgs.asset_id,
-    plan.encodedArgs.total_amount,
-    plan.encodedArgs.amounts,
-    plan.encodedArgs.deposit_nonces,
-    plan.encodedArgs.note_commitments,
-    plan.encodedArgs.withdraw_authorities,
+    plan.encodedArgs.funding_commitments,
+    plan.encodedArgs.deposit_roots,
+    plan.encodedArgs.encrypted_note_activations,
   ];
 }
 

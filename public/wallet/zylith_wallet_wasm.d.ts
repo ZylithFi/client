@@ -47,6 +47,10 @@ export function zylith_wallet_sign_note_consolidation_witness(input_json: string
 
 export function zylith_wallet_sign_renewal_relay_package_authorization(input_json: string): string;
 
+export function zylith_wallet_sign_settlement_output_withdrawal_witness(input_json: string): string;
+
+export function zylith_wallet_verify_renewal_relay_package(package_json: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -73,6 +77,8 @@ export interface InitOutput {
     readonly zylith_wallet_seed_hex_to_mnemonic: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_sign_note_consolidation_witness: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_sign_renewal_relay_package_authorization: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_sign_settlement_output_withdrawal_witness: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_verify_renewal_relay_package: (a: number, b: number) => [number, number, number, number];
     readonly init: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

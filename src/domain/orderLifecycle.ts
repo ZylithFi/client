@@ -6,6 +6,7 @@ export type LocalOrderStatus =
   | "proof_failed" | "stalled";
 
 export type LocalOrder = {
+  deployment_scope?: string;
   ordRef: string;
   orderCommitment: string;
   cancellationSecret: string;
@@ -33,6 +34,8 @@ export type LocalOrder = {
   cancelTransactionHash?: string;
   makerCurvePoints?: Array<{ price: string; baseAmount: string }>;
   makerBandAttribution?: MakerBandAttribution;
+  relayMode?: "SelfRelay" | "ZylithRelay";
+  relayFeeBps?: number;
 };
 
 export type PrivateStrategyChildSummary = {
@@ -117,6 +120,7 @@ export type OrderLifecycleProofStatus = {
   batch_id: string;
   state: string;
   matched_order_count?: number;
+  reuse_state?: "no_fill" | "matched" | "unknown";
   failure?: string | null;
 };
 
@@ -221,6 +225,8 @@ export function ordersChanged(before: LocalOrder[], after: LocalOrder[]): boolea
       order.filledAmount !== previous.filledAmount ||
       order.fundingAsset !== previous.fundingAsset ||
       order.fundingAmount !== previous.fundingAmount ||
+      order.relayMode !== previous.relayMode ||
+      order.relayFeeBps !== previous.relayFeeBps ||
       JSON.stringify(order.fundingNoteCommitments ?? []) !== JSON.stringify(previous.fundingNoteCommitments ?? []) ||
       order.cancelTransactionHash !== previous.cancelTransactionHash ||
       order.makerBandAttribution !== previous.makerBandAttribution
@@ -292,7 +298,7 @@ export function reconcileOrderLifecycle({
       return order;
     }
     if (!transcript && proofStatus?.state === "confirmed-onchain") {
-      if (proofStatus.matched_order_count === 0) {
+      if (proofStatus.reuse_state === "no_fill") {
         return { ...order, status: "no_fill" as LocalOrderStatus };
       }
       return { ...order, status: "settled_pending_output" as LocalOrderStatus };
@@ -325,17 +331,7 @@ export function reconcileOrderLifecycle({
               (!expectedOutputAsset || note.asset === expectedOutputAsset)
             )
         : null;
-      const matchedOutput = exactOutput ?? (pair
-        ? findAmountMatchedOutput({
-            order,
-            transcript,
-            pair,
-            batchOutputs,
-            usedOutputCommitments,
-            toAtomicStr,
-            assetScale,
-          })
-        : null);
+      const matchedOutput = exactOutput ?? null;
       if (matchedOutput && pair) {
         const amountAtomic = BigInt(toAtomicStr(order.amount, pair.base_asset_id));
         const priceBaseScale = BigInt(
@@ -347,11 +343,7 @@ export function reconcileOrderLifecycle({
         const grossOutputAtomic = order.side === "Buy"
           ? amountAtomic
           : (amountAtomic * clearingAtomic) / priceBaseScale;
-        const feeBps = BigInt(
-          order.wireMode === "Maker Curve" || order.wireMode === "Resting"
-            ? pair.maker_fee_bps ?? 0
-            : pair.taker_fee_bps ?? 4,
-        );
+        const feeBps = BigInt(orderTotalFeeBps(order, pair));
         const feeDenominator = 10_000n;
         const fullOutputAtomic =
           (grossOutputAtomic * (feeDenominator - feeBps)) / feeDenominator;
@@ -445,47 +437,18 @@ export function reconcileOrderLifecycle({
   });
 }
 
-function findAmountMatchedOutput({
-  order,
-  transcript,
-  pair,
-  batchOutputs,
-  usedOutputCommitments,
-  toAtomicStr,
-  assetScale,
-}: {
-  order: LocalOrder;
-  transcript: OrderLifecycleTranscript;
-  pair: OrderLifecyclePair;
-  batchOutputs: OrderLifecycleOutputNote[];
-  usedOutputCommitments: Set<string>;
-  toAtomicStr: (human: string, assetId: string) => string;
-  assetScale: (assetId: string) => bigint;
-}) {
-  const expectedOutputAsset = order.side === "Buy" ? pair.base_asset_id : pair.quote_asset_id;
-  const amountAtomic = BigInt(toAtomicStr(order.amount, pair.base_asset_id));
-  const priceBaseScale = BigInt(
-    transcript.price_base_scale === undefined
-      ? pair.price_base_scale ?? assetScale(pair.base_asset_id).toString()
-      : String(transcript.price_base_scale),
-  );
-  const clearingAtomic = BigInt(String(transcript.clearing_price));
-  const grossOutputAtomic = order.side === "Buy"
-    ? amountAtomic
-    : (amountAtomic * clearingAtomic) / priceBaseScale;
-  const feeBps = BigInt(
-    order.wireMode === "Maker Curve" || order.wireMode === "Resting"
-      ? pair.maker_fee_bps ?? 0
-      : pair.taker_fee_bps ?? 4,
-  );
-  const expectedNetOutput =
-    (grossOutputAtomic * (10_000n - feeBps)) / 10_000n;
-  if (expectedNetOutput <= 0n) return null;
-  return batchOutputs.find(note =>
-    !usedOutputCommitments.has(note.metadata_commitment) &&
-    note.asset === expectedOutputAsset &&
-    BigInt(note.amount) === expectedNetOutput
-  ) ?? null;
+function orderUsesMakerFeeTier(order: LocalOrder): boolean {
+  return order.wireMode === "Resting" || (order.wireMode === "Maker Curve" && Boolean(order.strategyId));
+}
+
+function orderTotalFeeBps(order: LocalOrder, pair: OrderLifecyclePair): number {
+  const executionFeeBps = orderUsesMakerFeeTier(order)
+    ? pair.maker_fee_bps ?? 0
+    : pair.taker_fee_bps ?? 4;
+  const relayFeeBps = order.relayMode === "ZylithRelay"
+    ? order.relayFeeBps ?? pair.relay_fee_bps ?? 0
+    : 0;
+  return executionFeeBps + relayFeeBps;
 }
 
 export function sameFelt(left: string | undefined, right: string | undefined): boolean {

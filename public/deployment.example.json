@@ -5,7 +5,6 @@
   "contracts": {
     "commitment_registry": "0x0",
     "batch_registry": "0x0",
-    "fee_ledger": "0x0",
     "shielded_asset_adapter": "0x0",
     "privacy_deposit_bridge": "0x0",
     "auction_verifier": "0x0"
@@ -188,6 +187,7 @@
     "note_consolidation_statement_program_address": "0x0",
     "proof_account_address": "0x0",
     "settlement_account_address": "0x0",
+    "deposit_root_registrar_address": "0x0",
     "proof_validity_blocks": 450,
     "output_claim_delay_seconds": 1800,
     "native_prover_rpc_url": "https://api.zan.top/public/starknet-sepolia/rpc/v0_10",

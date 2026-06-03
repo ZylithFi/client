@@ -11,9 +11,9 @@ describe("local note lock retention", () => {
   it("retains only known order, parent strategy, and child strategy lock refs", () => {
     const refs = retainedLocalNoteLockRefs(
       [
-        { orderCommitment: "0x01" },
-        { orderCommitment: "" },
-        { orderCommitment: "0x0000" },
+        { orderCommitment: "0x01", status: "in_batch" },
+        { orderCommitment: "", status: "in_batch" },
+        { orderCommitment: "0x0000", status: "in_batch" },
       ],
       [
         {
@@ -36,7 +36,7 @@ describe("local note lock retention", () => {
     expect(refs.sort()).toEqual(["0x1", "0x2", "0x3"]);
   });
 
-  it("does not retain terminal strategy lock refs", () => {
+  it("retains strategy child lock refs until runtime reconciliation clears them", () => {
     const refs = retainedLocalNoteLockRefs(
       [],
       [
@@ -62,6 +62,19 @@ describe("local note lock retention", () => {
       ],
     );
 
-    expect(refs).toEqual([]);
+    expect(refs.sort()).toEqual(["0x2", "0x3", "0x4"]);
+  });
+
+  it("retains proof-failed, stalled, and no-fill order refs until authoritative reconciliation", () => {
+    const refs = retainedLocalNoteLockRefs(
+      [
+        { orderCommitment: "0x01", status: "proof_failed" },
+        { orderCommitment: "0x02", status: "stalled" },
+        { orderCommitment: "0x03", status: "no_fill" },
+      ],
+      [],
+    );
+
+    expect(refs.sort()).toEqual(["0x1", "0x2", "0x3"]);
   });
 });

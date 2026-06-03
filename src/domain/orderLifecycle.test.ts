@@ -31,6 +31,8 @@ function order(overrides: Partial<LocalOrder> = {}): LocalOrder {
     filledAmount: overrides.filledAmount,
     clearingPrice: overrides.clearingPrice,
     cancelTransactionHash: overrides.cancelTransactionHash,
+    relayMode: overrides.relayMode,
+    relayFeeBps: overrides.relayFeeBps,
   };
 }
 
@@ -276,7 +278,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].filledAmount).toBe("10");
   });
 
-  it("recovers older filled orders by matching net output amount when metadata was not stored", () => {
+  it("does not mutate legacy orders by amount-only output matching", () => {
     const updated = reconcileOrderLifecycle({
       orders: [
         order({
@@ -320,9 +322,43 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated.find(o => o.ordRef === "ORD-sell")?.status).toBe("filled");
-    expect(updated.find(o => o.ordRef === "ORD-buy")?.status).toBe("filled");
-    expect(updated.find(o => o.ordRef === "ORD-buy")?.filledAmount).toBe("20");
+    expect(updated.find(o => o.ordRef === "ORD-sell")?.status).toBe("settling");
+    expect(updated.find(o => o.ordRef === "ORD-buy")?.status).toBe("settling");
+    expect(updated.find(o => o.ordRef === "ORD-buy")?.filledAmount).toBeUndefined();
+  });
+
+  it("does not amount-match relayed maker outputs without metadata", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({
+        ordRef: "ORD-relayed-maker",
+        side: "Buy",
+        wireMode: "Resting",
+        strategyId: "strategy-1",
+        relayMode: "ZylithRelay",
+        relayFeeBps: 3,
+        expectedOutputMetadataCommitment: undefined,
+      })],
+      batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
+      settlementTranscripts: {
+        "batch-1": {
+          batch_id: "batch-1",
+          batch_epoch: 10,
+          clearing_price: "250000",
+          price_base_scale: "1000000000000000000",
+        },
+      },
+      withdrawableNotes: [{
+        source: "settlement_output",
+        batch_id: "batch-1",
+        asset: "STRK",
+        amount: "9997000000000000000",
+        metadata_commitment: "0xrelayed-maker-output",
+      }],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("settling");
+    expect(updated[0].filledAmount).toBeUndefined();
   });
 
   it("settles from transcript and notes even when the batch aged out of the current batch list", () => {
@@ -494,7 +530,7 @@ describe("order lifecycle reconciliation", () => {
         "batch-1": {
           batch_id: "batch-1",
           state: "confirmed-onchain",
-          matched_order_count: 0,
+          reuse_state: "no_fill",
         },
       },
       withdrawableNotes: [],
@@ -502,6 +538,27 @@ describe("order lifecycle reconciliation", () => {
     });
 
     expect(updated[0].status).toBe("no_fill");
+  });
+
+  it("does not treat legacy public zero matched count as authoritative no-fill", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "settling" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "confirmed-onchain",
+          matched_order_count: 0,
+        },
+      },
+      withdrawableNotes: [],
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("settled_pending_output");
   });
 
   it("marks proof job failures as proof_failed without waiting for epoch aging", () => {

@@ -751,9 +751,10 @@ export function WithdrawSlide({
   const w = walletRuntime();
   const notes = w?.getWithdrawableNotes() ?? [];
   const now = Date.now();
+  const hostedWithdrawalAvailable = Boolean(w?.hostedWithdrawalAvailable?.());
   const assetNotes = notes.filter(n => {
     if (n.asset !== asset || n.locked || n.spent || n.pending_withdrawal_tx) return false;
-    if (n.source !== "settlement_output") return true;
+    if (n.source !== "settlement_output") return false;
     const readyAt = settlementReadyAtMs(n, settlementTranscripts, claimDelaySeconds);
     return readyAt !== null && now >= readyAt;
   }).sort((a, b) => {
@@ -765,17 +766,24 @@ export function WithdrawSlide({
     const amountB = BigInt(b.amount);
     return amountA === amountB ? 0 : amountA > amountB ? -1 : 1;
   });
+  const depositNotesNotWithdrawable = notes.filter(n =>
+    n.asset === asset &&
+    n.source !== "settlement_output" &&
+    !n.spent &&
+    !n.pending_withdrawal_tx
+  );
   const selectedWithdrawNote = assetNotes.find(n => n.note_commitment === selectedNote) ?? assetNotes[0] ?? null;
 
   async function handleWithdraw() {
     if (!w || !w.isReady()) { setError("Unlock Zylith wallet first."); return; }
+    if (!hostedWithdrawalAvailable) { setError("Withdrawals are not enabled for this deployment."); return; }
     if (!recipient.trim()) { setError("Enter a recipient address."); return; }
     if (!selectedWithdrawNote) { setError(`No available ${asset} notes.`); return; }
     setWorking(true);
     setError("");
     try {
       const note = selectedWithdrawNote;
-      await w.submitWithdrawalViaPaymaster({
+      await w.submitHostedWithdrawal({
         note_commitment: note.note_commitment,
         recipient: recipient.trim(),
         batch_id: note.batch_id,
@@ -822,9 +830,19 @@ export function WithdrawSlide({
             </>
           )}
         </div>
+        {depositNotesNotWithdrawable.length > 0 && (
+          <div className="slide-note">
+            {depositNotesNotWithdrawable.length} deposit note{depositNotesNotWithdrawable.length !== 1 ? "s are" : " is"} available in the private wallet but not directly withdrawable. Submit through settlement first, then withdraw the resulting settlement output.
+          </div>
+        )}
         <div className="slide-note">
-          This setting only chooses which local note to withdraw first. The paymaster can still observe relay timing, recipient, and withdrawal transaction metadata.
+          This setting only chooses which claim-ready settlement output to withdraw first. Claim timing, recipient, and withdrawal transaction metadata are public on Starknet.
         </div>
+        {!hostedWithdrawalAvailable && (
+          <div className="slide-note warn">
+            Withdrawals are not enabled for this deployment.
+          </div>
+        )}
         {assetNotes.length > 0 && (
           <div className="f-row">
             <label className="f-label">Note</label>
@@ -861,7 +879,7 @@ export function WithdrawSlide({
         )}
         <button
           className="slide-submit"
-          disabled={!recipient.trim() || !selectedWithdrawNote || working}
+          disabled={!hostedWithdrawalAvailable || !recipient.trim() || !selectedWithdrawNote || working}
           onClick={() => { void handleWithdraw(); }}
         >
           {working ? "Submitting…" : "Withdraw"}

@@ -302,7 +302,7 @@ export function TopNav({
                     onClick={() => { setMenuOpen(false); onWithdraw(); }}
                   >
                     Withdraw
-                    <span className="meta">Paymaster</span>
+                    <span className="meta">Proof</span>
                   </button>
                   <button
                     className="wallet-menu-item"

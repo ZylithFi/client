@@ -87,6 +87,7 @@ export type PublicProofJobStatus = {
   state: string;
   matched_order_count?: number;
   matched_order_count_bucket?: string;
+  reuse_state?: "no_fill" | "matched" | "unknown";
   witness_available: boolean;
   proof_artifact_available: boolean;
   onchain_submission_available: boolean;

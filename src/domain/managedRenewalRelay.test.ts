@@ -10,32 +10,84 @@ describe("managedRenewalRelay", () => {
 
   it("registers managed packages without bundling a frontend bearer token", async () => {
     vi.stubEnv("VITE_ZYLITH_RENEWAL_RELAY_URL", "https://relay.zylith.example");
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      package_id: "pkg-1",
-      package_commitment: "0xabc",
-      pair: "STRK/USDC",
-      start_epoch: 1,
-      end_epoch: 1,
-      slot_count: 1,
-      relay_mode: "ZylithRelay",
-      pending_slots: 1,
-      submitted_slots: 0,
-      failed_slots: 0,
-      updated_at_unix_ms: 1,
-    }), { status: 200 }));
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          package_id: "pkg-1",
+          package_commitment: "0xabc",
+          pair: "STRK/USDC",
+          start_epoch: 1,
+          end_epoch: 1,
+          slot_count: 1,
+          relay_mode: "ZylithRelay",
+          pending_slots: 1,
+          submitted_slots: 0,
+          failed_slots: 0,
+          updated_at_unix_ms: 1,
+        }),
+        { status: 200 }
+      )
+    );
     vi.stubGlobal("fetch", fetchMock);
-    const { submitManagedRenewalPackage } = await import("./managedRenewalRelay");
+    const { submitManagedRenewalPackage } = await import(
+      "./managedRenewalRelay"
+    );
 
     await submitManagedRenewalPackage(zylithRelayPackage());
 
-    expect(fetchMock).toHaveBeenCalledWith("https://relay.zylith.example/packages", expect.objectContaining({
-      method: "POST",
-      headers: expect.objectContaining({
-        accept: "application/json",
-        "content-type": "application/json",
-      }),
-    }));
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("authorization");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://relay.zylith.example/packages",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          accept: "application/json",
+          "content-type": "application/json",
+        }),
+      })
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty(
+      "authorization"
+    );
+  });
+
+  it("uses package authorization headers for managed results and deletion", async () => {
+    vi.stubEnv("VITE_ZYLITH_RENEWAL_RELAY_URL", "https://relay.zylith.example");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            package_id: "pkg-1",
+            package_commitment: "0xabc",
+            results: [],
+          }),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { deleteManagedRenewalPackage, fetchManagedRenewalPackageResults } =
+      await import("./managedRenewalRelay");
+    const renewalPackage = zylithRelayPackage();
+
+    await fetchManagedRenewalPackageResults(renewalPackage);
+    await deleteManagedRenewalPackage(renewalPackage);
+
+    for (const call of fetchMock.mock.calls) {
+      expect(call[1]?.headers).toHaveProperty(
+        "x-zylith-relay-package-commitment",
+        "0xabc"
+      );
+      expect(call[1]?.headers).toHaveProperty(
+        "x-zylith-relay-signature-r",
+        "0xr"
+      );
+      expect(call[1]?.headers).not.toHaveProperty("authorization");
+    }
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://relay.zylith.example/packages/pkg-1/results"
+    );
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
   });
 });
 
@@ -51,6 +103,7 @@ function zylithRelayPackage(): OfflineRenewalPackage {
     slot_count: 1,
     relay_mode: "ZylithRelay",
     parent_cancel_authority: "0xparent",
+    parent_cancel_marker: "0xcancel",
     relay_authorization: {
       signer_public_key: "0xsigner",
       signature_r: "0xr",
@@ -62,14 +115,16 @@ function zylithRelayPackage(): OfflineRenewalPackage {
       submission_safety_buffer_ms: 1000,
       max_submission_delay_ms: 0,
     },
-    slots: [{
-      slot_id: "pkg-1:1",
-      pair: "STRK/USDC",
-      batch_id: "STRK-USDC-1",
-      epoch_id: 1,
-      parent_child_index: 1,
-      order_commitment: "0xorder",
-      ingress_request: { order_submission: {} },
-    }],
+    slots: [
+      {
+        slot_id: "pkg-1:1",
+        pair: "STRK/USDC",
+        batch_id: "STRK-USDC-1",
+        epoch_id: 1,
+        parent_child_index: 1,
+        order_commitment: "0xorder",
+        ingress_request: { order_submission: {} },
+      },
+    ],
   };
 }

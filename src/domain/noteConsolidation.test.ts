@@ -31,6 +31,7 @@ describe("note consolidation planning", () => {
     ]);
 
     expect(plans).toHaveLength(1);
+    expect(plans[0].kind).toBe("consolidation");
     expect(plans[0].asset).toBe("STRK");
     expect(plans[0].sourceNoteCount).toBe(8);
     expect(plans[0].sourceAmountDisplay).toBe("24");
@@ -48,5 +49,17 @@ describe("note consolidation planning", () => {
     ]);
 
     expect(plans).toHaveLength(0);
+  });
+
+  it("plans single deposit-note conversion into a settlement output", () => {
+    const plans = noteConsolidationPlans([
+      note(4n * STRK, { source: "deposit", note_commitment: "0xdeposit" }),
+    ]);
+
+    expect(plans).toHaveLength(1);
+    expect(plans[0].kind).toBe("deposit_exit");
+    expect(plans[0].sourceNoteCount).toBe(1);
+    expect(plans[0].sourceNoteCommitments).toEqual(["0xdeposit"]);
+    expect(plans[0].targetAmounts).toEqual([(2n * STRK).toString(), (2n * STRK).toString()]);
   });
 });

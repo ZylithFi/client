@@ -966,14 +966,14 @@ export function LiquidityCurvesScreen({
                     }
                   }}
                 >
-                  <option value="ZylithRelay">Zylith relay</option>
-                  <option value="SelfHostedRelay">Self-hosted relay</option>
+                  <option value="ZylithRelay">Zylith Relay</option>
+                  <option value="SelfHostedRelay">Self Relay</option>
                   <option value="LocalBrowser">Local browser</option>
                 </select>
               </div>
               {relayOperator === "SelfHostedRelay" && (
                 <div className="curve-risk-field liq-self-relay-field">
-                  <label className="f-label">Self relay endpoint</label>
+                  <label className="f-label">Self Relay endpoint</label>
                   <div className="f-input-box" style={{ height: 34 }}>
                     <input
                       className="f-input"
@@ -1018,10 +1018,10 @@ export function LiquidityCurvesScreen({
               {relayOperator === "LocalBrowser"
                 ? "Local browser renewal is capped at 1h and stops if this tab closes or the machine sleeps."
                 : relayOperator === "SelfHostedRelay"
-                  ? "Self-hosted relay uses your operator endpoint and pays 0bps managed-relay fee. You operate uptime, gas, monitoring, and package refresh."
+                  ? "Self Relay uses your operator endpoint and pays 0bps managed-relay fee. You operate uptime, gas, monitoring, and package refresh."
                 : renewalDuration === "continuous"
                   ? "Continuous uses rolling 90d relay packages. Refresh before expiry to extend the curve."
-                  : "Zylith relay manages renewals, monitoring, retries, gas operations, reporting, alerts, and privacy-safe timing defaults."}
+                  : "Zylith Relay manages renewals, monitoring, retries, gas operations, reporting, alerts, and timing defaults."}
             </div>
           )}
           {renewing && relayOperator !== "LocalBrowser" && (
@@ -1045,7 +1045,7 @@ export function LiquidityCurvesScreen({
             </div>
           )}
           {selfHostedRelayMissing && (
-            <div className="wc-note warn">Enter a valid HTTPS self-hosted relay endpoint before activating this curve.</div>
+            <div className="wc-note warn">Enter a valid HTTPS Self Relay endpoint before activating this curve.</div>
           )}
           {side === "two-sided" && fundingPreviewErrors[0] && (
             <div className="wc-note warn">{fundingPreviewErrors[0]}</div>

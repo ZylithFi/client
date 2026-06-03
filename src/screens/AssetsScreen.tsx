@@ -20,6 +20,7 @@ import { msToCountdown } from "../domain/uiFormat";
 import { noteConsolidationPlans, type NoteConsolidationPlan } from "../domain/noteConsolidation";
 
 const hostedNoteConsolidationEnabled =
+  String(import.meta.env.VITE_ZYLITH_ACK_HOSTED_NOTE_PROOF_PRIVACY ?? "").toLowerCase() === "true" &&
   String(import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_NOTE_CONSOLIDATION ?? "").toLowerCase() === "true";
 
 function fmtAddr(value?: string): string {
@@ -96,7 +97,7 @@ function depositAvailabilityText(deposit: DepositPipelineRow): string {
   if (deposit.confirmed) {
     return `Available after scanner refresh${splitSuffix}`;
   }
-  return `Waiting for funding rail confirmation${splitSuffix}`;
+  return `Waiting for funding confirmation${splitSuffix}`;
 }
 
 export function AssetsScreen({

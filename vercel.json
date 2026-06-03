@@ -1,6 +1,6 @@
 {
-  "installCommand": "npm ci",
-  "buildCommand": "npm run build:app",
+  "installCommand": "npm ci --include=dev",
+  "buildCommand": "node -e 'const fs=require(\"fs\"); const v=process.env.ZYLITH_DEPLOYMENT_JSON; if(!v) throw new Error(\"ZYLITH_DEPLOYMENT_JSON missing\"); JSON.parse(v); fs.writeFileSync(\"public/deployment.json\", v);' && npm run build:app",
   "outputDirectory": "dist",
   "framework": "vite",
   "rewrites": [
