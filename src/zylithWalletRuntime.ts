@@ -4312,6 +4312,10 @@ export function createZylithWalletRuntime(
               chain_id: chainId,
               bridge_address: bridgeAddress,
               privacy_pool_address: privacyPoolAddress,
+              auction_verifier_address: auctionVerifierAddress,
+              asset_id: note.note.asset_id,
+              token_address: tokenAddress,
+              amount: note.note.amount,
               exit_commitment: strk20ExitCommitment,
               open_note_id: openNoteId,
             })
