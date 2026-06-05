@@ -3,6 +3,7 @@ import {
   createPrivateTransfers,
   IndexerDiscoveryProvider,
   MAX_VIEWING_KEY,
+  Open,
   ProvingServiceProofProvider,
   type CallAndProof,
   type PrivateRegistry,
@@ -76,11 +77,57 @@ export type SubmitPrivacyBridgeDepositResult = {
   sdkRegistry: PrivateRegistry;
 };
 
+export type Strk20ExitClaimSignature = {
+  signature_r: string;
+  signature_s: string;
+};
+
+export type SubmitPrivacyOpenNoteWithdrawalInput = {
+  seedHex: string;
+  chainId: string;
+  rpcUrl: string;
+  privacyPoolAddress: string;
+  bridgeAddress: string;
+  tokenAddress: string;
+  discoveryUrl: string;
+  provingUrl: string;
+  paymasterAddress?: string;
+  paymasterUrl?: string;
+  privacyProofSignerClassHash?: string;
+  minProvingDelayBlocks: number;
+  sdkRegistry?: PrivateRegistry;
+  exitCommitment: string;
+  signExitClaim: (openNoteId: string) => Strk20ExitClaimSignature;
+};
+
+export type SubmitPrivacyOpenNoteWithdrawalResult = {
+  transactionHash: string;
+  openNoteId: string;
+  sdkRegistry: PrivateRegistry;
+};
+
 export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
   return [
     plan.encodedArgs.funding_commitments,
     plan.encodedArgs.deposit_roots,
     plan.encodedArgs.encrypted_note_activations,
+  ];
+}
+
+export function privacyBridgeStrk20ExitClaimCalldata(input: {
+  exitCommitment: string;
+  openNoteId: string;
+  signature: Strk20ExitClaimSignature;
+}) {
+  return [
+    [],
+    [
+      input.exitCommitment,
+      input.openNoteId,
+      input.signature.signature_r,
+      input.signature.signature_s,
+    ],
+    [],
   ];
 }
 
@@ -291,6 +338,142 @@ export async function submitPrivacyBridgeDeposit(
     }
   }
   throw lastRetryableError ?? new Error("Private deposit proof submission failed");
+}
+
+export async function submitPrivacyOpenNoteWithdrawal(
+  input: SubmitPrivacyOpenNoteWithdrawalInput,
+): Promise<SubmitPrivacyOpenNoteWithdrawalResult> {
+  const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
+  const txDelayBlocks = Math.max(
+    input.minProvingDelayBlocks,
+    STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS,
+  );
+  const proofDelayScheduleBlocks = STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS;
+  const account = await runFundingStage(
+    "Private withdrawal signer setup failed",
+    () =>
+      createEmbeddedPrivacyProofAccount({
+        seedHex: input.seedHex,
+        rpcProvider,
+        paymasterUrl: input.paymasterUrl,
+        privacyProofSignerClassHash: input.privacyProofSignerClassHash,
+        minProvingDelayBlocks: txDelayBlocks,
+      }),
+  );
+  const discoveryProvider = new IndexerDiscoveryProvider(
+    serviceBaseUrl(input.discoveryUrl),
+    input.privacyPoolAddress,
+  );
+  await runFundingStage("Private withdrawal service check failed", async () => {
+    if (!(await discoveryProvider.isHealthy())) {
+      throw new Error("Discovery service is not healthy");
+    }
+  });
+  const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
+  let lastRetryableError: unknown = null;
+  let claimedOpenNoteId = "";
+  for (let attempt = 0; attempt < proofDelayScheduleBlocks.length; attempt += 1) {
+    try {
+      const proofDelayBlocks = proofDelayScheduleBlocks[attempt];
+      const provingBlockId = await runFundingStage(
+        "Private withdrawal proof setup failed",
+        () => provingBlock(rpcProvider, proofDelayBlocks),
+      );
+      const provingProvider = new ProvingServiceProofProvider(
+        serviceBaseUrl(input.provingUrl),
+        sdkChainId(input.chainId),
+        {
+          blockIdentifier: provingBlockId,
+          requestTimeoutMs: 240_000,
+          nodeUrl: input.rpcUrl,
+          poolAddress: input.privacyPoolAddress,
+        },
+      );
+      const transfers = createPrivateTransfers({
+        account: account as never,
+        viewingKeyProvider: {
+          getViewingKey: async () => derivePrivacyViewingKey(input.seedHex),
+        },
+        provingProvider,
+        discoveryProvider,
+        poolContractAddress: input.privacyPoolAddress,
+      });
+      const execution = await runFundingStage(
+        "Private withdrawal proof failed",
+        () =>
+          withTimeout(
+            transfers
+              .build({
+                autoRegister: true,
+                autoSetup: true,
+                autoDiscover: { notes: "refresh", channels: "refresh" },
+                registry: sdkRegistry,
+                registryConst: true,
+              })
+              .with(input.tokenAddress, (token) =>
+                token.transfer({
+                  recipient: account.address,
+                  amount: Open,
+                })
+              )
+              .invoke(({ openNotes }) => {
+                const openNote = openNotes.find((entry) =>
+                  sameFelt(entry.token, input.tokenAddress)
+                );
+                if (!openNote) {
+                  throw new Error("Private withdrawal open note was not built correctly");
+                }
+                const openNoteId = normalizeAddress(openNote.noteId);
+                const signature = input.signExitClaim(openNoteId);
+                claimedOpenNoteId = openNoteId;
+                return {
+                  contractAddress: input.bridgeAddress,
+                  calldata: privacyBridgeStrk20ExitClaimCalldata({
+                    exitCommitment: input.exitCommitment,
+                    openNoteId,
+                    signature,
+                  }),
+                };
+              })
+              .execute({ provingBlockId }),
+            STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS,
+            "Private withdrawal proof generation timed out before the proof service returned.",
+          ),
+      );
+      assertNoSdkPrivacyWarnings(execution.warnings);
+
+      const transactionHash = await runFundingStage(
+        "Private withdrawal submission failed",
+        () =>
+          submitProofBearingCall({
+            signerAddress: account.address,
+            chainId: input.chainId,
+            paymasterAddress: input.paymasterAddress,
+            paymasterUrl: input.paymasterUrl,
+            callAndProof: execution.callAndProof,
+          }),
+      );
+      return {
+        transactionHash,
+        openNoteId: claimedOpenNoteId,
+        sdkRegistry: execution.registry,
+      };
+    } catch (error) {
+      const retryableContractVisibilityLag =
+        isProofProviderContractVisibilityLag(error) &&
+        await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(() => false);
+      if (
+        attempt < proofDelayScheduleBlocks.length - 1 &&
+        (isProofBlockTooRecent(error) || retryableContractVisibilityLag)
+      ) {
+        lastRetryableError = error;
+        await new Promise((resolve) => setTimeout(resolve, retryableContractVisibilityLag ? 15_000 : 5_000));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastRetryableError ?? new Error("Private withdrawal proof submission failed");
 }
 
 async function runFundingStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {

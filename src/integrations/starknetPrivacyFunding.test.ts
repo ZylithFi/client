@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { privacyBridgeDepositCalldata, type PrivacyBridgeDepositPlan } from "./starknetPrivacyFunding";
+import {
+  privacyBridgeDepositCalldata,
+  privacyBridgeStrk20ExitClaimCalldata,
+  type PrivacyBridgeDepositPlan,
+} from "./starknetPrivacyFunding";
 
 describe("privacyBridgeDepositCalldata", () => {
   it("builds the opaque activation calldata expected by the bridge", () => {
@@ -38,5 +42,25 @@ describe("privacyBridgeDepositCalldata", () => {
     expect(serialized).not.toContain(rawAmount);
     expect(serialized).not.toContain(rawNonce);
     expect(serialized).not.toContain(rawNoteCommitment);
+  });
+});
+
+describe("privacyBridgeStrk20ExitClaimCalldata", () => {
+  it("builds the staged STRK20 exit claim calldata without a public recipient", () => {
+    const calldata = privacyBridgeStrk20ExitClaimCalldata({
+      exitCommitment: "0xexit",
+      openNoteId: "0xopen",
+      signature: {
+        signature_r: "0xr",
+        signature_s: "0xs",
+      },
+    });
+
+    expect(calldata).toEqual([
+      [],
+      ["0xexit", "0xopen", "0xr", "0xs"],
+      [],
+    ]);
+    expect(JSON.stringify(calldata)).not.toContain("recipient");
   });
 });

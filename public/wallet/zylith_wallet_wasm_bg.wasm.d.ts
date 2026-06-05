@@ -24,6 +24,7 @@ export const zylith_wallet_seed_hex_to_mnemonic: (a: number, b: number) => [numb
 export const zylith_wallet_sign_note_consolidation_witness: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_sign_renewal_relay_package_authorization: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_sign_settlement_output_withdrawal_witness: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_sign_strk20_exit_claim: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_verify_renewal_relay_package: (a: number, b: number) => [number, number, number, number];
 export const init: () => void;
 export const __wbindgen_exn_store: (a: number) => void;

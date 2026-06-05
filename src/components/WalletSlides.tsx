@@ -729,7 +729,6 @@ export function WithdrawSlide({
   setSlideAsset: (v: string) => void;
 }) {
   const [asset, setAsset] = useState(defaultAsset);
-  const [recipient, setRecipient] = useState("");
   const [selectedNote, setSelectedNote] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
@@ -737,7 +736,6 @@ export function WithdrawSlide({
   useEffect(() => {
     if (open) {
       setAsset(defaultAsset);
-      setRecipient("");
       setSelectedNote(defaultNoteCommitment ?? "");
       setError("");
     }
@@ -777,7 +775,6 @@ export function WithdrawSlide({
   async function handleWithdraw() {
     if (!w || !w.isReady()) { setError("Unlock Zylith wallet first."); return; }
     if (!hostedWithdrawalAvailable) { setError("Withdrawals are not enabled for this deployment."); return; }
-    if (!recipient.trim()) { setError("Enter a recipient address."); return; }
     if (!selectedWithdrawNote) { setError(`No available ${asset} notes.`); return; }
     setWorking(true);
     setError("");
@@ -785,7 +782,6 @@ export function WithdrawSlide({
       const note = selectedWithdrawNote;
       await w.submitHostedWithdrawal({
         note_commitment: note.note_commitment,
-        recipient: recipient.trim(),
         batch_id: note.batch_id,
       });
       onClose();
@@ -836,7 +832,7 @@ export function WithdrawSlide({
           </div>
         )}
         <div className="slide-note">
-          This setting only chooses which claim-ready settlement output to withdraw first. Claim timing, recipient, and withdrawal transaction metadata are public on Starknet.
+          This creates a STRK20 private open note for this wallet instead of transferring to a public L2 recipient. STRK20 still exposes token, amount, open-note id, and claim timing.
         </div>
         {!hostedWithdrawalAvailable && (
           <div className="slide-note warn">
@@ -861,28 +857,15 @@ export function WithdrawSlide({
             </div>
           </div>
         )}
-        <div className="f-row">
-          <label className="f-label">Recipient address</label>
-          <div className="f-input-box">
-            <input
-              className="f-input"
-              type="text"
-              placeholder="0x…"
-              value={recipient}
-              onChange={e => setRecipient(e.target.value)}
-              style={{ fontSize: 12 }}
-            />
-          </div>
-        </div>
         {error && (
           <div style={{ fontSize: 11, color: "var(--z-status-danger)", marginBottom: 8 }}>{error}</div>
         )}
         <button
           className="slide-submit"
-          disabled={!hostedWithdrawalAvailable || !recipient.trim() || !selectedWithdrawNote || working}
+          disabled={!hostedWithdrawalAvailable || !selectedWithdrawNote || working}
           onClick={() => { void handleWithdraw(); }}
         >
-          {working ? "Submitting…" : "Withdraw"}
+          {working ? "Submitting…" : "Withdraw to STRK20 note"}
         </button>
       </div>
     </div>

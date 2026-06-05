@@ -8,6 +8,7 @@ import type { LocalOrder, LocalOrderStatus } from "./domain/orderLifecycle";
 import type { MakerBandAttribution } from "./domain/shieldedBalances";
 import {
   submitPrivacyBridgeDeposit,
+  submitPrivacyOpenNoteWithdrawal,
   type SubmitPrivacyBridgeDepositResult,
 } from "./integrations/starknetPrivacyFunding";
 import {
@@ -292,6 +293,7 @@ type WalletWasmModule = {
   zylith_wallet_sign_settlement_output_withdrawal_witness: (
     inputJson: string
   ) => string;
+  zylith_wallet_sign_strk20_exit_claim: (inputJson: string) => string;
 };
 
 type WalletPublicConfig = {
@@ -331,6 +333,9 @@ export type LocalNoteRecord = {
   deposit_requested_at_unix_ms?: number;
   spent?: boolean;
   pending_withdrawal_tx?: string;
+  pending_strk20_open_note_tx?: string;
+  strk20_exit_commitment?: string;
+  strk20_open_note_id?: string;
   withdrawal_requested_at_unix_ms?: number;
   pending_consolidation?: PendingConsolidationRecord;
 };
@@ -657,7 +662,7 @@ type StarknetCallPayload = {
 
 type HostedWithdrawalRequest = {
   chain_id?: string;
-  recipient: string;
+  recipient?: string;
   shielded_asset_adapter_address?: string;
   auction_verifier_address?: string;
   note_commitment?: string;
@@ -4110,8 +4115,16 @@ export function createZylithWalletRuntime(
         "Withdrawal proof data is missing. Refresh private state and retry."
       );
     }
-    const recipient = requiredNonZeroFelt(request.recipient, "recipient");
     const deployment = await loadDeploymentConfig();
+    const fundingRail = selectedDepositFundingRail(deployment);
+    const privacyPoolAddress = requiredNonZeroFelt(
+      fundingRail.privacyPool,
+      "privacy_pool_address"
+    );
+    const bridgeAddress = requiredNonZeroFelt(
+      fundingRail.bridgeAdapter,
+      "privacy_deposit_bridge_address"
+    );
     const auctionVerifierAddress = requiredNonZeroFelt(
       deployment.contracts?.auction_verifier ||
         configuredAuctionVerifierAddress ||
@@ -4124,10 +4137,32 @@ export function createZylithWalletRuntime(
         request.shielded_asset_adapter_address,
       "shielded_asset_adapter_address"
     );
+    if (
+      normalizeFeltForComparison(bridgeAddress) !==
+      normalizeFeltForComparison(shieldedAssetAdapterAddress)
+    ) {
+      throw new Error(
+        "STRK20 open-note withdrawals require the privacy bridge to be the shielded adapter."
+      );
+    }
     const chainId = requiredNonZeroFelt(
       configuredChainId || deployment.chain_id || request.chain_id,
       "chain_id"
     );
+    const tokenAddress = requiredNonZeroFelt(
+      deployment.token_addresses?.[note.note.asset_id],
+      `${note.note.asset_id} token address`
+    );
+    const rpcUrl = requiredString(
+      deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL,
+      "rpc_url"
+    );
+    const discoveryUrl = normalizeUrl(fundingRail.discoveryUrl);
+    const provingUrl = normalizeUrl(fundingRail.provingUrl);
+    if (!discoveryUrl || !provingUrl) {
+      throw new Error("Private withdrawal service URLs are required");
+    }
+    const strk20ExitCommitment = randomFeltHex();
     const prepared = await postJson<{ witness: unknown }>(
       proverUrl,
       "/api/private/withdrawals/prepare",
@@ -4136,7 +4171,8 @@ export function createZylithWalletRuntime(
         output_note: outputNote,
         output_note_preimage: note.note,
         output_proof: outputProof,
-        recipient,
+        recipient: "0x0",
+        strk20_exit_commitment: strk20ExitCommitment,
       }
     );
     const signedWitness = JSON.parse(
@@ -4148,7 +4184,8 @@ export function createZylithWalletRuntime(
             output_note: outputNote,
             output_note_preimage: note.note,
             output_proof: outputProof,
-            recipient,
+            recipient: "0x0",
+            strk20_exit_commitment: strk20ExitCommitment,
             auction_verifier_address: auctionVerifierAddress,
             shielded_asset_adapter_address: shieldedAssetAdapterAddress,
             chain_id: chainId,
@@ -4163,10 +4200,57 @@ export function createZylithWalletRuntime(
       { witness: signedWitness }
     );
     note.pending_withdrawal_tx = result.transaction_hash;
+    note.strk20_exit_commitment = strk20ExitCommitment;
     note.withdrawal_requested_at_unix_ms = Date.now();
     await saveNotes();
     await pushRecoverySnapshot(true);
-    return result;
+    const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
+      () => undefined
+    );
+    const claimResult = await submitPrivacyOpenNoteWithdrawal({
+      seedHex: unlockedSeed,
+      chainId,
+      rpcUrl,
+      privacyPoolAddress,
+      bridgeAddress,
+      tokenAddress,
+      discoveryUrl,
+      provingUrl,
+      paymasterAddress:
+        fundingRail.paymasterAddress || configuredPaymasterAddress,
+      paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
+      privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
+      minProvingDelayBlocks:
+        fundingRail.minProvingDelayBlocks ??
+        DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
+      sdkRegistry,
+      exitCommitment: strk20ExitCommitment,
+      signExitClaim: (openNoteId) =>
+        JSON.parse(
+          core.zylith_wallet_sign_strk20_exit_claim(
+            JSON.stringify({
+              seed_hex: unlockedSeed,
+              chain_id: chainId,
+              bridge_address: bridgeAddress,
+              privacy_pool_address: privacyPoolAddress,
+              exit_commitment: strk20ExitCommitment,
+              open_note_id: openNoteId,
+            })
+          )
+        ) as { signature_r: string; signature_s: string },
+    });
+    note.pending_strk20_open_note_tx = claimResult.transactionHash;
+    note.strk20_open_note_id = claimResult.openNoteId;
+    note.locked_by_order = undefined;
+    note.spent = true;
+    await saveStarknetPrivacySdkRegistry(claimResult.sdkRegistry);
+    await saveNotes();
+    await pushRecoverySnapshot(true);
+    return {
+      transaction_hash: claimResult.transactionHash,
+      staged_transaction_hash: result.transaction_hash,
+      open_note_id: claimResult.openNoteId,
+    };
   }
 
   async function submitWithdrawalViaPaymaster(
