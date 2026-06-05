@@ -1,5 +1,6 @@
 node_modules
+.vercel/output
 dist
 test-artifacts
-.vercel
-*.tsbuildinfo
+coverage
+*.log

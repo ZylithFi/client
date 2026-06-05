@@ -4616,7 +4616,12 @@ export function createZylithWalletRuntime(
     const verifier = normalizeText(
       deployment.contracts?.auction_verifier || configuredAuctionVerifierAddress
     );
-    const batchId = await encodeStarknetFelt("batch-id", batchIdText);
+    const batchId = await encodeStarknetFelt(
+      batchIdText.startsWith("consolidation-")
+        ? "note-consolidation-id"
+        : "batch-id",
+      batchIdText
+    );
     if (!rpcUrl || !verifier || !batchId) return null;
     const response = await starknetRpc<{ result?: string[]; error?: unknown }>(
       rpcUrl,
