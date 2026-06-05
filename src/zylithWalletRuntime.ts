@@ -2502,7 +2502,9 @@ export function createZylithWalletRuntime(
         Date.now() - (record.deposit_requested_at_unix_ms ?? Date.now());
       if (!record.pending_deposit_tx) {
         if (ageMs >= PENDING_DEPOSIT_FAILURE_GRACE_MS) {
-          record.spent = true;
+          record.deposit_failed = true;
+          record.deposit_failure_reason =
+            "Deposit transaction was not submitted. Please retry the deposit.";
           changed = true;
         }
         continue;

@@ -114,6 +114,17 @@ export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
   ];
 }
 
+export function privacyBridgeDepositInvokeCall(input: {
+  bridgeAddress: string;
+  plan: PrivacyBridgeDepositPlan;
+}) {
+  return {
+    contractAddress: input.bridgeAddress,
+    entrypoint: "privacy_invoke",
+    calldata: privacyBridgeDepositCalldata(input.plan),
+  };
+}
+
 export function privacyBridgeStrk20ExitClaimCalldata(input: {
   exitCommitment: string;
   openNoteId: string;
@@ -129,6 +140,19 @@ export function privacyBridgeStrk20ExitClaimCalldata(input: {
     ],
     [],
   ];
+}
+
+export function privacyBridgeStrk20ExitClaimInvokeCall(input: {
+  bridgeAddress: string;
+  exitCommitment: string;
+  openNoteId: string;
+  signature: Strk20ExitClaimSignature;
+}) {
+  return {
+    contractAddress: input.bridgeAddress,
+    entrypoint: "privacy_invoke",
+    calldata: privacyBridgeStrk20ExitClaimCalldata(input),
+  };
 }
 
 const STARK_FIELD_PRIME =
@@ -295,10 +319,10 @@ export async function submitPrivacyBridgeDeposit(
                 if (!withdrawal) {
                   throw new Error("Private deposit bridge action was not built correctly");
                 }
-                return {
-                  contractAddress: input.bridgeAddress,
-                  calldata: privacyBridgeDepositCalldata(input.plan),
-                };
+                return privacyBridgeDepositInvokeCall({
+                  bridgeAddress: input.bridgeAddress,
+                  plan: input.plan,
+                });
               })
               .execute({ provingBlockId }),
             STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS,
@@ -426,14 +450,12 @@ export async function submitPrivacyOpenNoteWithdrawal(
                 const openNoteId = normalizeAddress(openNote.noteId);
                 const signature = input.signExitClaim(openNoteId);
                 claimedOpenNoteId = openNoteId;
-                return {
-                  contractAddress: input.bridgeAddress,
-                  calldata: privacyBridgeStrk20ExitClaimCalldata({
-                    exitCommitment: input.exitCommitment,
-                    openNoteId,
-                    signature,
-                  }),
-                };
+                return privacyBridgeStrk20ExitClaimInvokeCall({
+                  bridgeAddress: input.bridgeAddress,
+                  exitCommitment: input.exitCommitment,
+                  openNoteId,
+                  signature,
+                });
               })
               .execute({ provingBlockId }),
             STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS,

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   privacyBridgeDepositCalldata,
+  privacyBridgeDepositInvokeCall,
   privacyBridgeStrk20ExitClaimCalldata,
+  privacyBridgeStrk20ExitClaimInvokeCall,
   type PrivacyBridgeDepositPlan,
 } from "./starknetPrivacyFunding";
 
@@ -21,6 +23,18 @@ describe("privacyBridgeDepositCalldata", () => {
       ["0xd00", "0xd01"],
       ["0xe00", "0xe01"],
     ]);
+    expect(privacyBridgeDepositInvokeCall({
+      bridgeAddress: "0xbridge",
+      plan,
+    })).toEqual({
+      contractAddress: "0xbridge",
+      entrypoint: "privacy_invoke",
+      calldata: [
+        ["0xf00", "0xf01"],
+        ["0xd00", "0xd01"],
+        ["0xe00", "0xe01"],
+      ],
+    });
   });
 
   it("does not serialize raw deposit asset amount nonce or note commitment", () => {
@@ -61,6 +75,19 @@ describe("privacyBridgeStrk20ExitClaimCalldata", () => {
       ["0xexit", "0xopen", "0xr", "0xs"],
       [],
     ]);
+    expect(privacyBridgeStrk20ExitClaimInvokeCall({
+      bridgeAddress: "0xbridge",
+      exitCommitment: "0xexit",
+      openNoteId: "0xopen",
+      signature: {
+        signature_r: "0xr",
+        signature_s: "0xs",
+      },
+    })).toEqual({
+      contractAddress: "0xbridge",
+      entrypoint: "privacy_invoke",
+      calldata,
+    });
     expect(JSON.stringify(calldata)).not.toContain("recipient");
   });
 });
