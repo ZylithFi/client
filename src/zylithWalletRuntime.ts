@@ -416,6 +416,9 @@ type WithdrawableNote = {
   locked: boolean;
   spent: boolean;
   pending_withdrawal_tx?: string;
+  pending_strk20_open_note_tx?: string;
+  strk20_exit_commitment?: string;
+  strk20_open_note_id?: string;
   metadata_commitment: string;
   maker_attribution?: MakerBandAttribution;
 };
@@ -1595,10 +1598,34 @@ export function createZylithWalletRuntime(
     const pending = notes.filter(
       (record) => record.pending_withdrawal_tx && !record.spent
     );
-    if (pending.length === 0 || !indexerUrl) return false;
+    if (pending.length === 0) return false;
+    const deployment = await loadDeploymentConfig();
     let changed = false;
     await Promise.all(
       pending.map(async (record) => {
+        if (record.strk20_exit_commitment) {
+          if (!record.pending_strk20_open_note_tx) return;
+          const status = await fetchTransactionReceiptStatus(
+            record.pending_strk20_open_note_tx,
+            deployment
+          ).catch(() => null);
+          if (status?.confirmed && !status.failed) {
+            record.locked_by_order = undefined;
+            record.spent = true;
+            record.pending_withdrawal_tx = undefined;
+            record.pending_strk20_open_note_tx = undefined;
+            record.withdrawal_requested_at_unix_ms = undefined;
+            changed = true;
+            return;
+          }
+          if (status?.failed) {
+            record.pending_strk20_open_note_tx = undefined;
+            record.strk20_open_note_id = undefined;
+            changed = true;
+          }
+          return;
+        }
+        if (!indexerUrl) return;
         const withdrawal = await fetchJson<{
           note_commitment?: string | { value?: string };
         }>(
@@ -4162,48 +4189,98 @@ export function createZylithWalletRuntime(
     if (!discoveryUrl || !provingUrl) {
       throw new Error("Private withdrawal service URLs are required");
     }
-    const strk20ExitCommitment = randomFeltHex();
-    const prepared = await postJson<{ witness: unknown }>(
-      proverUrl,
-      "/api/private/withdrawals/prepare",
-      {
-        batch_id: batchId,
-        output_note: outputNote,
-        output_note_preimage: note.note,
-        output_proof: outputProof,
-        recipient: "0x0",
-        strk20_exit_commitment: strk20ExitCommitment,
+    const strk20ExitCommitment = note.strk20_exit_commitment
+      ? requiredNonZeroFelt(
+          note.strk20_exit_commitment,
+          "strk20_exit_commitment"
+        )
+      : randomFeltHex();
+    let stagedTransactionHash = note.pending_withdrawal_tx;
+    if (!stagedTransactionHash) {
+      const prepared = await postJson<{ witness: unknown }>(
+        proverUrl,
+        "/api/private/withdrawals/prepare",
+        {
+          batch_id: batchId,
+          output_note: outputNote,
+          output_note_preimage: note.note,
+          output_proof: outputProof,
+          recipient: "0x0",
+          strk20_exit_commitment: strk20ExitCommitment,
+        }
+      );
+      const signedWitness = JSON.parse(
+        core.zylith_wallet_sign_settlement_output_withdrawal_witness(
+          JSON.stringify({
+            seed_hex: unlockedSeed,
+            expected: {
+              batch_id: batchId,
+              output_note: outputNote,
+              output_note_preimage: note.note,
+              output_proof: outputProof,
+              recipient: "0x0",
+              strk20_exit_commitment: strk20ExitCommitment,
+              auction_verifier_address: auctionVerifierAddress,
+              shielded_asset_adapter_address: shieldedAssetAdapterAddress,
+              chain_id: chainId,
+            },
+            witness: prepared.witness,
+          })
+        )
+      );
+      const result = await postJson<{ transaction_hash: string }>(
+        proverUrl,
+        "/api/private/withdrawals/submit",
+        { witness: signedWitness }
+      );
+      stagedTransactionHash = result.transaction_hash;
+      note.pending_withdrawal_tx = stagedTransactionHash;
+      note.strk20_exit_commitment = strk20ExitCommitment;
+      note.withdrawal_requested_at_unix_ms = Date.now();
+      await saveNotes();
+      await pushRecoverySnapshot(true);
+    }
+    const confirmedStagedTransactionHash = requiredString(
+      stagedTransactionHash,
+      "staged withdrawal transaction"
+    );
+    await waitForStarknetTransaction(
+      confirmedStagedTransactionHash,
+      deployment,
+      "Zylith STRK20 exit staging"
+    );
+
+    if (note.pending_strk20_open_note_tx) {
+      const pendingClaimTx = note.pending_strk20_open_note_tx;
+      const status = await fetchTransactionReceiptStatus(
+        pendingClaimTx,
+        deployment
+      ).catch(() => null);
+      if (status?.confirmed && !status.failed) {
+        note.locked_by_order = undefined;
+        note.spent = true;
+        note.pending_withdrawal_tx = undefined;
+        note.pending_strk20_open_note_tx = undefined;
+        note.withdrawal_requested_at_unix_ms = undefined;
+        await saveNotes();
+        await pushRecoverySnapshot(true);
+        return {
+          transaction_hash: pendingClaimTx,
+          staged_transaction_hash: confirmedStagedTransactionHash,
+          open_note_id: note.strk20_open_note_id,
+        };
       }
-    );
-    const signedWitness = JSON.parse(
-      core.zylith_wallet_sign_settlement_output_withdrawal_witness(
-        JSON.stringify({
-          seed_hex: unlockedSeed,
-          expected: {
-            batch_id: batchId,
-            output_note: outputNote,
-            output_note_preimage: note.note,
-            output_proof: outputProof,
-            recipient: "0x0",
-            strk20_exit_commitment: strk20ExitCommitment,
-            auction_verifier_address: auctionVerifierAddress,
-            shielded_asset_adapter_address: shieldedAssetAdapterAddress,
-            chain_id: chainId,
-          },
-          witness: prepared.witness,
-        })
-      )
-    );
-    const result = await postJson<{ transaction_hash: string }>(
-      proverUrl,
-      "/api/private/withdrawals/submit",
-      { witness: signedWitness }
-    );
-    note.pending_withdrawal_tx = result.transaction_hash;
-    note.strk20_exit_commitment = strk20ExitCommitment;
-    note.withdrawal_requested_at_unix_ms = Date.now();
-    await saveNotes();
-    await pushRecoverySnapshot(true);
+      if (!status?.failed) {
+        throw new Error(
+          "STRK20 open-note claim is already pending confirmation."
+        );
+      }
+      note.pending_strk20_open_note_tx = undefined;
+      note.strk20_open_note_id = undefined;
+      await saveNotes();
+      await pushRecoverySnapshot(true);
+    }
+
     const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
       () => undefined
     );
@@ -4241,14 +4318,38 @@ export function createZylithWalletRuntime(
     });
     note.pending_strk20_open_note_tx = claimResult.transactionHash;
     note.strk20_open_note_id = claimResult.openNoteId;
+    await saveStarknetPrivacySdkRegistry(claimResult.sdkRegistry);
+    await saveNotes();
+    await pushRecoverySnapshot(true);
+    try {
+      await waitForStarknetTransaction(
+        claimResult.transactionHash,
+        deployment,
+        "STRK20 open-note withdrawal claim"
+      );
+    } catch (error) {
+      const status = await fetchTransactionReceiptStatus(
+        claimResult.transactionHash,
+        deployment
+      ).catch(() => null);
+      if (status?.failed) {
+        note.pending_strk20_open_note_tx = undefined;
+        note.strk20_open_note_id = undefined;
+        await saveNotes();
+        await pushRecoverySnapshot(true);
+      }
+      throw error;
+    }
     note.locked_by_order = undefined;
     note.spent = true;
-    await saveStarknetPrivacySdkRegistry(claimResult.sdkRegistry);
+    note.pending_withdrawal_tx = undefined;
+    note.pending_strk20_open_note_tx = undefined;
+    note.withdrawal_requested_at_unix_ms = undefined;
     await saveNotes();
     await pushRecoverySnapshot(true);
     return {
       transaction_hash: claimResult.transactionHash,
-      staged_transaction_hash: result.transaction_hash,
+      staged_transaction_hash: confirmedStagedTransactionHash,
       open_note_id: claimResult.openNoteId,
     };
   }
@@ -4315,22 +4416,29 @@ export function createZylithWalletRuntime(
         (record) =>
           !(record.source === "deposit" && record.deposit_failed === true)
       )
-      .map((record) => ({
-        note_commitment: record.note_commitment,
-        batch_id: record.batch_id,
-        source: record.source ?? "deposit",
-        asset: record.note.asset_id,
-        amount: record.note.amount,
-        locked: Boolean(
-          record.locked_by_order ||
-            record.pending_consolidation ||
-            (record.source === "deposit" && record.deposit_confirmed !== true)
-        ),
-        spent: Boolean(record.spent),
-        pending_withdrawal_tx: record.pending_withdrawal_tx,
-        metadata_commitment: record.note.metadata_commitment,
-        maker_attribution: record.maker_attribution,
-      }));
+      .map((record) => {
+        const retryableStrk20Exit = isRetryableStrk20ExitClaim(record);
+        return {
+          note_commitment: record.note_commitment,
+          batch_id: record.batch_id,
+          source: record.source ?? "deposit",
+          asset: record.note.asset_id,
+          amount: record.note.amount,
+          locked: Boolean(
+            record.locked_by_order ||
+              record.pending_consolidation ||
+              (record.pending_withdrawal_tx && !retryableStrk20Exit) ||
+              (record.source === "deposit" && record.deposit_confirmed !== true)
+          ),
+          spent: Boolean(record.spent),
+          pending_withdrawal_tx: record.pending_withdrawal_tx,
+          pending_strk20_open_note_tx: record.pending_strk20_open_note_tx,
+          strk20_exit_commitment: record.strk20_exit_commitment,
+          strk20_open_note_id: record.strk20_open_note_id,
+          metadata_commitment: record.note.metadata_commitment,
+          maker_attribution: record.maker_attribution,
+        };
+      });
   }
 
   function getPrivateStrategies(): PrivateStrategySummary[] {
@@ -5041,7 +5149,8 @@ export function createZylithWalletRuntime(
       (record) =>
         !record.spent &&
         !record.locked_by_order &&
-        isSpendableLocalNote(record) &&
+        (isSpendableLocalNote(record) ||
+          isRetryableStrk20ExitClaim(record)) &&
         (!noteCommitment || record.note_commitment === noteCommitment)
     );
     if (!note) {
@@ -5197,6 +5306,16 @@ function isSpendableLocalNote(record: LocalNoteRecord) {
     !record.pending_withdrawal_tx &&
     !record.pending_consolidation &&
     (record.source !== "deposit" || record.deposit_confirmed === true)
+  );
+}
+
+function isRetryableStrk20ExitClaim(record: LocalNoteRecord) {
+  return Boolean(
+    record.source === "settlement_output" &&
+      record.pending_withdrawal_tx &&
+      record.strk20_exit_commitment &&
+      !record.pending_strk20_open_note_tx &&
+      !record.pending_consolidation
   );
 }
 

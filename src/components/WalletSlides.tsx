@@ -751,8 +751,15 @@ export function WithdrawSlide({
   const now = Date.now();
   const hostedWithdrawalAvailable = Boolean(w?.hostedWithdrawalAvailable?.());
   const assetNotes = notes.filter(n => {
-    if (n.asset !== asset || n.locked || n.spent || n.pending_withdrawal_tx) return false;
+    const retryableStrk20Exit = Boolean(
+      n.strk20_exit_commitment &&
+      n.pending_withdrawal_tx &&
+      !n.pending_strk20_open_note_tx
+    );
+    if (n.asset !== asset || n.locked || n.spent) return false;
     if (n.source !== "settlement_output") return false;
+    if (retryableStrk20Exit) return true;
+    if (n.pending_withdrawal_tx) return false;
     const readyAt = settlementReadyAtMs(n, settlementTranscripts, claimDelaySeconds);
     return readyAt !== null && now >= readyAt;
   }).sort((a, b) => {
@@ -771,6 +778,10 @@ export function WithdrawSlide({
     !n.pending_withdrawal_tx
   );
   const selectedWithdrawNote = assetNotes.find(n => n.note_commitment === selectedNote) ?? assetNotes[0] ?? null;
+  const selectedIsRetry =
+    Boolean(selectedWithdrawNote?.strk20_exit_commitment) &&
+    Boolean(selectedWithdrawNote?.pending_withdrawal_tx) &&
+    !selectedWithdrawNote?.pending_strk20_open_note_tx;
 
   async function handleWithdraw() {
     if (!w || !w.isReady()) { setError("Unlock Zylith wallet first."); return; }
@@ -832,7 +843,7 @@ export function WithdrawSlide({
           </div>
         )}
         <div className="slide-note">
-          This creates a STRK20 private open note for this wallet instead of transferring to a public L2 recipient. STRK20 still exposes token, amount, open-note id, and claim timing.
+          This creates a STRK20 private open note for this wallet instead of transferring to a public L2 recipient. STRK20 still exposes token, amount, open-note id, and claim timing. Staged exits can be retried if the STRK20 claim transaction fails.
         </div>
         {!hostedWithdrawalAvailable && (
           <div className="slide-note warn">
@@ -865,7 +876,7 @@ export function WithdrawSlide({
           disabled={!hostedWithdrawalAvailable || !selectedWithdrawNote || working}
           onClick={() => { void handleWithdraw(); }}
         >
-          {working ? "Submitting…" : "Withdraw to STRK20 note"}
+          {working ? "Submitting…" : selectedIsRetry ? "Retry STRK20 note claim" : "Withdraw to STRK20 note"}
         </button>
       </div>
     </div>

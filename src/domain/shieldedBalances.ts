@@ -13,6 +13,9 @@ export type WithdrawableNote = {
   locked: boolean;
   spent: boolean;
   pending_withdrawal_tx?: string;
+  pending_strk20_open_note_tx?: string;
+  strk20_exit_commitment?: string;
+  strk20_open_note_id?: string;
   metadata_commitment: string;
   maker_attribution?: MakerBandAttribution;
 };
