@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { reconcileOrderLifecycle, type LocalOrder } from "./orderLifecycle";
+import {
+  isMakerLiquidityOrder,
+  reconcileOrderLifecycle,
+  type LocalOrder,
+} from "./orderLifecycle";
 
 const pair = {
   pair_id: "STRK/USDC",
@@ -57,6 +61,22 @@ const deps = {
   },
   assetScale: (assetId: string) => 10n ** BigInt(assetId === "USDC" ? 6 : 18),
 };
+
+describe("order workspace classification", () => {
+  it("keeps direct taker orders out of the maker liquidity workspace", () => {
+    expect(isMakerLiquidityOrder(order({ wireMode: "Limit" }))).toBe(false);
+    expect(isMakerLiquidityOrder(order({ wireMode: "TWAP" }))).toBe(false);
+  });
+
+  it("classifies curve and strategy child orders as maker liquidity", () => {
+    expect(isMakerLiquidityOrder(order({ wireMode: "Maker Curve" }))).toBe(true);
+    expect(isMakerLiquidityOrder(order({ wireMode: "Resting" }))).toBe(true);
+    expect(isMakerLiquidityOrder(order({
+      wireMode: "Limit",
+      strategyId: "strategy-1",
+    }))).toBe(true);
+  });
+});
 
 describe("order lifecycle reconciliation", () => {
   it("attributes fills by expected output metadata, not by batch alone", () => {

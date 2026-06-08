@@ -183,7 +183,7 @@ export function OrderTicket({
 
   if (!walletReady) {
     return (
-      <div className="ticket-zone">
+      <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Connect wallet to start.</div>
           <div className="gate-body">Choose a Starknet wallet, then unlock the local Zylith wallet.</div>
@@ -197,7 +197,7 @@ export function OrderTicket({
 
   if (!hasPrivateBalance) {
     return (
-      <div className="ticket-zone">
+      <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Deposit before trading.</div>
           <div className="gate-body">Add funds to your Zylith wallet before entering a batch auction.</div>

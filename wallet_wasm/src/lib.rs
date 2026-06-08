@@ -25,10 +25,10 @@ use zylith_core::{
     renewal_cancel_authority_for_parent_from_raw_key_hex, renewal_parent_commitment,
     renewal_parent_secret_commitment, sign_note_consolidation_authorization,
     sign_order_authorization, sign_renewal_relay_package_authorization,
-    sign_settlement_output_withdrawal_witness, spend_auth_key_felt_from_raw_key_hex,
-    spend_authority_from_raw_key_hex, verify_output_note_membership,
-    verify_renewal_relay_package_authorization, withdraw_auth_key_felt_from_raw_key_hex,
-    withdraw_authority_from_raw_key_hex,
+    sign_settlement_output_withdrawal_witness, sign_strk20_exit_claim_authorization,
+    spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
+    verify_output_note_membership, verify_renewal_relay_package_authorization,
+    withdraw_auth_key_felt_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
 };
 
 #[wasm_bindgen(start)]
@@ -416,7 +416,7 @@ pub fn zylith_wallet_build_note_consolidation_draft(input_json: &str) -> Result<
             spend_authority: spend_authority.clone(),
             withdraw_authority: withdraw_authority.clone(),
             blinding,
-            nonce: output_index as u64,
+            nonce: (output_index as u64).saturating_add(1),
             metadata_commitment,
         };
         let output_note = OutputNoteRecord {
@@ -739,6 +739,7 @@ pub fn zylith_wallet_build_settlement_output_withdrawal_submission_plan(
             proof_artifact_commitment: &request.proof_artifact_commitment,
             withdraw_auth_key_felt: &withdraw_auth_key_felt,
             recipient: &request.recipient,
+            strk20_exit_commitment: request.strk20_exit_commitment.as_deref(),
             auction_verifier_address: &request.auction_verifier_address,
             shielded_asset_adapter_address: &request.shielded_asset_adapter_address,
             chain_id: &request.chain_id,
@@ -768,6 +769,29 @@ pub fn zylith_wallet_sign_settlement_output_withdrawal_witness(
         sign_settlement_output_withdrawal_witness(&withdraw_auth_key_felt, &witness)
             .map_err(js_error)?;
     to_json(&witness)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_sign_strk20_exit_claim(input_json: &str) -> Result<String, JsValue> {
+    let request: SignStrk20ExitClaimRequest = from_json(input_json)?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let withdraw_auth_key_felt = withdraw_auth_key_felt_from_raw_key_hex(&withdraw_key_hex);
+    let signed = sign_strk20_exit_claim_authorization(
+        &withdraw_auth_key_felt,
+        &request.chain_id,
+        &request.bridge_address,
+        &request.privacy_pool_address,
+        &request.auction_verifier_address,
+        &request.asset_id,
+        &request.token_address,
+        &request.amount,
+        &request.exit_commitment,
+        &request.open_note_id,
+    )
+    .map_err(js_error)?;
+    to_json(&signed)
 }
 
 fn validate_note_consolidation_witness_intent(
@@ -883,6 +907,20 @@ fn validate_settlement_output_withdrawal_witness_intent(
         &expected.recipient,
         "withdrawal witness changed recipient",
     )?;
+    match (
+        witness.strk20_exit_commitment.as_ref(),
+        expected.strk20_exit_commitment.as_ref(),
+    ) {
+        (Some(actual), Some(expected_exit)) => ensure_normalized_eq(
+            actual,
+            expected_exit,
+            "withdrawal witness changed STRK20 exit commitment",
+        )?,
+        (None, None) => {}
+        _ => {
+            return Err(js_error("withdrawal witness changed STRK20 exit mode"));
+        }
+    }
     ensure_output_matches(
         &witness.output_note,
         &expected.output_note,
@@ -1399,6 +1437,8 @@ pub struct BuildSettlementOutputWithdrawalSubmissionPlanRequest {
     pub new_nullifier_root: String,
     pub proof_artifact_commitment: String,
     pub recipient: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strk20_exit_commitment: Option<String>,
     pub auction_verifier_address: String,
     pub shielded_asset_adapter_address: String,
     pub chain_id: String,
@@ -1412,12 +1452,28 @@ pub struct SignSettlementOutputWithdrawalWitnessRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SignStrk20ExitClaimRequest {
+    pub seed_hex: String,
+    pub chain_id: String,
+    pub bridge_address: String,
+    pub privacy_pool_address: String,
+    pub auction_verifier_address: String,
+    pub asset_id: String,
+    pub token_address: String,
+    pub amount: String,
+    pub exit_commitment: String,
+    pub open_note_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExpectedSettlementOutputWithdrawalWitness {
     pub batch_id: BatchId,
     pub output_note: OutputNoteRecord,
     pub output_note_preimage: Note,
     pub output_proof: OutputNoteMerkleProof,
     pub recipient: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strk20_exit_commitment: Option<String>,
     pub auction_verifier_address: String,
     pub shielded_asset_adapter_address: String,
     pub chain_id: String,
@@ -1447,7 +1503,7 @@ mod tests {
         zylith_wallet_sign_note_consolidation_witness,
         zylith_wallet_sign_renewal_relay_package_authorization,
         zylith_wallet_sign_settlement_output_withdrawal_witness,
-        zylith_wallet_verify_renewal_relay_package,
+        zylith_wallet_sign_strk20_exit_claim, zylith_wallet_verify_renewal_relay_package,
     };
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use zylith_core::{
@@ -1591,6 +1647,7 @@ mod tests {
             shielded_asset_adapter_address: "0x456".into(),
             chain_id: "0x534e5f5345504f4c4941".into(),
             recipient: "0x789".into(),
+            strk20_exit_commitment: None,
             prior_nullifier_root,
             output_note: OutputNoteRecord {
                 note_commitment,
@@ -1647,6 +1704,49 @@ mod tests {
             .to_string(),
         );
         assert!(rejected.is_err());
+    }
+
+    #[test]
+    fn signs_strk20_exit_claim_authorization() {
+        let seed = RecoverySeed([12_u8; 32]);
+        let signed = zylith_wallet_sign_strk20_exit_claim(
+            &serde_json::json!({
+                "seed_hex": seed.to_hex(),
+                "chain_id": "0x534e5f5345504f4c4941",
+                "bridge_address": "0x456",
+                "privacy_pool_address": "0x789",
+                "auction_verifier_address": "0xabc",
+                "asset_id": "STRK",
+                "token_address": "0xdef",
+                "amount": "200",
+                "exit_commitment": "0xabc123",
+                "open_note_id": "0xdef456",
+            })
+            .to_string(),
+        )
+        .expect("claim signed");
+        let signed: SpendAuthorization = serde_json::from_str(&signed).expect("signed json");
+        assert_ne!(signed.signature_r, "0x0");
+        assert_ne!(signed.signature_s, "0x0");
+
+        let other = zylith_wallet_sign_strk20_exit_claim(
+            &serde_json::json!({
+                "seed_hex": seed.to_hex(),
+                "chain_id": "0x534e5f5345504f4c4941",
+                "bridge_address": "0x456",
+                "privacy_pool_address": "0x789",
+                "auction_verifier_address": "0xabc",
+                "asset_id": "STRK",
+                "token_address": "0xdef",
+                "amount": "200",
+                "exit_commitment": "0xabc123",
+                "open_note_id": "0xdef457",
+            })
+            .to_string(),
+        )
+        .expect("other claim signed");
+        let other: SpendAuthorization = serde_json::from_str(&other).expect("other json");
+        assert_ne!(signed.signature_r, other.signature_r);
     }
 
     #[test]
@@ -1944,6 +2044,7 @@ mod tests {
 
         assert_eq!(signed.output_notes.len(), 1);
         assert_eq!(signed.output_notes[0].amount, 300);
+        assert_eq!(signed.output_note_preimages[0].nonce, 1);
         assert_ne!(signed.spend_authorization.signature_r, "0x0");
         assert_ne!(signed.output_ciphertext_bundle_ref, "0x0");
 

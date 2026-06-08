@@ -39,6 +39,7 @@ describe("RightColumn", () => {
     render(
       <RightColumn
         activeBatch={null}
+        activePairId="STRK/USDC"
         settlementTranscripts={{
           "batch-1": {
             batch_id: "batch-1",
@@ -82,5 +83,43 @@ describe("RightColumn", () => {
     expect(claimSection).not.toBeNull();
     expect(within(claimSection as HTMLElement).getByText("USDC")).toBeInTheDocument();
     expect(within(claimSection as HTMLElement).getByRole("button", { name: "Withdraw" })).toBeInTheDocument();
+  });
+
+  it("shows current-pair assets without crowding the active order list with unrelated balances", () => {
+    render(
+      <RightColumn
+        activeBatch={null}
+        activePairId="STRK/USDC"
+        settlementTranscripts={{}}
+        online
+        allAssets={["STRK", "USDC", "ETH"]}
+        pairs={[{
+          pair_id: "STRK/USDC",
+          base_asset_id: "STRK",
+          quote_asset_id: "USDC",
+        }]}
+        balances={[
+          { asset: "STRK", available: "1000000000000000000", locked: "0" },
+          { asset: "USDC", available: "1000000", locked: "0" },
+          { asset: "ETH", available: "2000000000000000000", locked: "0" },
+        ]}
+        pendingDeposits={[]}
+        withdrawableNotes={[]}
+        claimDelaySeconds={0}
+        walletReady
+        starknetAddress="0xabc"
+        activeOrders={[activeOrder()]}
+        setOpenSlide={vi.fn()}
+        allOrders={[activeOrder()]}
+        onCancelOrder={vi.fn()}
+        onClaimNote={vi.fn()}
+      />,
+    );
+
+    const assetsSection = screen.getByText("Assets").closest(".right-section");
+    expect(assetsSection).not.toBeNull();
+    expect(within(assetsSection as HTMLElement).getByText("STRK")).toBeInTheDocument();
+    expect(within(assetsSection as HTMLElement).getByText("USDC")).toBeInTheDocument();
+    expect(within(assetsSection as HTMLElement).queryByText("ETH")).not.toBeInTheDocument();
   });
 });

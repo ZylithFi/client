@@ -12,6 +12,26 @@ const pair: PairConfig = {
 };
 
 describe("OrderTicket", () => {
+  it("renders the logged-out connect prompt as the compact gate state", () => {
+    render(
+      <OrderTicket
+        pair={pair}
+        balances={[]}
+        batchWindowMs={90_000}
+        walletReady={false}
+        hasPrivateBalance={false}
+        submitting={false}
+        submitError={null}
+        onOpenWallet={vi.fn()}
+        onDeposit={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Connect wallet to start.").closest(".ticket-gate-zone")).not.toBeNull();
+    expect(screen.getByRole("button", { name: /Connect wallet/i })).toHaveClass("gate-primary");
+  });
+
   it("keeps the taker ticket scoped to limit and program order entry", () => {
     render(
       <OrderTicket

@@ -191,6 +191,53 @@ function collectWindowWalletCandidates(): WalletCandidate[] {
   return candidates;
 }
 
+function collectRegistryWalletCandidates(
+  registryKey: string,
+  value: unknown,
+  orderOffset = 0,
+): WalletCandidate[] {
+  const candidates: WalletCandidate[] = [];
+  const addCandidate = (key: string, candidate: unknown) => {
+    candidates.push({ key, value: candidate, order: orderOffset + candidates.length });
+  };
+  const addRegistryEntry = (key: string, candidate: unknown) => {
+    addCandidate(key, candidate);
+    if (!candidate || typeof candidate !== "object") return;
+    const record = candidate as Record<string, unknown>;
+    for (const nestedKey of [
+      "provider",
+      "wallet",
+      "starknet",
+      "connector",
+      "walletProvider",
+      "starknetProvider",
+      "extension",
+    ]) {
+      addCandidate(`${key}_${nestedKey}`, record[nestedKey]);
+      const nested = record[nestedKey];
+      if (nested && typeof nested === "object") {
+        const nestedRecord = nested as Record<string, unknown>;
+        addCandidate(`${key}_${nestedKey}_provider`, nestedRecord.provider);
+        addCandidate(`${key}_${nestedKey}_starknet`, nestedRecord.starknet);
+        addCandidate(`${key}_${nestedKey}_wallet`, nestedRecord.wallet);
+      }
+    }
+  };
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => {
+      const meta = entry as StarknetProviderWithMeta;
+      addRegistryEntry(`${registryKey}_${meta?.id || meta?.name || index}`, entry);
+    });
+  } else if (value && typeof value === "object") {
+    Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
+      addRegistryEntry(`${registryKey}_${key}`, entry);
+    });
+  } else {
+    addRegistryEntry(registryKey, value);
+  }
+  return candidates;
+}
+
 function walletOptionsFromCandidates(candidates: WalletCandidate[]): StarknetWalletOption[] {
 
   const seenIds = new Set<string>();
@@ -233,13 +280,7 @@ export async function discoverStarknetWalletsAsync(): Promise<StarknetWalletOpti
     const { getStarknet } = await import("@starknet-io/get-starknet-core");
     const bridge = getStarknet();
     const availableWallets = await bridge.getAvailableWallets().catch(() => []);
-    availableWallets.forEach((wallet, index) => {
-      candidates.push({
-        key: `get_starknet_${wallet.id || wallet.name || index}`,
-        value: wallet,
-        order: candidates.length,
-      });
-    });
+    candidates.push(...collectRegistryWalletCandidates("get_starknet", availableWallets));
   } catch {
     // Manual injected-provider discovery below remains the fallback.
   }

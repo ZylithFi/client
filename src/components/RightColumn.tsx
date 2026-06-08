@@ -110,6 +110,7 @@ function ClaimSection({
 
 export function RightColumn({
   activeBatch,
+  activePairId,
   settlementTranscripts,
   online,
   allAssets,
@@ -127,6 +128,7 @@ export function RightColumn({
   onClaimNote,
 }: {
   activeBatch: BatchSummary | null;
+  activePairId: string;
   settlementTranscripts: Record<string, PublicSettlementTranscript>;
   online: boolean | null;
   allAssets: string[];
@@ -171,7 +173,20 @@ export function RightColumn({
     (Boolean(note.pending_withdrawal_tx) || settlementBasisMs(note, settlementTranscripts) !== null),
   );
   const activeOrderTotals = activeOrderFundingTotals(activeOrders, pairs);
-  const visibleAssets = allAssets.filter(asset => {
+  const selectedPair = pairs.find(pair => pair.pair_id === activePairId);
+  const relevantAssets = new Set<string>();
+  if (selectedPair) {
+    relevantAssets.add(selectedPair.base_asset_id);
+    relevantAssets.add(selectedPair.quote_asset_id);
+  }
+  for (const asset of activeOrderTotals.keys()) relevantAssets.add(asset);
+  const candidateAssets = relevantAssets.size > 0
+    ? [
+        ...allAssets.filter(asset => relevantAssets.has(asset)),
+        ...[...relevantAssets].filter(asset => !allAssets.includes(asset)),
+      ]
+    : allAssets;
+  const visibleAssets = candidateAssets.filter(asset => {
     const balance = balances.find(entry => entry.asset === asset);
     const available = balance ? BigInt(balance.available) : 0n;
     const locked = balance ? BigInt(balance.locked) : 0n;
@@ -213,7 +228,7 @@ export function RightColumn({
         </div>
       </div>
 
-      <div className="right-section">
+      <div className="right-section right-assets-section">
         <div className="right-hd">
           <span>Assets</span>
         </div>
@@ -264,15 +279,13 @@ export function RightColumn({
             No private asset balances
           </div>
         )}
-        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+        <div className="right-assets-actions">
           <button
             className="btn-ghost"
-            style={{ flex: 1, height: 28, fontSize: 10 }}
             onClick={() => setOpenSlide(walletReady && starknetAddress ? "deposit" : "wallet")}
           >Deposit</button>
           <button
             className="btn-ghost"
-            style={{ flex: 1, height: 28, fontSize: 10 }}
             onClick={() => setOpenSlide(walletReady ? "withdraw" : "wallet")}
           >Withdraw</button>
         </div>

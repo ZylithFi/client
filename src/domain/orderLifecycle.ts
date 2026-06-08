@@ -171,6 +171,12 @@ export function statusTone(s: LocalOrderStatus): string {
   return "danger";
 }
 
+export function isMakerLiquidityOrder(order: LocalOrder): boolean {
+  return Boolean(order.strategyId) ||
+    order.wireMode === "Maker Curve" ||
+    order.wireMode === "Resting";
+}
+
 function isPrivateReportTerminalStatus(status: LocalOrderStatus): boolean {
   return status === "filled" || status === "partial" || status === "no_fill";
 }

@@ -5,6 +5,7 @@ import {
   connectedStarknetAddress,
   disconnectStarknetProvider,
   discoverStarknetWallets,
+  discoverStarknetWalletsAsync,
   restoreConnectedStarknetWallet,
   selectedStarknetProvider,
 } from "./browserWallet";
@@ -183,6 +184,24 @@ describe("browser wallet selection", () => {
     };
 
     const wallets = discoverStarknetWallets();
+
+    expect(wallets[0]?.name).toBe("Braavos");
+    expect(wallets[0]?.id).toBe("braavos");
+  });
+
+  it("discovers Braavos from nested wallet registries returned by async discovery fallback", async () => {
+    const braavosProvider = {
+      id: "wallet-provider",
+      name: "Starknet wallet",
+      request: vi.fn(async () => null),
+    };
+    (window as typeof window & { starknetProviders?: unknown }).starknetProviders = [{
+      id: "braavos-wallet",
+      name: "Braavos",
+      wallet: { provider: braavosProvider },
+    }];
+
+    const wallets = await discoverStarknetWalletsAsync();
 
     expect(wallets[0]?.name).toBe("Braavos");
     expect(wallets[0]?.id).toBe("braavos");
