@@ -35,6 +35,10 @@ export type PrivacyBridgeDepositPlan = {
     funding_commitments: string[];
     deposit_roots: string[];
     encrypted_note_activations: string[];
+    note_commitments: string[];
+    asset_ids: string[];
+    amounts: string[];
+    withdraw_authorities: string[];
   };
 };
 
@@ -111,6 +115,10 @@ export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
     plan.encodedArgs.funding_commitments,
     plan.encodedArgs.deposit_roots,
     plan.encodedArgs.encrypted_note_activations,
+    plan.encodedArgs.note_commitments,
+    plan.encodedArgs.asset_ids,
+    plan.encodedArgs.amounts,
+    plan.encodedArgs.withdraw_authorities,
   ];
 }
 
@@ -138,6 +146,10 @@ export function privacyBridgeStrk20ExitClaimCalldata(input: {
       input.signature.signature_r,
       input.signature.signature_s,
     ],
+    [],
+    [],
+    [],
+    [],
     [],
   ];
 }

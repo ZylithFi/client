@@ -10,8 +10,8 @@ use zylith_core::{
     RecoveryArtifact, RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
     RenewalParentCancelSubmissionPlan, SettlementOutputWithdrawalPlanRequest,
     SettlementOutputWithdrawalSubmissionPlan, SettlementOutputWithdrawalWitness,
-    SpendAuthorization, TrustedOrderIngressRequest, WithdrawalSubmissionPlan,
-    build_deposit_submission_plan, build_order_submission,
+    SpendAuthorization, Strk20ExitClaimMessage, TrustedOrderIngressRequest,
+    WithdrawalSubmissionPlan, build_deposit_submission_plan, build_order_submission,
     build_renewal_parent_cancel_submission_plan,
     build_settlement_output_withdrawal_submission_plan, build_withdrawal_submission_plan,
     create_recovery_artifact, decrypt_maker_attribution_artifact, decrypt_output_note_for_owner,
@@ -780,15 +780,17 @@ pub fn zylith_wallet_sign_strk20_exit_claim(input_json: &str) -> Result<String, 
     let withdraw_auth_key_felt = withdraw_auth_key_felt_from_raw_key_hex(&withdraw_key_hex);
     let signed = sign_strk20_exit_claim_authorization(
         &withdraw_auth_key_felt,
-        &request.chain_id,
-        &request.bridge_address,
-        &request.privacy_pool_address,
-        &request.auction_verifier_address,
-        &request.asset_id,
-        &request.token_address,
-        &request.amount,
-        &request.exit_commitment,
-        &request.open_note_id,
+        Strk20ExitClaimMessage {
+            chain_id: &request.chain_id,
+            bridge_address: &request.bridge_address,
+            privacy_pool_address: &request.privacy_pool_address,
+            auction_verifier_address: &request.auction_verifier_address,
+            asset_id: &request.asset_id,
+            token_address: &request.token_address,
+            amount: &request.amount,
+            exit_commitment: &request.exit_commitment,
+            open_note_id: &request.open_note_id,
+        },
     )
     .map_err(js_error)?;
     to_json(&signed)
@@ -1562,6 +1564,25 @@ mod tests {
         );
         assert_eq!(
             json["encoded_args"]["encrypted_note_activations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            json["encoded_args"]["note_commitments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            json["encoded_args"]["asset_ids"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(json["encoded_args"]["amounts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            json["encoded_args"]["withdraw_authorities"]
                 .as_array()
                 .unwrap()
                 .len(),

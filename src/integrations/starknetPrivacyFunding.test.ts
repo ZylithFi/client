@@ -20,13 +20,17 @@ describe("starknet privacy proof delay schedule", () => {
 });
 
 describe("privacyBridgeDepositCalldata", () => {
-  it("builds the opaque activation calldata expected by the bridge", () => {
+  it("builds custody-bound activation calldata expected by the bridge", () => {
     const plan: PrivacyBridgeDepositPlan = {
       amount: 300n,
       encodedArgs: {
         funding_commitments: ["0xf00", "0xf01"],
         deposit_roots: ["0xd00", "0xd01"],
         encrypted_note_activations: ["0xe00", "0xe01"],
+        note_commitments: ["0xaaa", "0xaab"],
+        asset_ids: ["0x55534443", "0x55534443"],
+        amounts: ["100", "200"],
+        withdraw_authorities: ["0xauth0", "0xauth1"],
       },
     };
 
@@ -34,6 +38,10 @@ describe("privacyBridgeDepositCalldata", () => {
       ["0xf00", "0xf01"],
       ["0xd00", "0xd01"],
       ["0xe00", "0xe01"],
+      ["0xaaa", "0xaab"],
+      ["0x55534443", "0x55534443"],
+      ["100", "200"],
+      ["0xauth0", "0xauth1"],
     ]);
     expect(privacyBridgeDepositInvokeCall({
       bridgeAddress: "0xbridge",
@@ -45,29 +53,35 @@ describe("privacyBridgeDepositCalldata", () => {
         ["0xf00", "0xf01"],
         ["0xd00", "0xd01"],
         ["0xe00", "0xe01"],
+        ["0xaaa", "0xaab"],
+        ["0x55534443", "0x55534443"],
+        ["100", "200"],
+        ["0xauth0", "0xauth1"],
       ],
     });
   });
 
-  it("does not serialize raw deposit asset amount nonce or note commitment", () => {
-    const rawAsset = "USDC";
-    const rawAmount = "300";
+  it("serializes custody fields without exposing the deposit nonce", () => {
     const rawNonce = "7";
-    const rawNoteCommitment = "0xaaa";
     const plan: PrivacyBridgeDepositPlan = {
       amount: 300n,
       encodedArgs: {
         funding_commitments: ["0xf00"],
         deposit_roots: ["0xd00"],
         encrypted_note_activations: ["0xe00"],
+        note_commitments: ["0xaaa"],
+        asset_ids: ["0x55534443"],
+        amounts: ["300"],
+        withdraw_authorities: ["0xauth"],
       },
     };
 
     const serialized = JSON.stringify(privacyBridgeDepositCalldata(plan));
-    expect(serialized).not.toContain(rawAsset);
-    expect(serialized).not.toContain(rawAmount);
+    expect(serialized).toContain("0xaaa");
+    expect(serialized).toContain("0x55534443");
+    expect(serialized).toContain("300");
+    expect(serialized).toContain("0xauth");
     expect(serialized).not.toContain(rawNonce);
-    expect(serialized).not.toContain(rawNoteCommitment);
   });
 });
 
@@ -85,6 +99,10 @@ describe("privacyBridgeStrk20ExitClaimCalldata", () => {
     expect(calldata).toEqual([
       [],
       ["0xexit", "0xopen", "0xr", "0xs"],
+      [],
+      [],
+      [],
+      [],
       [],
     ]);
     expect(privacyBridgeStrk20ExitClaimInvokeCall({

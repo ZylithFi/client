@@ -8,6 +8,7 @@ import {
   makerCurveFundingReservePoints,
   rotateMakerCurvePoints,
   transactionCalldataContainsDepositActivation,
+  walletWasmModuleUrlAllowed,
   type LocalNoteRecord,
   type PendingConsolidationRecord,
   type NormalizedMakerCurvePoint,
@@ -26,6 +27,30 @@ describe("service URL resolution", () => {
   it("does not infer production services for unrelated hosts", () => {
     expect(defaultServiceUrlForHost("example.com", "indexer")).toBe("");
     expect(defaultServiceUrlForHost("", "indexer")).toBe("");
+  });
+});
+
+describe("wallet runtime module loading", () => {
+  it("allows same-origin wallet wasm modules and rejects remote modules by default", () => {
+    expect(
+      walletWasmModuleUrlAllowed(
+        "/wallet/zylith_wallet_wasm.js",
+        "https://app.zylith.fi/orders"
+      )
+    ).toBe(true);
+    expect(
+      walletWasmModuleUrlAllowed(
+        "https://cdn.example.test/wallet.js",
+        "https://app.zylith.fi/orders"
+      )
+    ).toBe(false);
+    expect(
+      walletWasmModuleUrlAllowed(
+        "https://cdn.example.test/wallet.js",
+        "https://app.zylith.fi/orders",
+        true
+      )
+    ).toBe(true);
   });
 });
 

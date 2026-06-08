@@ -965,6 +965,9 @@ const walletWasmModuleUrl = normalizeUrl(
   import.meta.env.VITE_ZYLITH_WALLET_WASM_MODULE_URL ||
     "/wallet/zylith_wallet_wasm.js"
 );
+const remoteWalletWasmModuleAllowed =
+  normalizeText(import.meta.env.VITE_ZYLITH_ALLOW_REMOTE_WALLET_WASM).toLowerCase() ===
+  "true";
 const ingressKeyPin = normalizeText(
   import.meta.env.VITE_ZYLITH_INGRESS_KEY_REGISTRY_PIN
 );
@@ -1020,6 +1023,17 @@ const RECOVERY_SNAPSHOT_MIN_INTERVAL_MS = 60_000;
 export async function installConfiguredZylithWalletRuntime() {
   if (typeof window === "undefined" || !walletWasmModuleUrl) return;
   try {
+    if (
+      !walletWasmModuleUrlAllowed(
+        walletWasmModuleUrl,
+        window.location.href,
+        remoteWalletWasmModuleAllowed
+      )
+    ) {
+      throw new Error(
+        "Wallet runtime module must be served from the current origin."
+      );
+    }
     const runtimeImport = new Function("url", "return import(url)") as (
       url: string
     ) => Promise<unknown>;
@@ -1035,6 +1049,23 @@ export async function installConfiguredZylithWalletRuntime() {
     );
   } finally {
     window.dispatchEvent(new CustomEvent("zylith-wallet-runtime-ready"));
+  }
+}
+
+export function walletWasmModuleUrlAllowed(
+  moduleUrl: string,
+  pageUrl: string,
+  allowRemote = false
+): boolean {
+  const trimmedModuleUrl = moduleUrl.trim();
+  if (!trimmedModuleUrl) return false;
+  try {
+    const baseUrl = pageUrl.trim() || "http://localhost/";
+    const page = new URL(baseUrl);
+    const resolved = new URL(trimmedModuleUrl, page);
+    return allowRemote || resolved.origin === page.origin;
+  } catch {
+    return false;
   }
 }
 
@@ -2187,6 +2218,10 @@ export function createZylithWalletRuntime(
             funding_commitments: string[];
             deposit_roots: string[];
             encrypted_note_activations: string[];
+            note_commitments: string[];
+            asset_ids: string[];
+            amounts: string[];
+            withdraw_authorities: string[];
           };
         }
     );
@@ -2199,7 +2234,11 @@ export function createZylithWalletRuntime(
         (plan) =>
           !plan.encoded_args.funding_commitments?.[0] ||
           !plan.encoded_args.deposit_roots?.[0] ||
-          !plan.encoded_args.encrypted_note_activations?.[0]
+          !plan.encoded_args.encrypted_note_activations?.[0] ||
+          !plan.encoded_args.note_commitments?.[0] ||
+          !plan.encoded_args.asset_ids?.[0] ||
+          !plan.encoded_args.amounts?.[0] ||
+          !plan.encoded_args.withdraw_authorities?.[0]
       )
     ) {
       throw new Error("Deposit plan is missing private funding activation fields");
@@ -2276,6 +2315,12 @@ export function createZylithWalletRuntime(
             deposit_roots: plans.map((plan) => plan.encoded_args.deposit_roots[0]),
             encrypted_note_activations: plans.map(
               (plan) => plan.encoded_args.encrypted_note_activations[0]
+            ),
+            note_commitments: plans.map((plan) => plan.encoded_args.note_commitments[0]),
+            asset_ids: plans.map((plan) => plan.encoded_args.asset_ids[0]),
+            amounts: plans.map((plan) => plan.encoded_args.amounts[0]),
+            withdraw_authorities: plans.map(
+              (plan) => plan.encoded_args.withdraw_authorities[0]
             ),
           },
         },
