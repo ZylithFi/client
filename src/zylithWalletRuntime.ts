@@ -340,6 +340,13 @@ export type LocalNoteRecord = {
   pending_consolidation?: PendingConsolidationRecord;
 };
 
+export type TransactionReceiptStatus = {
+  failed: boolean;
+  notFound: boolean;
+  confirmed?: boolean;
+  reason?: string;
+};
+
 export type PendingConsolidationRecord = {
   consolidation_id: string;
   transaction_hash?: string;
@@ -1640,18 +1647,7 @@ export function createZylithWalletRuntime(
             record.pending_strk20_open_note_tx,
             deployment
           ).catch(() => null);
-          if (status?.confirmed && !status.failed) {
-            record.locked_by_order = undefined;
-            record.spent = true;
-            record.pending_withdrawal_tx = undefined;
-            record.pending_strk20_open_note_tx = undefined;
-            record.withdrawal_requested_at_unix_ms = undefined;
-            changed = true;
-            return;
-          }
-          if (status?.failed) {
-            record.pending_strk20_open_note_tx = undefined;
-            record.strk20_open_note_id = undefined;
+          if (applyStrk20ExitClaimReceipt(record, status)) {
             changed = true;
           }
           return;
@@ -4176,6 +4172,9 @@ export function createZylithWalletRuntime(
     const request = rawRequest as HostedWithdrawalRequest;
     const { seedHex: unlockedSeed } = requireUnlocked();
     const note = selectWithdrawableNote(request.note_commitment);
+    const noteCommitment = note.note_commitment;
+    const currentWithdrawalNote = () =>
+      notes.find((record) => record.note_commitment === noteCommitment) || note;
     if (note.source !== "settlement_output") {
       throw new Error(
         "This note cannot be withdrawn until it is converted into a settlement output."
@@ -4281,9 +4280,10 @@ export function createZylithWalletRuntime(
         { witness: signedWitness }
       );
       stagedTransactionHash = result.transaction_hash;
-      note.pending_withdrawal_tx = stagedTransactionHash;
-      note.strk20_exit_commitment = strk20ExitCommitment;
-      note.withdrawal_requested_at_unix_ms = Date.now();
+      const latestNote = currentWithdrawalNote();
+      latestNote.pending_withdrawal_tx = stagedTransactionHash;
+      latestNote.strk20_exit_commitment = strk20ExitCommitment;
+      latestNote.withdrawal_requested_at_unix_ms = Date.now();
       await saveNotes();
       await pushRecoverySnapshot(true);
     }
@@ -4297,24 +4297,21 @@ export function createZylithWalletRuntime(
       "Zylith STRK20 exit staging"
     );
 
-    if (note.pending_strk20_open_note_tx) {
-      const pendingClaimTx = note.pending_strk20_open_note_tx;
+    const latestStagedNote = currentWithdrawalNote();
+    if (latestStagedNote.pending_strk20_open_note_tx) {
+      const pendingClaimTx = latestStagedNote.pending_strk20_open_note_tx;
       const status = await fetchTransactionReceiptStatus(
         pendingClaimTx,
         deployment
       ).catch(() => null);
       if (status?.confirmed && !status.failed) {
-        note.locked_by_order = undefined;
-        note.spent = true;
-        note.pending_withdrawal_tx = undefined;
-        note.pending_strk20_open_note_tx = undefined;
-        note.withdrawal_requested_at_unix_ms = undefined;
+        applyStrk20ExitClaimReceipt(currentWithdrawalNote(), status);
         await saveNotes();
         await pushRecoverySnapshot(true);
         return {
           transaction_hash: pendingClaimTx,
           staged_transaction_hash: confirmedStagedTransactionHash,
-          open_note_id: note.strk20_open_note_id,
+          open_note_id: currentWithdrawalNote().strk20_open_note_id,
         };
       }
       if (!status?.failed) {
@@ -4322,8 +4319,7 @@ export function createZylithWalletRuntime(
           "STRK20 open-note claim is already pending confirmation."
         );
       }
-      note.pending_strk20_open_note_tx = undefined;
-      note.strk20_open_note_id = undefined;
+      applyStrk20ExitClaimReceipt(latestStagedNote, status);
       await saveNotes();
       await pushRecoverySnapshot(true);
     }
@@ -4367,8 +4363,9 @@ export function createZylithWalletRuntime(
           )
         ) as { signature_r: string; signature_s: string },
     });
-    note.pending_strk20_open_note_tx = claimResult.transactionHash;
-    note.strk20_open_note_id = claimResult.openNoteId;
+    const latestClaimNote = currentWithdrawalNote();
+    latestClaimNote.pending_strk20_open_note_tx = claimResult.transactionHash;
+    latestClaimNote.strk20_open_note_id = claimResult.openNoteId;
     await saveStarknetPrivacySdkRegistry(claimResult.sdkRegistry);
     await saveNotes();
     await pushRecoverySnapshot(true);
@@ -4384,18 +4381,17 @@ export function createZylithWalletRuntime(
         deployment
       ).catch(() => null);
       if (status?.failed) {
-        note.pending_strk20_open_note_tx = undefined;
-        note.strk20_open_note_id = undefined;
+        applyStrk20ExitClaimReceipt(currentWithdrawalNote(), status);
         await saveNotes();
         await pushRecoverySnapshot(true);
       }
       throw error;
     }
-    note.locked_by_order = undefined;
-    note.spent = true;
-    note.pending_withdrawal_tx = undefined;
-    note.pending_strk20_open_note_tx = undefined;
-    note.withdrawal_requested_at_unix_ms = undefined;
+    applyStrk20ExitClaimReceipt(currentWithdrawalNote(), {
+      failed: false,
+      notFound: false,
+      confirmed: true,
+    });
     await saveNotes();
     await pushRecoverySnapshot(true);
     return {
@@ -5368,6 +5364,33 @@ function isRetryableStrk20ExitClaim(record: LocalNoteRecord) {
       !record.pending_strk20_open_note_tx &&
       !record.pending_consolidation
   );
+}
+
+export function applyStrk20ExitClaimReceipt(
+  record: LocalNoteRecord,
+  status: TransactionReceiptStatus | null
+) {
+  if (
+    !record.strk20_exit_commitment ||
+    !record.pending_strk20_open_note_tx ||
+    !status
+  ) {
+    return false;
+  }
+  if (status.confirmed && !status.failed) {
+    record.locked_by_order = undefined;
+    record.spent = true;
+    record.pending_withdrawal_tx = undefined;
+    record.pending_strk20_open_note_tx = undefined;
+    record.withdrawal_requested_at_unix_ms = undefined;
+    return true;
+  }
+  if (status.failed) {
+    record.pending_strk20_open_note_tx = undefined;
+    record.strk20_open_note_id = undefined;
+    return true;
+  }
+  return false;
 }
 
 function fundingRequirement(draft: PrivateOrderDraft) {
@@ -6626,12 +6649,7 @@ function extractTransactionHash(result: unknown): string | null {
 async function fetchTransactionReceiptStatus(
   transactionHash: string,
   deployment: DeploymentConfig
-): Promise<{
-  failed: boolean;
-  notFound: boolean;
-  confirmed?: boolean;
-  reason?: string;
-} | null> {
+): Promise<TransactionReceiptStatus | null> {
   const rpcUrl =
     deployment.rpc_url ||
     deployment.proof?.native_prover_rpc_url ||

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyStrk20ExitClaimReceipt,
   applyPendingConsolidationRoot,
   defaultServiceUrlForHost,
   firstRenewalSlotEpoch,
@@ -159,6 +160,74 @@ describe("pending consolidation finalization", () => {
   });
 });
 
+describe("STRK20 exit claim reconciliation", () => {
+  it("does not mark a failed STRK20 open-note claim as spent", () => {
+    const note = strk20ExitNote();
+
+    const changed = applyStrk20ExitClaimReceipt(note, {
+      failed: true,
+      notFound: false,
+      reason: "reverted",
+    });
+
+    expect(changed).toBe(true);
+    expect(note.spent).toBe(false);
+    expect(note.locked_by_order).toBe("withdrawal:0xexit");
+    expect(note.pending_withdrawal_tx).toBe("0xstaged");
+    expect(note.pending_strk20_open_note_tx).toBeUndefined();
+    expect(note.strk20_open_note_id).toBeUndefined();
+  });
+
+  it("leaves pending STRK20 open-note claims untouched until confirmed", () => {
+    const note = strk20ExitNote();
+
+    const changed = applyStrk20ExitClaimReceipt(note, {
+      failed: false,
+      notFound: false,
+      confirmed: false,
+    });
+
+    expect(changed).toBe(false);
+    expect(note.spent).toBe(false);
+    expect(note.pending_withdrawal_tx).toBe("0xstaged");
+    expect(note.pending_strk20_open_note_tx).toBe("0xclaim");
+    expect(note.strk20_open_note_id).toBe("0xopen");
+  });
+
+  it("marks STRK20 open-note exits spent only after claim confirmation", () => {
+    const note = strk20ExitNote();
+
+    const changed = applyStrk20ExitClaimReceipt(note, {
+      failed: false,
+      notFound: false,
+      confirmed: true,
+    });
+
+    expect(changed).toBe(true);
+    expect(note.spent).toBe(true);
+    expect(note.locked_by_order).toBeUndefined();
+    expect(note.pending_withdrawal_tx).toBeUndefined();
+    expect(note.pending_strk20_open_note_tx).toBeUndefined();
+    expect(note.strk20_open_note_id).toBe("0xopen");
+  });
+
+  it("reconciles legacy STRK20 exit records without a source field", () => {
+    const note = strk20ExitNote();
+    delete note.source;
+
+    const changed = applyStrk20ExitClaimReceipt(note, {
+      failed: false,
+      notFound: false,
+      confirmed: true,
+    });
+
+    expect(changed).toBe(true);
+    expect(note.spent).toBe(true);
+    expect(note.pending_withdrawal_tx).toBeUndefined();
+    expect(note.pending_strk20_open_note_tx).toBeUndefined();
+  });
+});
+
 describe("deposit confirmation polling", () => {
   it("continues polling recoverable pending deposits", () => {
     expect(hasRecoverablePendingDeposit([
@@ -251,6 +320,22 @@ function sourceNote(pending: PendingConsolidationRecord): LocalNoteRecord {
     note: notePreimage("0xasset", "100"),
     locked_by_order: `consolidation:${pending.consolidation_id}`,
     pending_consolidation: pending,
+  };
+}
+
+function strk20ExitNote(): LocalNoteRecord {
+  return {
+    note_commitment: "0xexit",
+    deployment_scope: "scope-a",
+    source: "settlement_output",
+    note: notePreimage("0xasset", "100"),
+    locked_by_order: "withdrawal:0xexit",
+    spent: false,
+    pending_withdrawal_tx: "0xstaged",
+    pending_strk20_open_note_tx: "0xclaim",
+    strk20_exit_commitment: "0xexitcommitment",
+    strk20_open_note_id: "0xopen",
+    withdrawal_requested_at_unix_ms: 1_700_000_000_000,
   };
 }
 
