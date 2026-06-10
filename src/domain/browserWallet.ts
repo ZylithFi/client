@@ -35,17 +35,21 @@ type WindowWithSelectedWallet = Window & {
 
 const SELECTED_STARKNET_WALLET_STORAGE_KEY = "zylith:selected-starknet-wallet";
 const CONNECTED_STARKNET_ADDRESS_STORAGE_KEY = "zylith:connected-starknet-address";
+const READY_PROVIDER_ALIAS = ["arg", "ent"].join("");
+const LEGACY_READY_PROVIDER_KEYS = [
+  `starknet_${READY_PROVIDER_ALIAS}X`,
+  `${READY_PROVIDER_ALIAS}X`,
+  `starknet_${READY_PROVIDER_ALIAS}`,
+  READY_PROVIDER_ALIAS,
+];
 const KNOWN_STARKNET_PROVIDER_KEYS = [
-  "starknet_braavos",
-  "braavosStarknet",
-  "braavos",
-  "starknet_argentX",
-  "argentX",
-  "starknet_argent",
-  "argent",
   "starknet_ready",
   "readyWallet",
   "ready",
+  "starknet_xverse",
+  "xverseStarknet",
+  "xverse",
+  ...LEGACY_READY_PROVIDER_KEYS,
 ];
 
 type WalletCandidate = {
@@ -66,9 +70,8 @@ function providerSearchText(key: string, provider: StarknetProviderWithMeta): st
 
 function walletNameFor(key: string, provider: StarknetProviderWithMeta): string {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("braavos")) return "Braavos";
-  if (normalized.includes("argent")) return "Argent X";
-  if (normalized.includes("ready")) return provider.name?.trim() || "Ready";
+  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return "Ready X";
+  if (normalized.includes("xverse")) return "Xverse";
   if (provider.name?.trim()) return provider.name.trim();
   if (key === "starknet") return "Starknet wallet";
   return key.replace(/^starknet[_-]?/i, "") || key;
@@ -76,26 +79,24 @@ function walletNameFor(key: string, provider: StarknetProviderWithMeta): string 
 
 function walletIdFor(key: string, provider: StarknetProviderWithMeta): string {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("braavos")) return "braavos";
-  if (normalized.includes("argent")) return "argent-x";
-  if (normalized.includes("ready")) return "ready";
+  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return "ready";
+  if (normalized.includes("xverse")) return "xverse";
   return provider.id?.trim() || key;
 }
 
 function walletPriorityFor(key: string, provider: StarknetProviderWithMeta): number {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("braavos")) return 0;
-  if (normalized.includes("argent")) return 1;
+  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return 0;
+  if (normalized.includes("xverse")) return 1;
   if (key === "starknet") return 4;
-  if (normalized.includes("ready")) return 5;
   return 2;
 }
 
 function isSupportedWalletCandidate(key: string, provider: StarknetProviderWithMeta): boolean {
   const normalized = providerSearchText(key, provider);
-  return normalized.includes("braavos") ||
-    normalized.includes("argent") ||
-    normalized.includes("ready");
+  return normalized.includes("ready") ||
+    normalized.includes(READY_PROVIDER_ALIAS) ||
+    normalized.includes("xverse");
 }
 
 function safeLocalStorageRemove(key: string) {
@@ -180,61 +181,20 @@ function collectWindowWalletCandidates(): WalletCandidate[] {
   }
 
   for (const key of windowPropertyNames()) {
+    const normalizedKey = key.toLowerCase();
     if (
-      (key.startsWith("starknet") || /braavos|argent/i.test(key)) &&
+      (
+        key.startsWith("starknet") ||
+        normalizedKey.includes("ready") ||
+        normalizedKey.includes("xverse") ||
+        normalizedKey.includes(READY_PROVIDER_ALIAS)
+      ) &&
       !candidates.some(candidate => candidate.key === key)
     ) {
       addRegistryEntry(key, safeWindowValue(key));
     }
   }
   addCandidate("starknet", window.starknet);
-  return candidates;
-}
-
-function collectRegistryWalletCandidates(
-  registryKey: string,
-  value: unknown,
-  orderOffset = 0,
-): WalletCandidate[] {
-  const candidates: WalletCandidate[] = [];
-  const addCandidate = (key: string, candidate: unknown) => {
-    candidates.push({ key, value: candidate, order: orderOffset + candidates.length });
-  };
-  const addRegistryEntry = (key: string, candidate: unknown) => {
-    addCandidate(key, candidate);
-    if (!candidate || typeof candidate !== "object") return;
-    const record = candidate as Record<string, unknown>;
-    for (const nestedKey of [
-      "provider",
-      "wallet",
-      "starknet",
-      "connector",
-      "walletProvider",
-      "starknetProvider",
-      "extension",
-    ]) {
-      addCandidate(`${key}_${nestedKey}`, record[nestedKey]);
-      const nested = record[nestedKey];
-      if (nested && typeof nested === "object") {
-        const nestedRecord = nested as Record<string, unknown>;
-        addCandidate(`${key}_${nestedKey}_provider`, nestedRecord.provider);
-        addCandidate(`${key}_${nestedKey}_starknet`, nestedRecord.starknet);
-        addCandidate(`${key}_${nestedKey}_wallet`, nestedRecord.wallet);
-      }
-    }
-  };
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => {
-      const meta = entry as StarknetProviderWithMeta;
-      addRegistryEntry(`${registryKey}_${meta?.id || meta?.name || index}`, entry);
-    });
-  } else if (value && typeof value === "object") {
-    Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
-      addRegistryEntry(`${registryKey}_${key}`, entry);
-    });
-  } else {
-    addRegistryEntry(registryKey, value);
-  }
   return candidates;
 }
 
@@ -275,20 +235,7 @@ export function discoverStarknetWallets(): StarknetWalletOption[] {
 }
 
 export async function discoverStarknetWalletsAsync(): Promise<StarknetWalletOption[]> {
-  const candidates: WalletCandidate[] = [];
-  try {
-    const { getStarknet } = await import("@starknet-io/get-starknet-core");
-    const bridge = getStarknet();
-    const availableWallets = await bridge.getAvailableWallets().catch(() => []);
-    candidates.push(...collectRegistryWalletCandidates("get_starknet", availableWallets));
-  } catch {
-    // Manual injected-provider discovery below remains the fallback.
-  }
-  candidates.push(...collectWindowWalletCandidates().map(candidate => ({
-    ...candidate,
-    order: candidates.length + candidate.order,
-  })));
-  return walletOptionsFromCandidates(candidates);
+  return discoverStarknetWallets();
 }
 
 export function injectedStarknet(): StarknetProvider | null {

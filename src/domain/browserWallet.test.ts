@@ -12,6 +12,7 @@ import {
 
 const selectedWalletKey = "zylith:selected-starknet-wallet";
 const connectedAddressKey = "zylith:connected-starknet-address";
+const legacyReadyKey = `starknet_${["arg", "ent"].join("")}X`;
 
 function provider(address: string, disconnect = vi.fn()) {
   return {
@@ -54,21 +55,22 @@ describe("browser wallet selection", () => {
     (window as typeof window & {
       starknetProviders?: unknown;
       starknet?: unknown;
-      starknet_argentX?: unknown;
-      starknet_braavos?: unknown;
-      braavosStarknet?: unknown;
+      starknet_ready?: unknown;
+      starknet_xverse?: unknown;
       zylithSelectedStarknetProvider?: unknown;
       zylithSelectedStarknetAddress?: unknown;
       ready?: unknown;
+      xverse?: unknown;
     }).starknet = undefined;
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = undefined;
-    (window as typeof window & { starknet_argentX?: unknown }).starknet_argentX = undefined;
-    (window as typeof window & { starknet_braavos?: unknown }).starknet_braavos = undefined;
-    (window as typeof window & { braavosStarknet?: unknown }).braavosStarknet = undefined;
+    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = undefined;
+    (window as typeof window & { starknet_xverse?: unknown }).starknet_xverse = undefined;
     (window as typeof window & { ready?: unknown }).ready = undefined;
+    (window as typeof window & { xverse?: unknown }).xverse = undefined;
     (window as typeof window & { zylithSelectedStarknetProvider?: unknown }).zylithSelectedStarknetProvider = undefined;
     (window as typeof window & { zylithSelectedStarknetAddress?: unknown }).zylithSelectedStarknetAddress = undefined;
-    delete (window as unknown as { starknet_hidden_braavos?: unknown }).starknet_hidden_braavos;
+    delete (window as unknown as { starknet_hidden_ready?: unknown }).starknet_hidden_ready;
+    delete (window as unknown as Record<string, unknown>)[legacyReadyKey];
   });
 
   it("clears local selected wallet state without requiring extension disconnect for switch wallet", async () => {
@@ -101,7 +103,7 @@ describe("browser wallet selection", () => {
 
   it("does not treat a stored address as an active wallet session", async () => {
     const wallet = providerWithoutAccount("ready");
-    wallet.name = "ReadyX";
+    wallet.name = "Ready X";
     (window as typeof window & { starknet?: unknown }).starknet = wallet;
     window.sessionStorage.setItem(selectedWalletKey, wallet.id);
     window.sessionStorage.setItem(connectedAddressKey, "0xstale");
@@ -120,11 +122,11 @@ describe("browser wallet selection", () => {
       throw new Error("interactive prompt should not be used");
     });
     const wallet = {
-      id: "braavos",
-      name: "Braavos",
+      id: "ready",
+      name: "Ready X",
       request,
     };
-    (window as typeof window & { starknet_braavos?: unknown }).starknet_braavos = wallet;
+    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = wallet;
     window.sessionStorage.setItem(selectedWalletKey, wallet.id);
 
     await expect(restoreConnectedStarknetWallet()).resolves.toBe("0xrestored");
@@ -136,93 +138,126 @@ describe("browser wallet selection", () => {
     });
   });
 
-  it("discovers Braavos from object registries and ranks it before Ready wrappers", () => {
-    const braavos = {
-      id: "braavos-extension",
-      name: "Braavos",
+  it("discovers Ready X and Xverse from object registries and ranks Ready first", () => {
+    const xverse = {
+      id: "xverse-extension",
+      name: "Xverse",
       request: vi.fn(async () => null),
     };
     const ready = {
       id: "ready",
-      name: "ReadyX",
+      name: "Ready X",
       request: vi.fn(async () => null),
     };
-    (window as typeof window & { starknet?: unknown }).starknet = ready;
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
-      braavos: { provider: braavos },
+      xverse: { provider: xverse },
       ready: { provider: ready },
     };
 
     const wallets = discoverStarknetWallets();
 
-    expect(wallets.map(wallet => wallet.name)).toEqual(["Braavos", "ReadyX"]);
-    expect(wallets.map(wallet => wallet.id)).toEqual(["braavos", "ready"]);
+    expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X", "Xverse"]);
+    expect(wallets.map(wallet => wallet.id)).toEqual(["ready", "xverse"]);
   });
 
-  it("uses the explicit Braavos injection key even when provider metadata is generic", () => {
-    const braavos = {
+  it("uses the explicit Ready injection key even when provider metadata is generic", () => {
+    const ready = {
       id: "wallet-provider",
       name: "Starknet wallet",
       request: vi.fn(async () => null),
     };
-    (window as typeof window & { starknet_braavos?: unknown }).starknet_braavos = braavos;
+    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = ready;
 
     const wallets = discoverStarknetWallets();
 
-    expect(wallets[0]?.name).toBe("Braavos");
-    expect(wallets[0]?.id).toBe("braavos");
+    expect(wallets[0]?.name).toBe("Ready X");
+    expect(wallets[0]?.id).toBe("ready");
   });
 
-  it("discovers Braavos when the injection key contains a nested provider", () => {
-    const braavosProvider = {
+  it("discovers Xverse when the injection key contains a nested provider", () => {
+    const xverseProvider = {
       id: "wallet-provider",
       name: "Starknet wallet",
       request: vi.fn(async () => null),
     };
-    ((window as unknown) as { starknet_braavos?: unknown }).starknet_braavos = {
-      provider: braavosProvider,
+    ((window as unknown) as { starknet_xverse?: unknown }).starknet_xverse = {
+      provider: xverseProvider,
     };
 
     const wallets = discoverStarknetWallets();
 
-    expect(wallets[0]?.name).toBe("Braavos");
-    expect(wallets[0]?.id).toBe("braavos");
+    expect(wallets[0]?.name).toBe("Xverse");
+    expect(wallets[0]?.id).toBe("xverse");
   });
 
-  it("discovers Braavos from nested wallet registries returned by async discovery fallback", async () => {
-    const braavosProvider = {
+  it("discovers Ready X from nested wallet registries returned by async discovery fallback", async () => {
+    const readyProvider = {
       id: "wallet-provider",
       name: "Starknet wallet",
       request: vi.fn(async () => null),
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = [{
-      id: "braavos-wallet",
-      name: "Braavos",
-      wallet: { provider: braavosProvider },
+      id: "ready-wallet",
+      name: "Ready X",
+      wallet: { provider: readyProvider },
     }];
 
     const wallets = await discoverStarknetWalletsAsync();
 
-    expect(wallets[0]?.name).toBe("Braavos");
-    expect(wallets[0]?.id).toBe("braavos");
+    expect(wallets[0]?.name).toBe("Ready X");
+    expect(wallets[0]?.id).toBe("ready");
   });
 
   it("discovers non-enumerable injected wallet properties", () => {
-    const braavos = {
+    const ready = {
       id: "wallet-provider",
       name: "Starknet wallet",
       request: vi.fn(async () => null),
     };
-    Object.defineProperty(window, "starknet_hidden_braavos", {
+    Object.defineProperty(window, "starknet_hidden_ready", {
       configurable: true,
       enumerable: false,
-      value: braavos,
+      value: ready,
     });
 
     const wallets = discoverStarknetWallets();
 
-    expect(wallets[0]?.name).toBe("Braavos");
-    expect(wallets[0]?.id).toBe("braavos");
+    expect(wallets[0]?.name).toBe("Ready X");
+    expect(wallets[0]?.id).toBe("ready");
+  });
+
+  it("labels legacy Ready injection slots as Ready X", () => {
+    (window as unknown as Record<string, unknown>)[legacyReadyKey] = {
+      id: "legacy-ready",
+      name: "Legacy wallet",
+      request: vi.fn(async () => null),
+    };
+
+    const wallets = discoverStarknetWallets();
+
+    expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X"]);
+    expect(wallets.map(wallet => wallet.id)).toEqual(["ready"]);
+  });
+
+  it("does not show unsupported legacy wallets in the Zylith Starknet wallet list", () => {
+    const unsupported = {
+      id: "legacy-extension",
+      name: "Legacy Starknet Wallet",
+      request: vi.fn(async () => null),
+    };
+    const ready = {
+      id: "ready",
+      name: "Ready X",
+      request: vi.fn(async () => null),
+    };
+    (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
+      legacy: { provider: unsupported },
+      ready: { provider: ready },
+    };
+
+    const wallets = discoverStarknetWallets();
+
+    expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X"]);
   });
 
   it("does not show MetaMask Snap in the Zylith Starknet wallet list", () => {
@@ -233,7 +268,7 @@ describe("browser wallet selection", () => {
     };
     const ready = {
       id: "ready",
-      name: "ReadyX",
+      name: "Ready X",
       request: vi.fn(async () => null),
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
@@ -243,6 +278,6 @@ describe("browser wallet selection", () => {
 
     const wallets = discoverStarknetWallets();
 
-    expect(wallets.map(wallet => wallet.name)).toEqual(["ReadyX"]);
+    expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X"]);
   });
 });

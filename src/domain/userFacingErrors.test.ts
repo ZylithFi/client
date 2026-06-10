@@ -30,6 +30,33 @@ describe("userFacingErrorMessage", () => {
     expect(message).not.toMatch(/embedded signer|RPC|setup/i);
   });
 
+  it("explains wallet paymaster execution failures during private deposits", () => {
+    const message = userFacingErrorMessage(
+      new Error("Failed while funding embedded signer from connected wallet: PaymasterV2Error: Paymaster error 156: An error occurred (TRANSACTION_EXECUTION_ERROR)"),
+    );
+
+    expect(message).toBe("The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.");
+    expect(message).not.toMatch(/PaymasterV2Error|TRANSACTION_EXECUTION_ERROR|embedded signer/i);
+  });
+
+  it("explains undeployed connected wallets during private deposits", () => {
+    const message = userFacingErrorMessage(
+      new Error("Private deposit funding setup failed: Connected Starknet wallet must be deployed before depositing."),
+    );
+
+    expect(message).toBe("Connected Starknet wallet must be activated with one outgoing transaction before depositing.");
+    expect(message).not.toMatch(/class hash|contract not found|deployed before depositing/i);
+  });
+
+  it("explains deposit relay configuration mismatches from JSON error bodies", () => {
+    const message = userFacingErrorMessage(
+      new Error(JSON.stringify({ error: "paymaster_address does not match paymaster configuration" })),
+    );
+
+    expect(message).toBe("The app deployment configuration does not match the deposit relay. This deployment needs a configuration fix before deposits can work.");
+    expect(message).not.toMatch(/paymaster_address|configuration$/i);
+  });
+
   it("normalizes raw Starknet network errors", () => {
     const message = userFacingErrorMessage(
       new Error("RpcError: RPC: starknet_estimateFee with params {\"execution_error\":true}"),

@@ -792,8 +792,9 @@ declare global {
     zylithWallet?: WalletRuntime;
     zylithWalletLoadError?: string;
     starknet?: StarknetInjectedProvider;
-    starknet_argentX?: StarknetInjectedProvider;
-    starknet_braavos?: StarknetInjectedProvider;
+    starknet_ready?: StarknetInjectedProvider;
+    starknet_xverse?: StarknetInjectedProvider;
+    xverse?: StarknetInjectedProvider;
     zylithSelectedStarknetProvider?: StarknetInjectedProvider;
   }
 }
@@ -1088,6 +1089,7 @@ export function createZylithWalletRuntime(
   let depositConfirmationTimer: number | null = null;
   let strategyWorkerInFlight = false;
   let depositConfirmationWorkerInFlight = false;
+  let depositSubmissionInFlightRequestId: string | null = null;
   let recoverySyncInFlight = false;
   let postUnlockSyncInFlight = false;
   let lastRecoverySnapshotAtUnixMs = 0;
@@ -2178,14 +2180,21 @@ export function createZylithWalletRuntime(
       deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL,
       "rpc_url"
     );
-    const discoveryUrl = normalizeUrl(fundingRail.discoveryUrl);
-    const provingUrl = normalizeUrl(fundingRail.provingUrl);
+    const discoveryUrl = browserSafeServiceUrl(
+      normalizeUrl(fundingRail.discoveryUrl),
+      "/starknet-privacy-discovery"
+    );
+    const provingUrl = browserSafeServiceUrl(
+      normalizeUrl(fundingRail.provingUrl),
+      "/starknet-privacy-prover"
+    );
     if (!discoveryUrl || !provingUrl) {
       throw new Error("Private deposit service URLs are required");
     }
     if (rawAmount <= 0n) {
       throw new Error("Deposit amount must be greater than zero");
     }
+    setRuntimePrivacyFundingStage("Connecting Starknet wallet and checking network");
     const provider = await selectInjectedStarknetProvider();
     const depositRequestId = randomFeltHex();
     const depositChunks = splitDepositAmount(
@@ -2257,6 +2266,7 @@ export function createZylithWalletRuntime(
       throw new Error("Deposit split produced mixed assets");
     }
     const requestTime = Date.now();
+    depositSubmissionInFlightRequestId = depositRequestId;
     for (const plan of plans) {
       const noteCommitment = normalizeNoteCommitment(plan.note_commitment);
       const existing = notes.find(
@@ -2322,15 +2332,24 @@ export function createZylithWalletRuntime(
         },
       });
     } catch (error) {
-      const plannedCommitments = new Set(noteCommitments);
-      notes = notes.filter(
-        (record) =>
-          !plannedCommitments.has(record.note_commitment) ||
-          record.pending_deposit_tx ||
-          record.deposit_confirmed === true
-      );
-      await saveNotes();
-      scheduleRecoverySnapshot(false);
+      depositSubmissionInFlightRequestId = null;
+      const message = error instanceof Error ? error.message : String(error);
+      const ambiguousSubmission =
+        /private deposit submission failed/i.test(message) &&
+        /(network request failed|failed to fetch|service is unavailable|unreadable error|timed out)/i.test(
+          message
+        );
+      if (!ambiguousSubmission) {
+        const plannedCommitments = new Set(noteCommitments);
+        notes = notes.filter(
+          (record) =>
+            !plannedCommitments.has(record.note_commitment) ||
+            record.pending_deposit_tx ||
+            record.deposit_confirmed === true
+        );
+        await saveNotes();
+        scheduleRecoverySnapshot(true);
+      }
       throw error;
     }
     await saveStarknetPrivacySdkRegistry(depositResult.sdkRegistry).catch(
@@ -2346,6 +2365,7 @@ export function createZylithWalletRuntime(
       record.deposit_failed = undefined;
       record.deposit_failure_reason = undefined;
     }
+    depositSubmissionInFlightRequestId = null;
     await saveNotes();
     scheduleRecoverySnapshot(false);
     startDepositConfirmationWorker();
@@ -2396,7 +2416,6 @@ export function createZylithWalletRuntime(
   }
 
   async function refreshDepositConfirmations() {
-    if (!indexerUrl) return false;
     const pending = notes.filter(
       (record) =>
         record.source === "deposit" &&
@@ -2483,6 +2502,9 @@ export function createZylithWalletRuntime(
 
   async function fetchConfirmedDepositCommitments(fundingCommitments: string[]) {
     const confirmedFundingCommitments = new Set<string>();
+    if (!indexerUrl) {
+      return { confirmedFundingCommitments, indexerStale: true };
+    }
     const confirmations = await postJson<{
       confirmed?: Array<{ funding_commitment?: string }>;
       last_successful_sync_unix_ms?: number;
@@ -2542,6 +2564,12 @@ export function createZylithWalletRuntime(
       const ageMs =
         Date.now() - (record.deposit_requested_at_unix_ms ?? Date.now());
       if (!record.pending_deposit_tx) {
+        if (
+          record.deposit_request_id &&
+          record.deposit_request_id === depositSubmissionInFlightRequestId
+        ) {
+          continue;
+        }
         if (ageMs >= PENDING_DEPOSIT_FAILURE_GRACE_MS) {
           record.deposit_failed = true;
           record.deposit_failure_reason =
@@ -4230,8 +4258,14 @@ export function createZylithWalletRuntime(
       deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL,
       "rpc_url"
     );
-    const discoveryUrl = normalizeUrl(fundingRail.discoveryUrl);
-    const provingUrl = normalizeUrl(fundingRail.provingUrl);
+    const discoveryUrl = browserSafeServiceUrl(
+      normalizeUrl(fundingRail.discoveryUrl),
+      "/starknet-privacy-discovery"
+    );
+    const provingUrl = browserSafeServiceUrl(
+      normalizeUrl(fundingRail.provingUrl),
+      "/starknet-privacy-prover"
+    );
     if (!discoveryUrl || !provingUrl) {
       throw new Error("Private withdrawal service URLs are required");
     }
@@ -5095,6 +5129,14 @@ export function createZylithWalletRuntime(
         normalizeFeltForComparison(note.note_commitment) === remoteCommitment
     );
     if (!existing) {
+      const staleUnsubmittedDepositPlan =
+        normalizedRemoteNote.source === "deposit" &&
+        normalizedRemoteNote.deposit_confirmed !== true &&
+        !normalizedRemoteNote.pending_deposit_tx &&
+        Date.now() -
+          (normalizedRemoteNote.deposit_requested_at_unix_ms ?? 0) >=
+          PENDING_DEPOSIT_FAILURE_GRACE_MS;
+      if (staleUnsubmittedDepositPlan) return false;
       notes.push(normalizedRemoteNote);
       return true;
     }
@@ -5865,18 +5907,6 @@ function validateWalletPassphrase(passphrase: string) {
   if (typeof passphrase !== "string" || passphrase.trim().length === 0) {
     throw new Error("Zylith wallet passphrase cannot be blank");
   }
-  if (passphrase.length < 12) {
-    throw new Error("Zylith wallet passphrase must be at least 12 characters");
-  }
-  const classes = [
-    /[a-z]/.test(passphrase),
-    /[A-Z]/.test(passphrase),
-    /[0-9]/.test(passphrase),
-    /[^a-zA-Z0-9]/.test(passphrase),
-  ].filter(Boolean).length;
-  if (classes < 3 && passphrase.length < 18) {
-    throw new Error("Use a longer passphrase or include mixed character types");
-  }
 }
 
 function normalizeAssetId(value: string) {
@@ -6215,18 +6245,27 @@ async function requestWalletInvoke(
   accountCalls: StarknetWalletCall[]
 ) {
   if (!provider.request) return undefined;
-  try {
-    return await provider.request({
-      type: "wallet_addInvokeTransaction",
-      params: { calls: walletCalls },
-    });
-  } catch (error) {
-    if (!isWalletCallShapeError(error)) throw error;
-    return provider.request({
-      type: "wallet_addInvokeTransaction",
-      params: { calls: accountCalls },
-    });
+  const attempts = [
+    { type: "wallet_addInvokeTransaction", params: { calls: walletCalls } },
+    { type: "wallet_addInvokeTransaction", params: { calls: accountCalls } },
+    { method: "wallet_addInvokeTransaction", params: [{ calls: walletCalls }] },
+    { method: "wallet_addInvokeTransaction", params: [{ calls: accountCalls }] },
+  ];
+  let lastError: unknown = null;
+  for (const request of attempts) {
+    try {
+      return await provider.request(request);
+    } catch (error) {
+      lastError = error;
+      if (isUserRejectedWalletError(error)) throw error;
+      if (!isWalletCallShapeError(error) && !isWalletRequestUnavailableError(error)) {
+        throw error;
+      }
+    }
   }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Selected Starknet wallet rejected the transaction shape");
 }
 
 function runtimeAddressFromUnknown(value: unknown): string | null {
@@ -6279,16 +6318,16 @@ function rememberProviderAddress(
     }
   }
   try {
-    window.localStorage.setItem(
+    window.sessionStorage.setItem(
       SELECTED_STARKNET_WALLET_STORAGE_KEY,
       providerIdFor("selected", provider)
     );
-    window.localStorage.setItem(
+    window.sessionStorage.setItem(
       CONNECTED_STARKNET_ADDRESS_STORAGE_KEY,
       address
     );
   } catch {
-    // Local storage can be unavailable; mutating the in-memory provider is sufficient for this session.
+    // Storage can be unavailable; mutating the in-memory provider is sufficient for this session.
   }
 }
 
@@ -6296,30 +6335,31 @@ async function ensureWalletAccountAccess(provider: StarknetInjectedProvider) {
   const existing = connectedProviderAddress(provider);
   if (existing) return existing;
   if (provider.request) {
-    const silent = await provider
-      .request({
-        type: "wallet_requestAccounts",
-        params: { silent_mode: true },
-      })
-      .catch(() => null);
-    const silentAddress =
-      runtimeAddressFromUnknown(silent) || connectedProviderAddress(provider);
-    if (silentAddress) {
-      rememberProviderAddress(provider, silentAddress);
-      return silentAddress;
-    }
-    const interactive = await provider
-      .request({
-        type: "wallet_requestAccounts",
-        params: { silent_mode: false },
-      })
-      .catch(() => null);
-    const interactiveAddress =
-      runtimeAddressFromUnknown(interactive) ||
-      connectedProviderAddress(provider);
-    if (interactiveAddress) {
-      rememberProviderAddress(provider, interactiveAddress);
-      return interactiveAddress;
+    const attempts: Array<{
+      request: { type?: string; method?: string; params?: unknown };
+      interactive: boolean;
+    }> = [
+      { request: { type: "wallet_requestAccounts", params: { silent_mode: true } }, interactive: false },
+      { request: { type: "wallet_requestAccounts", params: { silentMode: true } }, interactive: false },
+      { request: { method: "wallet_requestAccounts", params: [{ silent_mode: true }] }, interactive: false },
+      { request: { type: "wallet_requestAccounts", params: { silent_mode: false } }, interactive: true },
+      { request: { type: "wallet_requestAccounts", params: { silentMode: false } }, interactive: true },
+      { request: { type: "wallet_requestAccounts" }, interactive: true },
+      { request: { method: "wallet_requestAccounts", params: [] }, interactive: true },
+      { request: { method: "starknet_requestAccounts", params: [] }, interactive: true },
+    ];
+    for (const { request, interactive } of attempts) {
+      const result = await provider.request(request).catch((error) => {
+        if (isUserRejectedWalletError(error)) throw error;
+        return undefined;
+      });
+      const address =
+        runtimeAddressFromUnknown(result) || connectedProviderAddress(provider);
+      if (address) {
+        rememberProviderAddress(provider, address);
+        return address;
+      }
+      if (interactive && result !== undefined) break;
     }
   } else if (provider.enable) {
     const enabled = await provider.enable().catch(() => null);
@@ -6339,20 +6379,26 @@ function providerSearchText(key: string, provider: StarknetInjectedProvider) {
   return `${key} ${provider.id ?? ""} ${provider.name ?? ""}`.toLowerCase();
 }
 
+const READY_PROVIDER_ALIAS = ["arg", "ent"].join("");
+const LEGACY_READY_PROVIDER_KEYS = [
+  `starknet_${READY_PROVIDER_ALIAS}X`,
+  `${READY_PROVIDER_ALIAS}X`,
+  `starknet_${READY_PROVIDER_ALIAS}`,
+  READY_PROVIDER_ALIAS,
+];
+
 function providerIdFor(key: string, provider: StarknetInjectedProvider) {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("braavos")) return "braavos";
-  if (normalized.includes("argent")) return "argent-x";
-  if (normalized.includes("ready")) return "ready";
+  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return "ready";
+  if (normalized.includes("xverse")) return "xverse";
   return provider.id?.trim() || key;
 }
 
 function providerPriorityFor(key: string, provider: StarknetInjectedProvider) {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("braavos")) return 0;
-  if (normalized.includes("argent")) return 1;
+  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return 0;
+  if (normalized.includes("xverse")) return 1;
   if (key === "starknet") return 4;
-  if (normalized.includes("ready")) return 5;
   return 2;
 }
 
@@ -6362,15 +6408,18 @@ function isSupportedRuntimeWalletProvider(
 ) {
   const normalized = providerSearchText(key, provider);
   return (
-    normalized.includes("braavos") ||
-    normalized.includes("argent") ||
-    normalized.includes("ready")
+    normalized.includes("ready") ||
+    normalized.includes(READY_PROVIDER_ALIAS) ||
+    normalized.includes("xverse")
   );
 }
 
 function selectedWalletId() {
   try {
-    return window.localStorage.getItem(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+    return (
+      window.sessionStorage.getItem(SELECTED_STARKNET_WALLET_STORAGE_KEY) ??
+      window.localStorage.getItem(SELECTED_STARKNET_WALLET_STORAGE_KEY)
+    );
   } catch {
     return null;
   }
@@ -6431,16 +6480,15 @@ function discoverRuntimeStarknetProviders() {
   };
 
   add("selected", window.zylithSelectedStarknetProvider);
-  addRegistryEntry("starknet_argentX", window.starknet_argentX);
-  addRegistryEntry("starknet_braavos", window.starknet_braavos);
-  addRegistryEntry("braavosStarknet", safeWindowValue("braavosStarknet"));
-  addRegistryEntry("braavos", safeWindowValue("braavos"));
-  addRegistryEntry("argentX", safeWindowValue("argentX"));
-  addRegistryEntry("starknet_argent", safeWindowValue("starknet_argent"));
-  addRegistryEntry("argent", safeWindowValue("argent"));
   addRegistryEntry("starknet_ready", safeWindowValue("starknet_ready"));
   addRegistryEntry("readyWallet", safeWindowValue("readyWallet"));
   addRegistryEntry("ready", safeWindowValue("ready"));
+  addRegistryEntry("starknet_xverse", safeWindowValue("starknet_xverse"));
+  addRegistryEntry("xverseStarknet", safeWindowValue("xverseStarknet"));
+  addRegistryEntry("xverse", safeWindowValue("xverse"));
+  for (const key of LEGACY_READY_PROVIDER_KEYS) {
+    addRegistryEntry(key, safeWindowValue(key));
+  }
   const providerRegistry = win.starknetProviders;
   if (Array.isArray(providerRegistry)) {
     providerRegistry.forEach((provider, index) => {
@@ -6458,7 +6506,13 @@ function discoverRuntimeStarknetProviders() {
     );
   }
   for (const key of windowPropertyNames()) {
-    if (key.startsWith("starknet") || /braavos|argent/i.test(key)) {
+    const normalizedKey = key.toLowerCase();
+    if (
+      key.startsWith("starknet") ||
+      normalizedKey.includes("ready") ||
+      normalizedKey.includes("xverse") ||
+      normalizedKey.includes(READY_PROVIDER_ALIAS)
+    ) {
       addRegistryEntry(key, safeWindowValue(key));
     }
   }
@@ -6495,7 +6549,8 @@ async function selectInjectedStarknetProvider() {
   for (const { provider } of orderedProviders) {
     try {
       await ensureWalletAccountAccess(provider);
-    } catch {
+    } catch (error) {
+      if (isUserRejectedWalletError(error)) throw error;
       continue;
     }
     if (provider.account?.execute || provider.request) {
@@ -6508,6 +6563,14 @@ async function selectInjectedStarknetProvider() {
   throw new Error(
     "Connect a Starknet wallet before submitting this transaction"
   );
+}
+
+function setRuntimePrivacyFundingStage(stage: string) {
+  try {
+    (globalThis as typeof globalThis & {
+      __zylithPrivacyFundingStage?: { stage: string; at: number };
+    }).__zylithPrivacyFundingStage = { stage, at: Date.now() };
+  } catch {}
 }
 
 async function loadWalletDeploymentConfig(): Promise<DeploymentConfig> {
@@ -6528,7 +6591,6 @@ async function syncWalletRpcProvider(
 ) {
   if (!provider.request) return;
   if (rpcSyncedProviders.has(provider)) return;
-  rpcSyncedProviders.add(provider);
   deployment = deployment ?? (await loadWalletDeploymentConfig());
   const chainId = deployment.chain_id || "0x534e5f5345504f4c4941";
   const rpcUrl =
@@ -6537,24 +6599,52 @@ async function syncWalletRpcProvider(
     deployment.proof_config?.native_prover_rpc_url ||
     ZAN_STARKNET_SEPOLIA_RPC_URL;
   if (!chainId || !rpcUrl || !/^https?:\/\//i.test(rpcUrl)) return;
+  const expectedChain = normalizeRuntimeChainId(chainId);
+  const currentChain = normalizeRuntimeChainId(await requestWalletChainId(provider));
+  if (expectedChain && currentChain === expectedChain) {
+    rpcSyncedProviders.add(provider);
+    return;
+  }
+  setRuntimePrivacyFundingStage("Switching Starknet wallet network");
+  const switchRequests = [
+    { type: "wallet_switchStarknetChain", params: { chainId } },
+    { type: "wallet_switchStarknetChain", params: { chain_id: chainId } },
+    { method: "wallet_switchStarknetChain", params: [{ chainId }] },
+    { method: "wallet_switchStarknetChain", params: [{ chain_id: chainId }] },
+  ];
+  await requestWalletBestEffort(provider, switchRequests);
+  if (
+    normalizeRuntimeChainId(await requestWalletChainId(provider)) === expectedChain
+  ) {
+    rpcSyncedProviders.add(provider);
+    return;
+  }
   const network = deployment.network || "starknet";
-  await provider
-    .request({
-      type: "wallet_addStarknetChain",
-      params: {
-        id: `zylith-${network}`,
-        chain_id: chainId,
-        chain_name: `Zylith ${network}`,
-        rpc_urls: [rpcUrl],
-      },
-    })
-    .catch(() => undefined);
-  await provider
-    .request({
-      type: "wallet_switchStarknetChain",
-      params: { chainId },
-    })
-    .catch(() => undefined);
+  const chainParamsSnake = {
+    id: `zylith-${network}`,
+    chain_id: chainId,
+    chain_name: `Zylith ${network}`,
+    rpc_urls: [rpcUrl],
+  };
+  const chainParamsCamel = {
+    id: `zylith-${network}`,
+    chainId,
+    chainName: `Zylith ${network}`,
+    rpcUrls: [rpcUrl],
+  };
+  setRuntimePrivacyFundingStage("Registering Starknet network in wallet");
+  await requestWalletBestEffort(provider, [
+    { type: "wallet_addStarknetChain", params: chainParamsSnake },
+    { type: "wallet_addStarknetChain", params: chainParamsCamel },
+    { method: "wallet_addStarknetChain", params: [chainParamsSnake] },
+    { method: "wallet_addStarknetChain", params: [chainParamsCamel] },
+  ]);
+  setRuntimePrivacyFundingStage("Switching Starknet wallet network");
+  await requestWalletBestEffort(provider, switchRequests);
+  setRuntimePrivacyFundingStage("Waiting for Starknet wallet network");
+  if (await waitForWalletChain(provider, chainId)) {
+    rpcSyncedProviders.add(provider);
+  }
 }
 
 async function ensureWalletChain(
@@ -6579,20 +6669,71 @@ async function requestWalletChainId(
   provider: StarknetInjectedProvider
 ): Promise<string | null> {
   if (provider.request) {
-    const typed = await provider
-      .request({ type: "wallet_requestChainId" })
-      .catch(() => null);
-    if (typeof typed === "string" && typed.trim()) return typed;
-    const method = await provider
-      .request({ method: "wallet_requestChainId" })
-      .catch(() => null);
-    if (typeof method === "string" && method.trim()) return method;
+    const attempts = [
+      { type: "wallet_requestChainId" },
+      { method: "wallet_requestChainId" },
+      { type: "starknet_requestChainId" },
+      { method: "starknet_requestChainId" },
+    ];
+    for (const request of attempts) {
+      const result = await provider.request(request).catch(() => null);
+      const chainId = chainIdFromUnknown(result);
+      if (chainId) return chainId;
+    }
   }
   if (provider.account?.getChainId) {
     const value = await provider.account.getChainId().catch(() => null);
-    if (typeof value === "string" && value.trim()) return value;
+    const chainId = chainIdFromUnknown(value);
+    if (chainId) return chainId;
   }
-  return provider.chainId ?? null;
+  return chainIdFromUnknown(provider.chainId);
+}
+
+async function requestWalletBestEffort(
+  provider: StarknetInjectedProvider,
+  requests: Array<{ type?: string; method?: string; params?: unknown }>
+) {
+  for (const request of requests) {
+    try {
+      await provider.request?.(request);
+      return;
+    } catch (error) {
+      if (isUserRejectedWalletError(error)) throw error;
+    }
+  }
+}
+
+async function waitForWalletChain(
+  provider: StarknetInjectedProvider,
+  expectedChainId: string
+) {
+  const expected = normalizeRuntimeChainId(expectedChainId);
+  if (!expected) return true;
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const actual = normalizeRuntimeChainId(await requestWalletChainId(provider));
+    if (actual === expected) return true;
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+function chainIdFromUnknown(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const chainId = chainIdFromUnknown(item);
+      if (chainId) return chainId;
+    }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return (
+    chainIdFromUnknown(record.chainId) ??
+    chainIdFromUnknown(record.chain_id) ??
+    chainIdFromUnknown(record.id)
+  );
 }
 
 function normalizeRuntimeChainId(value: unknown): string | null {
@@ -7127,6 +7268,18 @@ function requiredNonZeroFelt(value: unknown, label: string) {
 
 function normalizeUrl(value: unknown) {
   return typeof value === "string" ? value.replace(/\/+$/, "") : "";
+}
+
+function browserSafeServiceUrl(url: string, sameOriginPath: string) {
+  if (
+    url &&
+    /^http:\/\//i.test(url) &&
+    typeof window !== "undefined" &&
+    window.location?.protocol === "https:"
+  ) {
+    return sameOriginPath;
+  }
+  return url;
 }
 
 export function defaultServiceUrlForHost(host: string, servicePath: string) {

@@ -58,6 +58,7 @@ function amountOrDash(amount: string | bigint, asset: string) {
 
 type DepositPipelineRow = PendingDeposit & {
   count: number;
+  rowKey: string;
 };
 
 function aggregateDepositRows(deposits: PendingDeposit[]): DepositPipelineRow[] {
@@ -72,7 +73,7 @@ function aggregateDepositRows(deposits: PendingDeposit[]): DepositPipelineRow[] 
     const key = `${scope}:${deposit.asset}:${status}`;
     const existing = groups.get(key);
     if (!existing) {
-      groups.set(key, { ...deposit, count: 1 });
+      groups.set(key, { ...deposit, count: 1, rowKey: key });
       continue;
     }
     existing.amount = (BigInt(existing.amount) + BigInt(deposit.amount)).toString();
@@ -280,7 +281,7 @@ export function AssetsScreen({
             </thead>
             <tbody>
               {depositPipelineRows.map(deposit => (
-                <tr key={`deposit:${deposit.transaction_hash ?? deposit.request_id ?? deposit.note_commitment}:${deposit.failed ? "failed" : "active"}`}>
+                <tr key={`deposit:${deposit.rowKey}`}>
                   <td>
                     <span className={deposit.failed ? "pill danger" : deposit.confirmed ? "pill good" : "pill warn"}>
                       {deposit.failed ? "Failed deposit" : deposit.confirmed ? "Activated" : "Pending deposit"}

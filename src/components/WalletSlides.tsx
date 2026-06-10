@@ -16,6 +16,36 @@ import { settlementReadyAtMs } from "../domain/noteLifecycle";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 import type { WithdrawalRoutePreference } from "../domain/userPreferences";
 
+type PrivacyFundingStageSnapshot = {
+  stage?: unknown;
+  at?: unknown;
+};
+
+export function privacyFundingStageLabel(stage: string) {
+  const cleaned = stage
+    .replace(/^setup:\s*/i, "")
+    .replace(/^Private deposit\s*/i, "deposit ")
+    .replace(/^Private withdrawal\s*/i, "withdrawal ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+function currentPrivacyFundingStageLabel(sinceUnixMs = 0) {
+  const snapshot = (globalThis as typeof globalThis & {
+    __zylithPrivacyFundingStage?: PrivacyFundingStageSnapshot;
+  }).__zylithPrivacyFundingStage;
+  if (typeof snapshot?.stage !== "string") return "";
+  if (
+    sinceUnixMs > 0 &&
+    (typeof snapshot.at !== "number" || snapshot.at < sinceUnixMs)
+  ) {
+    return "";
+  }
+  return privacyFundingStageLabel(snapshot.stage);
+}
+
 export function WalletSlide({
   open,
   onClose,
@@ -211,7 +241,7 @@ export function WalletSlide({
 
         <div className="f-label" style={{ marginBottom: 6 }}>Starknet account</div>
         <div style={{ fontSize: 11, color: "var(--z-text-body)", lineHeight: 1.5, marginBottom: 10 }}>
-          Argent X or Braavos — used for deposits and withdrawals.
+          Ready X or Xverse — used for deposits and withdrawals.
         </div>
         {starknetAddress ? (
           <div className="wallet-connected-box">
@@ -254,7 +284,7 @@ export function WalletSlide({
             ) : (
               <div className="wallet-empty">
                 <strong>No Starknet wallet found</strong>
-                <span>Install or unlock Argent X or Braavos, then scan again.</span>
+                <span>Install or unlock Ready X or Xverse, then scan again.</span>
                 <button
                   type="button"
                   className="wallet-recover-link compact"
@@ -348,7 +378,7 @@ export function WalletSlide({
               </div>
             </div>
             <div className="slide-note">
-              Use at least 12 characters with mixed character types. This encrypts the local Zylith seed in this browser.
+              This passphrase encrypts the local Zylith seed in this browser.
             </div>
             <button
               className="slide-submit"
@@ -439,7 +469,7 @@ export function WalletSlide({
               </div>
             </div>
             <div className="slide-note">
-              Use at least 12 characters with mixed character types. This encrypts the recovered Zylith seed locally.
+              This passphrase encrypts the recovered Zylith seed locally.
             </div>
             <button
               className="slide-submit"
@@ -618,7 +648,23 @@ export function DepositSlide({
   const [amount, setAmount] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const [fundingStage, setFundingStage] = useState("");
   const wasOpenRef = useRef(false);
+  const depositStartedAtRef = useRef(0);
+
+  useEffect(() => {
+    if (!working) {
+      setFundingStage("");
+      return;
+    }
+    const update = () => {
+      const label = currentPrivacyFundingStageLabel(depositStartedAtRef.current);
+      if (label) setFundingStage(label);
+    };
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, [working]);
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
@@ -641,8 +687,10 @@ export function DepositSlide({
     if (!amount.trim()) { setError("Enter an amount"); return; }
     const atomicAmount = toAtomicStr(amount, asset);
     if (atomicAmount === "0") { setError("Enter a valid amount."); return; }
+    depositStartedAtRef.current = Date.now();
     setWorking(true);
     setError("");
+    setFundingStage("Preparing private deposit");
     try {
       await w.submitDepositViaWallet(asset, atomicAmount);
       setAmount("");
@@ -662,10 +710,9 @@ export function DepositSlide({
       </div>
       <div className="slide-body">
         {!starknetAddress && (
-          <div className="wallet-empty" style={{ marginBottom: 14 }}>
-            <strong>Connect Starknet wallet</strong>
-            <span>Deposits move public funds into notes and require a wallet signature.</span>
-            <button className="slide-submit" style={{ marginTop: 8 }} onClick={onOpenWallet}>
+          <div className="slide-inline-notice">
+            <span>Connect a Starknet wallet to deposit.</span>
+            <button type="button" className="slide-inline-action" onClick={onOpenWallet}>
               Connect wallet
             </button>
           </div>
@@ -702,6 +749,11 @@ export function DepositSlide({
         >
           {working ? "Depositing…" : starknetAddress ? `Deposit ${asset}` : "Connect wallet first"}
         </button>
+        {working && fundingStage && (
+          <div className="slide-note" style={{ marginTop: 10 }}>
+            {fundingStage}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -842,9 +894,6 @@ export function WithdrawSlide({
             {depositNotesNotWithdrawable.length} deposit note{depositNotesNotWithdrawable.length !== 1 ? "s are" : " is"} available in the private wallet but not directly withdrawable. Submit through settlement first, then withdraw the resulting settlement output.
           </div>
         )}
-        <div className="slide-note">
-          This creates a STRK20 private open note for this wallet instead of transferring to a public L2 recipient. STRK20 still exposes token, amount, open-note id, and claim timing. Staged exits can be retried if the STRK20 claim transaction fails.
-        </div>
         {!hostedWithdrawalAvailable && (
           <div className="slide-note warn">
             Withdrawals are not enabled for this deployment.

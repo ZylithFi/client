@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyStrk20ExitClaimReceipt,
   applyPendingConsolidationRoot,
+  createZylithWalletRuntime,
   defaultServiceUrlForHost,
   firstRenewalSlotEpoch,
   hasBatchSubmissionSafetyWindow,
@@ -14,6 +15,64 @@ import {
   type PendingConsolidationRecord,
   type NormalizedMakerCurvePoint,
 } from "./zylithWalletRuntime";
+
+beforeEach(() => {
+  const storage = new Map<string, string>();
+  const localStorageMock = {
+    getItem: vi.fn((key: string) => storage.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => {
+      storage.set(key, value);
+    }),
+    removeItem: vi.fn((key: string) => {
+      storage.delete(key);
+    }),
+    clear: vi.fn(() => {
+      storage.clear();
+    }),
+  };
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: localStorageMock,
+  });
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: localStorageMock,
+  });
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input) === "/deployment.json") {
+      return {
+        ok: true,
+        json: async () => ({
+          chain_id: "0x534e5f5345504f4c4941",
+          contracts: {
+            auction_verifier: "0xverifier",
+            privacy_deposit_bridge: "0xbridge",
+            shielded_asset_adapter: "0xadapter",
+          },
+          funding: {
+            primary: "starknet_privacy",
+            starknet_privacy: {
+              privacy_pool: "0xpool",
+              bridge_adapter: "0xbridge",
+              discovery_url: "https://discovery.test",
+              proving_url: "https://prover.test",
+              shielded_asset_adapter: "0xadapter",
+            },
+          },
+        }),
+      };
+    }
+    return {
+      ok: false,
+      json: async () => ({}),
+      text: async () => "",
+    };
+  });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: fetchMock,
+  });
+});
 
 describe("service URL resolution", () => {
   it("falls back to the production API origin on zylith.fi hosts", () => {
@@ -52,6 +111,25 @@ describe("wallet runtime module loading", () => {
         true
       )
     ).toBe(true);
+  });
+});
+
+describe("wallet passphrases", () => {
+  it("accepts any nonblank passphrase", async () => {
+    const runtime = createZylithWalletRuntime(mockWalletCore());
+
+    await expect(runtime.createWallet("x")).resolves.toBe(true);
+
+    expect(runtime.hasVault()).toBe(true);
+    runtime.lock();
+  });
+
+  it("rejects only blank passphrases", async () => {
+    const runtime = createZylithWalletRuntime(mockWalletCore());
+
+    await expect(runtime.createWallet("")).rejects.toThrow(
+      "Zylith wallet passphrase cannot be blank"
+    );
   });
 });
 
@@ -350,4 +428,20 @@ function notePreimage(asset: string, amount: string): LocalNoteRecord["note"] {
     nonce: 1,
     metadata_commitment: "0xmeta",
   };
+}
+
+function mockWalletCore() {
+  const seedHex = "11".repeat(32);
+  return {
+    zylith_wallet_generate_mnemonic: () => "zylith test seed phrase",
+    zylith_wallet_mnemonic_to_seed_hex: () => seedHex,
+    zylith_wallet_seed_hex_to_mnemonic: () => "zylith test seed phrase",
+    zylith_wallet_derive_public_config: () =>
+      JSON.stringify({
+        account_id: "acct-test",
+        spend_authority: "0xspend",
+        note_recognition_public_key: "0xowner",
+        withdraw_authority: "0xwithdraw",
+      }),
+  } as never;
 }

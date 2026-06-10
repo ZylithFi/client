@@ -61,6 +61,15 @@ function privateDepositErrorMessage(message: string): string | null {
   if (/Connected Starknet wallet changed/i.test(message)) {
     return "Connected wallet changed during deposit. Reconnect the wallet you started with and retry.";
   }
+  if (/wallet must be deployed before depositing/i.test(message)) {
+    return "Connected Starknet wallet must be activated with one outgoing transaction before depositing.";
+  }
+  if (/PaymasterV2Error|Paymaster error\s*\d+|TRANSACTION_EXECUTION_ERROR/i.test(message)) {
+    return "The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.";
+  }
+  if (/does not match paymaster configuration|not allowlisted|not supported by paymaster/i.test(message)) {
+    return "The app deployment configuration does not match the deposit relay. This deployment needs a configuration fix before deposits can work.";
+  }
   if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow|Connected wallet balance is below/i.test(message)) {
     return "Connected wallet does not have enough balance for this deposit.";
   }

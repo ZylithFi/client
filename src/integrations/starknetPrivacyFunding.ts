@@ -170,12 +170,13 @@ export function privacyBridgeStrk20ExitClaimInvokeCall(input: {
 const STARK_FIELD_PRIME =
   3618502788666131213697322783095070105623107215331596699973092056135872020481n;
 const STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS = 10;
-export const STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS = [16, 24, 32, 48, 64] as const;
+export const STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS = [10, 16, 24, 32, 48] as const;
 const STARKNET_PRIVACY_REPLAY_GUARD_ATOMS = 1n;
 const STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT = (1n << 128n) - 1n;
 const STARKNET_PRIVACY_SETUP_READY_TIMEOUT_MS = 180_000;
 const STARKNET_PRIVACY_SETUP_READY_POLL_MS = 3_000;
 const STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS = 8 * 60_000;
+const STARKNET_PRIVACY_WALLET_EXECUTE_TIMEOUT_MS = 3 * 60_000;
 
 export async function warmUpStarknetPrivacyFunding(
   input: WarmUpStarknetPrivacyFundingInput,
@@ -271,11 +272,9 @@ export async function submitPrivacyBridgeDeposit(
     serviceBaseUrl(input.discoveryUrl),
     input.privacyPoolAddress,
   );
-  await runFundingStage("Private deposit service check failed", async () => {
-    if (!(await discoveryProvider.isHealthy())) {
-      throw new Error("Discovery service is not healthy");
-    }
-  });
+  await runFundingStage("Private deposit service check failed", () =>
+    requireHealthyDiscovery(discoveryProvider)
+  );
   const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
   let lastRetryableError: unknown = null;
   for (let attempt = 0; attempt < proofDelayScheduleBlocks.length; attempt += 1) {
@@ -400,11 +399,9 @@ export async function submitPrivacyOpenNoteWithdrawal(
     serviceBaseUrl(input.discoveryUrl),
     input.privacyPoolAddress,
   );
-  await runFundingStage("Private withdrawal service check failed", async () => {
-    if (!(await discoveryProvider.isHealthy())) {
-      throw new Error("Discovery service is not healthy");
-    }
-  });
+  await runFundingStage("Private withdrawal service check failed", () =>
+    requireHealthyDiscovery(discoveryProvider)
+  );
   const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
   let lastRetryableError: unknown = null;
   let claimedOpenNoteId = "";
@@ -510,6 +507,16 @@ export async function submitPrivacyOpenNoteWithdrawal(
   throw lastRetryableError ?? new Error("Private withdrawal proof submission failed");
 }
 
+async function requireHealthyDiscovery(discoveryProvider: IndexerDiscoveryProvider) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (await discoveryProvider.isHealthy().catch(() => false)) return;
+    if (attempt < 4) {
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+    }
+  }
+  throw new Error("Discovery service is not healthy");
+}
+
 async function runFundingStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {
   setFundingStage(stage);
   try {
@@ -526,10 +533,16 @@ async function runFundingStage<T>(stage: string, operation: () => Promise<T>): P
 }
 
 function summarizeFundingError(error: unknown) {
-  const message = sanitizeRpcMessage(errorMessage(error));
+  const message = unwrapJsonErrorBody(sanitizeRpcMessage(errorMessage(error)));
   if (!message) return "No error detail was returned.";
   if (/^Failed while /i.test(message)) {
     return message.slice(0, 360);
+  }
+  if (/does not match paymaster configuration|not allowlisted|not supported by paymaster/i.test(message)) {
+    return `Deposit relay rejected the request: ${message.slice(0, 200)}. The app deployment configuration does not match the relay.`;
+  }
+  if (/PaymasterV2Error|Paymaster error\s*\d+|TRANSACTION_EXECUTION_ERROR/i.test(message)) {
+    return "The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.";
   }
   if (/Transfer allowance exceeded/i.test(message)) {
     return "Token approval was lower than the required privacy-pool deposit amount.";
@@ -595,6 +608,19 @@ function summarizeFundingError(error: unknown) {
   return "A required service returned an unreadable error.";
 }
 
+function unwrapJsonErrorBody(message: string) {
+  const trimmed = message.trim();
+  if (!/^\{/.test(trimmed)) return message;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    for (const key of ["error", "message", "detail", "reason"]) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  } catch {}
+  return message;
+}
+
 function assertNoSdkPrivacyWarnings(warnings: Warning[]) {
   if (warnings.length === 0) return;
   const detail = warnings
@@ -633,6 +659,12 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     if (activeSourceOwner !== normalizeAddress(input.sourceOwner)) {
       throw new Error("Connected Starknet wallet changed during deposit");
     }
+    const sourceAccountDeployed = await withFundingSetupStep("checking connected Starknet wallet deployment", () =>
+      isClassDeployed(input.rpcProvider, activeSourceOwner)
+    );
+    if (!sourceAccountDeployed) {
+      throw new Error("Connected Starknet wallet must be deployed before depositing.");
+    }
     const sourceBalance = await withFundingSetupStep("reading connected wallet token balance", () =>
       readTokenBalance(
         input.rpcProvider,
@@ -651,7 +683,11 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
       calldata: [input.account.address, ...u256Calldata(transferAmount)],
     };
     const result = await withFundingSetupStep("funding embedded signer from connected wallet", () =>
-      executeWalletCall(input.provider, transferCall)
+      withTimeout(
+        executeWalletCall(input.provider, transferCall),
+        STARKNET_PRIVACY_WALLET_EXECUTE_TIMEOUT_MS,
+        "Wallet approval timed out before the connected Starknet wallet returned a transaction hash.",
+      )
     );
     const txHash = transactionHashFromResult(result);
     if (!txHash) {
@@ -823,6 +859,15 @@ function setFundingStage(stage: string) {
 }
 
 async function executeWalletCall(provider: StarknetProviderLike, call: Call) {
+  if (typeof provider.account?.execute === "function") {
+    try {
+      return await provider.account.execute.call(provider.account, [call]);
+    } catch (error) {
+      if (isUserRejected(error)) throw error;
+      if (!isWalletCallShapeError(error)) throw error;
+      return provider.account.execute.call(provider.account, call);
+    }
+  }
   if (typeof provider.request === "function") {
     try {
       const result = await requestWalletInvoke(provider, call);
@@ -834,14 +879,6 @@ async function executeWalletCall(provider: StarknetProviderLike, call: Call) {
       ) {
         throw error;
       }
-    }
-  }
-  if (typeof provider.account?.execute === "function") {
-    try {
-      return await provider.account.execute.call(provider.account, [call]);
-    } catch (error) {
-      if (!isWalletCallShapeError(error)) throw error;
-      return provider.account.execute.call(provider.account, call);
     }
   }
   throw new Error("Selected Starknet wallet cannot approve private deposits");
@@ -858,18 +895,25 @@ async function requestWalletInvoke(provider: StarknetProviderLike, call: Call) {
     entrypoint: call.entrypoint,
     calldata: call.calldata ?? [],
   };
-  try {
-    return await provider.request?.({
-      type: "wallet_addInvokeTransaction",
-      params: { calls: [walletRequestCall] },
-    });
-  } catch (error) {
-    if (!isWalletCallShapeError(error)) throw error;
-    return provider.request?.({
-      type: "wallet_addInvokeTransaction",
-      params: { calls: [accountCall] },
-    });
+  const attempts = [
+    { type: "wallet_addInvokeTransaction", params: { calls: [walletRequestCall] } },
+    { type: "wallet_addInvokeTransaction", params: { calls: [accountCall] } },
+    { method: "wallet_addInvokeTransaction", params: [{ calls: [walletRequestCall] }] },
+    { method: "wallet_addInvokeTransaction", params: [{ calls: [accountCall] }] },
+  ];
+  let lastError: unknown = null;
+  for (const request of attempts) {
+    try {
+      return await provider.request?.(request);
+    } catch (error) {
+      lastError = error;
+      if (isUserRejected(error)) throw error;
+      if (!isWalletCallShapeError(error) && !isWalletRequestUnavailableError(error)) {
+        throw error;
+      }
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error("Selected Starknet wallet rejected the deposit transaction shape");
 }
 
 async function readTokenAllowance(
@@ -878,11 +922,11 @@ async function readTokenAllowance(
   owner: string,
   spender: string,
 ) {
-  const result = await provider.callContract({
+  const result = await withRpcRetry(() => provider.callContract({
     contractAddress: tokenAddress,
     entrypoint: "allowance",
     calldata: [owner, spender],
-  });
+  }));
   return decodeU256(result);
 }
 
@@ -891,12 +935,27 @@ async function readTokenBalance(
   tokenAddress: string,
   owner: string,
 ) {
-  const result = await provider.callContract({
+  const result = await withRpcRetry(() => provider.callContract({
     contractAddress: tokenAddress,
     entrypoint: "balance_of",
     calldata: [owner],
-  });
+  }));
   return decodeU256(result);
+}
+
+async function withRpcRetry<T>(operation: () => Promise<T>, attempts = 3): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 async function submitProofBearingCall(input: {
@@ -1050,7 +1109,7 @@ function u256Calldata(value: bigint) {
 }
 
 async function provingBlock(provider: RpcProvider, minDelayBlocks: number) {
-  const latest = await provider.getBlockNumber();
+  const latest = await withRpcRetry(() => provider.getBlockNumber());
   return Math.max(0, latest - Math.max(0, minDelayBlocks));
 }
 
@@ -1062,8 +1121,13 @@ async function waitForStateAndProvingDelay(
 ) {
   const deadline = Date.now() + STARKNET_PRIVACY_SETUP_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (await isReady()) {
-      const visibleBlock = await provider.getBlockNumber();
+    if (await isReady().catch(() => false)) {
+      const visibleBlock = await provider.getBlockNumber().catch(() => null);
+      if (visibleBlock === null) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, STARKNET_PRIVACY_SETUP_READY_POLL_MS));
+        continue;
+      }
       await waitForBlock(
         provider,
         visibleBlock + Math.max(0, minProvingDelayBlocks),
@@ -1098,8 +1162,8 @@ async function waitForBlock(
     if (Date.now() > deadline) {
       throw new Error(`Timed out waiting for ${label} proving delay`);
     }
-    const latest = await provider.getBlockNumber();
-    if (latest >= targetBlock) return;
+    const latest = await provider.getBlockNumber().catch(() => null);
+    if (latest !== null && latest >= targetBlock) return;
     await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
 }
@@ -1207,18 +1271,26 @@ async function resolveConnectedStarknetAddress(provider: StarknetProviderLike) {
 
 async function requestWalletAccounts(provider: StarknetProviderLike, silent: boolean) {
   if (!provider.request) return null;
-  const params = { silent_mode: silent };
-  const typed = await provider.request({
-    type: "wallet_requestAccounts",
-    params,
-  }).catch(() => null);
-  const typedAddress = addressFromUnknown(typed);
-  if (typedAddress) return typedAddress;
-  const method = await provider.request({
-    method: "wallet_requestAccounts",
-    params,
-  }).catch(() => null);
-  return addressFromUnknown(method);
+  const attempts = [
+    { type: "wallet_requestAccounts", params: { silent_mode: silent } },
+    { type: "wallet_requestAccounts", params: { silentMode: silent } },
+    { method: "wallet_requestAccounts", params: [{ silent_mode: silent }] },
+    ...(silent
+      ? []
+      : [
+          { method: "wallet_requestAccounts", params: [] },
+          { method: "starknet_requestAccounts", params: [] },
+        ]),
+  ];
+  for (const request of attempts) {
+    const result = await provider.request(request).catch((error) => {
+      if (isUserRejected(error)) throw error;
+      return null;
+    });
+    const address = addressFromUnknown(result);
+    if (address) return address;
+  }
+  return null;
 }
 
 async function derivePrivacyViewingKey(seedHex: string) {

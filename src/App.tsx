@@ -1152,7 +1152,7 @@ export default function App() {
   const [openSlide, setOpenSlide] = useState<
     "wallet" | "deposit" | "withdraw" | "recovery" | null
   >(null);
-  const [slideAsset, setSlideAsset] = useState("USDC");
+  const [slideAsset, setSlideAsset] = useState("STRK");
   const [claimNoteCommitment, setClaimNoteCommitment] = useState<string | null>(
     null
   );

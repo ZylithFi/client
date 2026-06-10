@@ -10,7 +10,7 @@ import {
 
 describe("starknet privacy proof delay schedule", () => {
   it("retries with monotonically older proof blocks", () => {
-    expect(STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS[0]).toBeGreaterThanOrEqual(16);
+    expect(STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS[0]).toBe(10);
     for (let i = 1; i < STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS.length; i += 1) {
       expect(STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS[i]).toBeGreaterThan(
         STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS[i - 1],

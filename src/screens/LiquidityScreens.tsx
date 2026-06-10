@@ -1905,7 +1905,6 @@ export function LiquidityAnalyticsScreen({
     <div className="workspace-page liquidity-page">
       <div className="page-hd">
         <div className="page-title-block">
-          <span className="page-eyebrow">Liquidity</span>
           <span className="page-title">ANALYTICS</span>
         </div>
         <div className="tca-filter">
