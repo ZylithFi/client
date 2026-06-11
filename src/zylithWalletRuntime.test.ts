@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  attachOrderIngressTelemetry,
   applyStrk20ExitClaimReceipt,
   applyPendingConsolidationRoot,
+  batchSubmissionSafetyBufferMs,
   createZylithWalletRuntime,
   defaultServiceUrlForHost,
   firstRenewalSlotEpoch,
@@ -134,11 +136,22 @@ describe("wallet passphrases", () => {
 });
 
 describe("batch submission safety", () => {
-  it("requires more than 15 seconds before close", () => {
+  it("uses a proportional safety buffer with a conservative default", () => {
+    expect(batchSubmissionSafetyBufferMs()).toBe(15_000);
+    expect(batchSubmissionSafetyBufferMs(90_000)).toBe(15_000);
+    expect(batchSubmissionSafetyBufferMs(60_000)).toBe(12_000);
+    expect(batchSubmissionSafetyBufferMs(45_000)).toBe(9_000);
+    expect(batchSubmissionSafetyBufferMs(30_000)).toBe(6_000);
+    expect(batchSubmissionSafetyBufferMs(20_000)).toBe(5_000);
+  });
+
+  it("requires more than the active safety buffer before close", () => {
     const now = 1_000_000;
 
     expect(hasBatchSubmissionSafetyWindow(now + 15_000, now)).toBe(false);
     expect(hasBatchSubmissionSafetyWindow(now + 15_001, now)).toBe(true);
+    expect(hasBatchSubmissionSafetyWindow(now + 6_000, now, 30_000)).toBe(false);
+    expect(hasBatchSubmissionSafetyWindow(now + 6_001, now, 30_000)).toBe(true);
   });
 
   it("allows self-relay to use the current epoch only inside the safety window", () => {
@@ -153,6 +166,22 @@ describe("batch submission safety", () => {
         now
       )
     ).toBe(43);
+    expect(
+      firstRenewalSlotEpoch(
+        { ...batch, close_time_unix_ms: now + 6_001 },
+        "SelfRelay",
+        now,
+        30_000
+      )
+    ).toBe(42);
+    expect(
+      firstRenewalSlotEpoch(
+        { ...batch, close_time_unix_ms: now + 6_000 },
+        "SelfRelay",
+        now,
+        30_000
+      )
+    ).toBe(43);
   });
 
   it("starts managed Zylith Relay packages at the next epoch", () => {
@@ -165,6 +194,45 @@ describe("batch submission safety", () => {
         now
       )
     ).toBe(43);
+  });
+});
+
+describe("order ingress telemetry", () => {
+  it("attaches telemetry without mutating the original payload", () => {
+    const payload = {
+      order_submission: { order_bundle: { order_commitment: "0xabc" } },
+    };
+    const telemetry = {
+      version: 1,
+      client_build_ms: 40,
+      private_submission_delay_ms: 0,
+      client_elapsed_before_private_ingress_ms: 250,
+      batch_time_remaining_before_private_ingress_ms: 20_000,
+      submission_safety_buffer_ms: 15_000,
+    } as const;
+
+    const result = attachOrderIngressTelemetry(payload, telemetry);
+
+    expect(result).toEqual({
+      order_submission: { order_bundle: { order_commitment: "0xabc" } },
+      ingress_telemetry: telemetry,
+    });
+    expect(payload).toEqual({
+      order_submission: { order_bundle: { order_commitment: "0xabc" } },
+    });
+  });
+
+  it("leaves non-object payloads unchanged", () => {
+    expect(
+      attachOrderIngressTelemetry("raw", {
+        version: 1,
+        client_build_ms: 10,
+        private_submission_delay_ms: 0,
+        client_elapsed_before_private_ingress_ms: 10,
+        batch_time_remaining_before_private_ingress_ms: 20_000,
+        submission_safety_buffer_ms: 15_000,
+      })
+    ).toBe("raw");
   });
 });
 

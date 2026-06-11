@@ -51,7 +51,6 @@ import {
   type BatchSummary,
   type DeploymentConfig,
   type PublicSettlementTranscript,
-  apiCurrentPairBatch,
   lastClearingByPair,
   useBatches,
   useCoordinatorStatus,
@@ -78,7 +77,6 @@ import { OrdersScreen } from "./screens/OrdersScreen";
 import {
   loadUserPreferences,
   saveUserPreferences,
-  type SubmissionTimingPreference,
   type UserPreferences,
   type WithdrawalRoutePreference,
 } from "./domain/userPreferences";
@@ -1118,17 +1116,6 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const updateSubmissionTiming = useCallback(
-    (value: SubmissionTimingPreference) => {
-      setUserPreferences((previous) => {
-        const next = { ...previous, submissionTiming: value };
-        saveUserPreferences(next);
-        return next;
-      });
-    },
-    []
-  );
-
   const updateWithdrawalRoute = useCallback(
     (value: WithdrawalRoutePreference) => {
       setUserPreferences((previous) => {
@@ -1139,14 +1126,6 @@ export default function App() {
     },
     []
   );
-
-  const updateRedactSensitiveUi = useCallback((value: boolean) => {
-    setUserPreferences((previous) => {
-      const next = { ...previous, redactSensitiveUi: value };
-      saveUserPreferences(next);
-      return next;
-    });
-  }, []);
 
   // UI state
   const [openSlide, setOpenSlide] = useState<
@@ -2190,8 +2169,8 @@ export default function App() {
       setSubmitError("Select a pair before submitting.");
       return false;
     }
-    const expectedBatch = batchByPair[submitPair.pair_id] ?? null;
-    if (!expectedBatch) {
+    const provisionalBatch = batchByPair[submitPair.pair_id] ?? null;
+    if (!provisionalBatch) {
       setSubmitError(
         "This pair is not accepting orders right now. Please retry later."
       );
@@ -2201,18 +2180,8 @@ export default function App() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const currentBatch = await apiCurrentPairBatch(
-        submitPair.base_asset_id,
-        submitPair.quote_asset_id
-      );
-      if (currentBatch.status !== "Open") {
-        setSubmitError(
-          "This batch is already closed. Please retry in the next epoch."
-        );
-        return false;
-      }
       if (intent.shape === "strategy" && !coordinatorStatus?.batch_window_ms) {
-        setSubmitError("Batch timing is still loading. Please retry later.");
+        setSubmitError("Auction timing is still loading. Please retry later.");
         return false;
       }
 
@@ -2265,14 +2234,14 @@ export default function App() {
         limitPrice: atomicPrice,
         minFill: atomicMinFill,
         fillOrKill: intent.fillOrKill,
-        batchId: currentBatch.batch_id,
+        batchId: provisionalBatch.batch_id,
+        batchWindowMs: coordinatorStatus?.batch_window_ms,
         makerCurvePoints: atomicCurvePoints,
         makerInventoryCap:
           atomicMakerInventoryCap && BigInt(atomicMakerInventoryCap) > 0n
             ? atomicMakerInventoryCap
             : undefined,
         priceBaseScale,
-        submissionTimingPreference: userPreferences.submissionTiming,
         durationBatches:
           (intent.shape === "strategy" ||
             (intent.shape === "curve" && intent.resting)) &&
@@ -2355,6 +2324,16 @@ export default function App() {
       }
 
       const submittedAt = Date.now();
+      const acceptedBatchId =
+        result.batch_id ??
+        result.first_child_batch_id ??
+        provisionalBatch.batch_id;
+      const acceptedEpochId =
+        result.epoch_id ??
+        result.first_child_epoch_id ??
+        renderBatches.find((batch) => batch.batch_id === acceptedBatchId)
+          ?.epoch_id ??
+        provisionalBatch.epoch_id;
 
       const newOrder: LocalOrder = {
         deployment_scope: deploymentOrderScope(deployment),
@@ -2368,11 +2347,8 @@ export default function App() {
           result.expected_output_metadata_commitment,
         fundingNoteCommitments: result.funding_note_commitments,
         strategyId: result.strategy_id,
-        batchId:
-          result.batch_id ??
-          result.first_child_batch_id ??
-          currentBatch.batch_id,
-        epochId: currentBatch.epoch_id,
+        batchId: acceptedBatchId,
+        epochId: acceptedEpochId,
         pair: submitPair.pair_id,
         side: intent.side,
         wireMode: wm,
@@ -2492,7 +2468,6 @@ export default function App() {
           ? atomicMakerInventoryCap
           : undefined,
       priceBaseScale,
-      submissionTimingPreference: userPreferences.submissionTiming,
     });
   }
 
@@ -2688,11 +2663,7 @@ export default function App() {
   }
 
   return (
-    <div
-      className={`app-shell ${
-        userPreferences.redactSensitiveUi ? "redact-sensitive-ui" : ""
-      }`}
-    >
+    <div className="app-shell">
       <TopNav
         workspace={workspace}
         tab={tab}
@@ -2704,12 +2675,8 @@ export default function App() {
         activeOrderCount={activeTakerOrders.length}
         claimableOutputCount={claimableOutputCount}
         walletReady={renderWalletReady}
-        submissionTimingPreference={userPreferences.submissionTiming}
-        setSubmissionTimingPreference={updateSubmissionTiming}
         withdrawalRoutePreference={userPreferences.withdrawalRoute}
         setWithdrawalRoutePreference={updateWithdrawalRoute}
-        redactSensitiveUi={userPreferences.redactSensitiveUi}
-        setRedactSensitiveUi={updateRedactSensitiveUi}
         starknetAddress={starknetAddress}
         onOpenWallet={() => setOpenSlide("wallet")}
         onDeposit={() => setOpenSlide("deposit")}

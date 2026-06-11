@@ -27,7 +27,6 @@ type OrderMode =
   | "VWAP"
   | "Repeat"
   | "Resting";
-type SubmissionTimingPreference = "fast" | "balanced" | "private";
 const DIRECT_ORDER_MODES = new Set<OrderMode>(["Limit", "Maker Curve"]);
 const STRATEGY_ORDER_MODES = new Set<OrderMode>([
   "TWAP",
@@ -98,6 +97,7 @@ type PrivateOrderDraft = {
   minFill: string;
   fillOrKill: boolean;
   batchId: string;
+  batchWindowMs?: number;
   childAmount?: string;
   maxChildren?: number;
   durationBatches?: number;
@@ -108,7 +108,6 @@ type PrivateOrderDraft = {
   makerCurvePoints?: Array<{ price: string; baseAmount: string }>;
   makerCurveRotationBps?: number;
   makerInventoryCap?: string;
-  submissionTimingPreference?: SubmissionTimingPreference;
   relayMode?: "SelfRelay" | "ZylithRelay";
 };
 
@@ -166,9 +165,11 @@ type WalletRuntime = {
     strategy_id?: string;
     order_commitment?: string;
     batch_id?: string;
+    epoch_id?: number;
     cancellation_secret?: string;
     first_child_order_commitment?: string;
     first_child_batch_id?: string;
+    first_child_epoch_id?: number;
     first_child_cancellation_secret?: string;
     expected_output_metadata_commitment?: string;
     funding_note_commitments?: string[];
@@ -659,6 +660,18 @@ type IngressResponse = {
   receipt: unknown;
 };
 
+export type OrderIngressTelemetry = {
+  version: 1;
+  client_build_ms: number;
+  private_submission_delay_ms: number;
+  client_elapsed_before_private_ingress_ms: number;
+  batch_time_remaining_before_private_ingress_ms: number;
+  submission_safety_buffer_ms: number;
+  private_ingress_roundtrip_ms?: number;
+  client_elapsed_before_coordinator_ms?: number;
+  batch_time_remaining_before_coordinator_ms?: number;
+};
+
 type CoordinatorAccepted = {
   order_commitment: string;
   batch_id: string;
@@ -913,7 +926,7 @@ type PrivateStrategyRecord = {
   price_base_scale?: string;
   min_fill: string;
   fill_or_kill: boolean;
-  submission_timing_preference?: SubmissionTimingPreference;
+  batch_window_ms?: number;
   max_children: number;
   next_child_index: number;
   start_epoch: number;
@@ -1002,7 +1015,9 @@ const STARKNET_PRIVACY_REGISTRY_PREFIX =
 const STRATEGY_WORKER_INTERVAL_MS = 12_000;
 const DEPOSIT_CONFIRMATION_WORKER_INTERVAL_MS = 5_000;
 const PRIVATE_SUBMISSION_MAX_DELAY_MS = 7_000;
-const BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
+const MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 5_000;
+const MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
+const BATCH_SUBMISSION_SAFETY_BUFFER_BPS = 2_000;
 const LATEST_EPOCH_CACHE_TTL_MS = 15_000;
 const PRIVATE_REPORT_OUTPUT_TAG_COUNT = boundedInteger(
   import.meta.env.VITE_ZYLITH_PRIVATE_REPORT_OUTPUT_TAG_COUNT,
@@ -2627,9 +2642,12 @@ export function createZylithWalletRuntime(
         "Coordinator and private ingress URLs are required for private order submission"
       );
     }
-    const batch = await fetchCurrentPairBatch(draft.pair);
-    if (!batch || batch.batch_id !== draft.batchId || batch.status !== "Open") {
-      throw new Error("Order batch is no longer open");
+    const batch = await resolveSubmittablePairBatch(
+      draft.pair,
+      draft.batchWindowMs
+    );
+    if (!batch || batch.status !== "Open") {
+      throw new Error("Auction window is no longer open");
     }
     const registry = await fetchIngressRegistry();
     const submitted = await submitSinglePrivateOrder(draft, batch, registry);
@@ -2637,6 +2655,7 @@ export function createZylithWalletRuntime(
       order_id: submitted.order_commitment,
       order_commitment: submitted.order_commitment,
       batch_id: submitted.batch_id,
+      epoch_id: submitted.epoch_id,
       cancellation_secret: submitted.cancellation_secret,
       expected_output_metadata_commitment:
         submitted.expected_output_metadata_commitment,
@@ -3314,6 +3333,10 @@ export function createZylithWalletRuntime(
     registry: unknown,
     parent?: { material: StrategyParentMaterial; childIndex: number }
   ) {
+    const telemetryStart = performance.now();
+    const submissionSafetyBufferMs = batchSubmissionSafetyBufferMs(
+      draft.batchWindowMs
+    );
     if (!DIRECT_ORDER_MODES.has(draft.mode)) {
       throw new Error(
         `${draft.mode} must be materialized as a parent-bound child order`
@@ -3325,13 +3348,13 @@ export function createZylithWalletRuntime(
       );
     }
     if (batch.status !== "Open") {
-      throw new Error("Order batch is no longer open");
+      throw new Error("Auction window is no longer open");
     }
     if (
       batch.close_time_unix_ms - Date.now() <=
-      BATCH_SUBMISSION_SAFETY_BUFFER_MS
+      submissionSafetyBufferMs
     ) {
-      throw new Error("Batch is inside the submission safety buffer");
+      throw new Error("Auction window is inside the submission safety buffer");
     }
     const materializedDraft = materializeMakerCurveDraft(draft);
     const fundingNotes = selectFundingNotes(materializedDraft);
@@ -3342,6 +3365,7 @@ export function createZylithWalletRuntime(
       registry,
       parent
     );
+    const buildCompletedAt = performance.now();
     const pendingOrderCommitment = normalizeFeltForComparison(
       built.order_commitment
     );
@@ -3352,30 +3376,59 @@ export function createZylithWalletRuntime(
     scheduleRecoverySnapshot(false);
     let coordinatorSubmissionStarted = false;
     try {
-      await delay(
-        privateSubmissionDelayMs(
-          batch.close_time_unix_ms,
-          draft.submissionTimingPreference
-        )
+      const submissionDelayMs = privateSubmissionDelayMs(
+        batch.close_time_unix_ms,
+        submissionSafetyBufferMs
       );
+      await delay(submissionDelayMs);
       if (
         batch.close_time_unix_ms - Date.now() <=
-        BATCH_SUBMISSION_SAFETY_BUFFER_MS
+        submissionSafetyBufferMs
       ) {
         throw new Error(
-          "Batch entered the submission safety buffer before private ingress submission"
+          "Auction window entered the submission safety buffer before private ingress submission"
         );
       }
+      const beforePrivateIngress = performance.now();
+      const ingressTelemetry: OrderIngressTelemetry = {
+        version: 1,
+        client_build_ms: elapsedMs(telemetryStart, buildCompletedAt),
+        private_submission_delay_ms: submissionDelayMs,
+        client_elapsed_before_private_ingress_ms: elapsedMs(
+          telemetryStart,
+          beforePrivateIngress
+        ),
+        batch_time_remaining_before_private_ingress_ms:
+          remainingBatchMs(batch.close_time_unix_ms),
+        submission_safety_buffer_ms: submissionSafetyBufferMs,
+      };
       const ingress = await postJson<IngressResponse>(
         proverUrl,
         "/api/private/orders",
-        built.ingress_request
+        attachOrderIngressTelemetry(built.ingress_request, ingressTelemetry)
       );
+      const afterPrivateIngress = performance.now();
+      const coordinatorTelemetry: OrderIngressTelemetry = {
+        ...ingressTelemetry,
+        private_ingress_roundtrip_ms: elapsedMs(
+          beforePrivateIngress,
+          afterPrivateIngress
+        ),
+        client_elapsed_before_coordinator_ms: elapsedMs(
+          telemetryStart,
+          afterPrivateIngress
+        ),
+        batch_time_remaining_before_coordinator_ms:
+          remainingBatchMs(batch.close_time_unix_ms),
+      };
       coordinatorSubmissionStarted = true;
       const accepted = await postJson<CoordinatorAccepted>(
         coordinatorUrl,
         "/api/orders",
-        ingress.coordinator_submission
+        attachOrderIngressTelemetry(
+          ingress.coordinator_submission,
+          coordinatorTelemetry
+        )
       );
       const acceptedOrderCommitment = normalizeFeltForComparison(
         accepted.order_commitment ?? built.order_commitment
@@ -3401,6 +3454,7 @@ export function createZylithWalletRuntime(
           (note) => note.note_commitment
         ),
         batch_id: accepted.batch_id ?? batch.batch_id,
+        epoch_id: batch.epoch_id,
       };
     } catch (error) {
       if (coordinatorSubmissionStarted) {
@@ -3413,6 +3467,7 @@ export function createZylithWalletRuntime(
             (note) => note.note_commitment
           ),
           batch_id: batch.batch_id,
+          epoch_id: batch.epoch_id,
           submission_ambiguous: true,
         };
       }
@@ -3442,9 +3497,12 @@ export function createZylithWalletRuntime(
         "Coordinator and private ingress URLs are required for strategy submission"
       );
     }
-    const batch = await fetchCurrentPairBatch(draft.pair);
-    if (!batch || batch.batch_id !== draft.batchId || batch.status !== "Open") {
-      throw new Error("Strategy batch is no longer open");
+    const batch = await resolveSubmittablePairBatch(
+      draft.pair,
+      draft.batchWindowMs
+    );
+    if (!batch || batch.status !== "Open") {
+      throw new Error("Strategy auction window is no longer open");
     }
     const isResting = draft.mode === "Resting";
     const makerCurvePoints = isResting ? normalizeMakerCurvePoints(draft) : [];
@@ -3500,8 +3558,7 @@ export function createZylithWalletRuntime(
       price_base_scale: draftPriceBaseScale(draft).toString(),
       min_fill: minFill.toString(),
       fill_or_kill: draft.fillOrKill,
-      submission_timing_preference:
-        draft.submissionTimingPreference ?? "balanced",
+      batch_window_ms: draft.batchWindowMs,
       max_children: maxChildren,
       next_child_index: 1,
       start_epoch: batch.epoch_id,
@@ -3531,6 +3588,7 @@ export function createZylithWalletRuntime(
       first_child_order_commitment:
         strategy.submitted_children[0]?.order_commitment,
       first_child_batch_id: strategy.submitted_children[0]?.batch_id,
+      first_child_epoch_id: strategy.submitted_children[0]?.epoch_id,
       first_child_cancellation_secret:
         strategy.submitted_children[0]?.cancellation_secret,
       expected_output_metadata_commitment:
@@ -3561,7 +3619,7 @@ export function createZylithWalletRuntime(
     const currentBatch = await fetchCurrentPairBatch(draft.pair);
     if (!currentBatch || currentBatch.status !== "Open") {
       throw new Error(
-        "Current batch is unavailable; cannot anchor offline renewal slots"
+        "Current auction window is unavailable; cannot anchor offline renewal slots"
       );
     }
     const registry = await fetchIngressRegistry();
@@ -3599,7 +3657,9 @@ export function createZylithWalletRuntime(
     const minFill = normalizeOrderMinFill(draft, childAmount);
     const firstEpoch = firstRenewalSlotEpoch(
       currentBatch,
-      draft.relayMode ?? "SelfRelay"
+      draft.relayMode ?? "SelfRelay",
+      Date.now(),
+      draft.batchWindowMs
     );
     const parent = JSON.parse(
       core.zylith_wallet_build_strategy_parent(
@@ -3623,8 +3683,7 @@ export function createZylithWalletRuntime(
       price_base_scale: draftPriceBaseScale(draft).toString(),
       min_fill: minFill.toString(),
       fill_or_kill: draft.fillOrKill,
-      submission_timing_preference:
-        draft.submissionTimingPreference ?? "balanced",
+      batch_window_ms: draft.batchWindowMs,
       max_children: maxChildren,
       next_child_index: 1,
       start_epoch: firstEpoch,
@@ -3679,7 +3738,6 @@ export function createZylithWalletRuntime(
           strategy.mode === "Resting"
             ? strategy.maker_inventory_cap
             : undefined,
-        submissionTimingPreference: strategy.submission_timing_preference,
         relayMode: draft.relayMode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
@@ -3783,10 +3841,10 @@ export function createZylithWalletRuntime(
       relay_policy: {
         prover_url: proverUrl,
         coordinator_url: coordinatorUrl,
-        submission_safety_buffer_ms: BATCH_SUBMISSION_SAFETY_BUFFER_MS,
-        max_submission_delay_ms: submissionDelayCapMs(
-          draft.submissionTimingPreference
+        submission_safety_buffer_ms: batchSubmissionSafetyBufferMs(
+          draft.batchWindowMs
         ),
+        max_submission_delay_ms: PRIVATE_SUBMISSION_MAX_DELAY_MS,
       },
       slots,
     };
@@ -3832,7 +3890,7 @@ export function createZylithWalletRuntime(
     const currentBatch = await fetchCurrentPairBatch(strategy.pair);
     if (!currentBatch || currentBatch.status !== "Open") {
       throw new Error(
-        "Current batch is unavailable; cannot refresh renewal slots"
+        "Current auction window is unavailable; cannot refresh renewal slots"
       );
     }
     const registry = await fetchIngressRegistry();
@@ -3845,7 +3903,9 @@ export function createZylithWalletRuntime(
     }
     const firstSafeEpoch = firstRenewalSlotEpoch(
       currentBatch,
-      strategy.offline_package?.relay_mode ?? "SelfRelay"
+      strategy.offline_package?.relay_mode ?? "SelfRelay",
+      Date.now(),
+      strategy.batch_window_ms
     );
     const firstEpoch = Math.max(firstSafeEpoch, strategy.end_epoch + 1);
     const slotCount = clampStrategyChildren(
@@ -3902,7 +3962,6 @@ export function createZylithWalletRuntime(
           strategy.mode === "Resting"
             ? strategy.maker_inventory_cap
             : undefined,
-        submissionTimingPreference: strategy.submission_timing_preference,
         relayMode: strategy.offline_package?.relay_mode ?? "SelfRelay",
       };
       const materializedChildDraft = materializeMakerCurveDraft(childDraft);
@@ -4006,10 +4065,10 @@ export function createZylithWalletRuntime(
       relay_policy: {
         prover_url: proverUrl,
         coordinator_url: coordinatorUrl,
-        submission_safety_buffer_ms: BATCH_SUBMISSION_SAFETY_BUFFER_MS,
-        max_submission_delay_ms: submissionDelayCapMs(
-          strategy.submission_timing_preference
+        submission_safety_buffer_ms: batchSubmissionSafetyBufferMs(
+          strategy.batch_window_ms
         ),
+        max_submission_delay_ms: PRIVATE_SUBMISSION_MAX_DELAY_MS,
       },
       slots,
     };
@@ -4119,7 +4178,7 @@ export function createZylithWalletRuntime(
     }
     if (
       batch.close_time_unix_ms - Date.now() <=
-      BATCH_SUBMISSION_SAFETY_BUFFER_MS
+      batchSubmissionSafetyBufferMs(strategy.batch_window_ms)
     ) {
       return;
     }
@@ -4140,6 +4199,7 @@ export function createZylithWalletRuntime(
       minFill: (minFill > amount ? amount : minFill).toString(),
       fillOrKill: strategy.fill_or_kill,
       batchId: batch.batch_id,
+      batchWindowMs: strategy.batch_window_ms,
       makerCurvePoints:
         strategy.mode === "Resting"
           ? strategyMakerCurveDraftPoints(strategy)
@@ -4150,7 +4210,6 @@ export function createZylithWalletRuntime(
           : undefined,
       makerInventoryCap:
         strategy.mode === "Resting" ? strategy.maker_inventory_cap : undefined,
-      submissionTimingPreference: strategy.submission_timing_preference,
     };
     try {
       const registry = await fetchIngressRegistry();
@@ -4162,7 +4221,7 @@ export function createZylithWalletRuntime(
       strategy.submitted_children.push({
         parent_child_index: childIndex,
         batch_id: submitted.batch_id,
-        epoch_id: batch.epoch_id,
+        epoch_id: submitted.epoch_id ?? batch.epoch_id,
         order_commitment: submitted.order_commitment,
         cancellation_secret: submitted.cancellation_secret,
         expected_output_metadata_commitment:
@@ -4850,6 +4909,44 @@ export function createZylithWalletRuntime(
     );
   }
 
+  async function resolveSubmittablePairBatch(
+    pair: string,
+    batchWindowMs?: number
+  ) {
+    const startedAt = Date.now();
+    const maxWaitMs =
+      Math.max(batchSubmissionSafetyBufferMs(batchWindowMs), 5_000) + 2_000;
+    let batch = await fetchCurrentPairBatch(pair);
+    while (Date.now() - startedAt <= maxWaitMs) {
+      if (isSubmittableBatch(batch, batchWindowMs)) return batch;
+      const waitMs =
+        batch?.status === "Open"
+          ? Math.max(
+              250,
+              Math.min(batch.close_time_unix_ms - Date.now() + 350, 1_000)
+            )
+          : 750;
+      await delay(waitMs);
+      batch = await fetchCurrentPairBatch(pair);
+    }
+    return batch;
+  }
+
+  function isSubmittableBatch(
+    batch: BatchSummary | null | undefined,
+    batchWindowMs?: number
+  ) {
+    return Boolean(
+      batch &&
+        batch.status === "Open" &&
+        hasBatchSubmissionSafetyWindow(
+          batch.close_time_unix_ms,
+          Date.now(),
+          batchWindowMs
+        )
+    );
+  }
+
   async function enabledPairIds() {
     const deployment = await loadDeploymentConfig();
     const pairs = Object.values(deployment.product?.pairs ?? {})
@@ -5222,11 +5319,7 @@ export function createZylithWalletRuntime(
         if (leftAmount > rightAmount) return 1;
         return left.note_commitment.localeCompare(right.note_commitment);
       });
-    const selected = smallestSufficientNoteSet(
-      candidates,
-      required,
-      draft.submissionTimingPreference ?? "balanced"
-    );
+    const selected = smallestSufficientNoteSet(candidates, required);
     if (selected.length === 0) {
       throw new Error(`No unlocked ${asset} note can fund this order`);
     }
@@ -5463,8 +5556,7 @@ function fundingRequirement(draft: PrivateOrderDraft) {
 
 function smallestSufficientNoteSet(
   candidates: LocalNoteRecord[],
-  required: bigint,
-  preference: SubmissionTimingPreference = "balanced"
+  required: bigint
 ) {
   if (required <= 0n) return [];
   const boundedCandidates = fundingCandidateSearchPool(candidates, required);
@@ -5478,19 +5570,12 @@ function smallestSufficientNoteSet(
       (record) => !isStandardNoteAmount(record)
     ).length;
     const shouldReplace =
-      preference === "fast"
-        ? bestTotal === null ||
-          selection.length < best.length ||
-          (selection.length === best.length && total < bestTotal) ||
-          (selection.length === best.length &&
-            total === bestTotal &&
-            nonStandardCount > bestNonStandardCount)
-        : bestTotal === null ||
-          total < bestTotal ||
-          (total === bestTotal && selection.length < best.length) ||
-          (total === bestTotal &&
-            selection.length === best.length &&
-            nonStandardCount > bestNonStandardCount);
+      bestTotal === null ||
+      total < bestTotal ||
+      (total === bestTotal && selection.length < best.length) ||
+      (total === bestTotal &&
+        selection.length === best.length &&
+        nonStandardCount > bestNonStandardCount);
     if (shouldReplace) {
       best = [...selection];
       bestTotal = total;
@@ -5505,16 +5590,7 @@ function smallestSufficientNoteSet(
       start >= boundedCandidates.length
     )
       return;
-    if (bestTotal !== null && preference !== "fast" && total >= bestTotal)
-      return;
-    if (
-      bestTotal !== null &&
-      preference === "fast" &&
-      selection.length >= best.length &&
-      total >= bestTotal
-    ) {
-      return;
-    }
+    if (bestTotal !== null && total >= bestTotal) return;
     for (let index = start; index < boundedCandidates.length; index += 1) {
       const note = boundedCandidates[index];
       search(index + 1, [...selection, note], total + BigInt(note.note.amount));
@@ -7174,43 +7250,41 @@ function randomBasisPointsJitter(maxAbsoluteBps: number) {
   return 10_000 - maxAbsoluteBps + (random[0] % span);
 }
 
-function submissionDelayCapMs(
-  preference: SubmissionTimingPreference = "balanced"
-) {
-  if (preference === "fast") return 0;
-  if (preference === "private") return PRIVATE_SUBMISSION_MAX_DELAY_MS;
-  return Math.floor(PRIVATE_SUBMISSION_MAX_DELAY_MS / 2);
-}
-
 export function hasBatchSubmissionSafetyWindow(
   closeTimeUnixMs: number,
-  nowUnixMs = Date.now()
+  nowUnixMs = Date.now(),
+  batchWindowMs?: number
 ) {
-  return closeTimeUnixMs - nowUnixMs > BATCH_SUBMISSION_SAFETY_BUFFER_MS;
+  return closeTimeUnixMs - nowUnixMs > batchSubmissionSafetyBufferMs(batchWindowMs);
 }
 
 export function firstRenewalSlotEpoch(
   batch: Pick<BatchSummary, "epoch_id" | "close_time_unix_ms">,
   relayMode: "SelfRelay" | "ZylithRelay" = "SelfRelay",
-  nowUnixMs = Date.now()
+  nowUnixMs = Date.now(),
+  batchWindowMs?: number
 ) {
   if (relayMode === "ZylithRelay") {
     return batch.epoch_id + 1;
   }
-  return hasBatchSubmissionSafetyWindow(batch.close_time_unix_ms, nowUnixMs)
+  return hasBatchSubmissionSafetyWindow(
+    batch.close_time_unix_ms,
+    nowUnixMs,
+    batchWindowMs
+  )
     ? batch.epoch_id
     : batch.epoch_id + 1;
 }
 
 function privateSubmissionDelayMs(
   closeTimeUnixMs?: number,
-  preference: SubmissionTimingPreference = "balanced"
+  submissionSafetyBufferMs = batchSubmissionSafetyBufferMs()
 ) {
   if (!closeTimeUnixMs) return 0;
   const timeUntilClose = closeTimeUnixMs - Date.now();
   const maxDelay = Math.min(
-    submissionDelayCapMs(preference),
-    timeUntilClose - BATCH_SUBMISSION_SAFETY_BUFFER_MS
+    PRIVATE_SUBMISSION_MAX_DELAY_MS,
+    timeUntilClose - submissionSafetyBufferMs
   );
   if (maxDelay <= 0) return 0;
   const random = new Uint32Array(1);
@@ -7218,10 +7292,44 @@ function privateSubmissionDelayMs(
   return Math.floor((random[0] / 0x1_0000_0000) * maxDelay);
 }
 
+export function batchSubmissionSafetyBufferMs(batchWindowMs?: number) {
+  if (!Number.isFinite(batchWindowMs) || !batchWindowMs || batchWindowMs <= 0) {
+    return MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS;
+  }
+  const proportional = Math.floor(
+    (batchWindowMs * BATCH_SUBMISSION_SAFETY_BUFFER_BPS) / 10_000
+  );
+  return Math.min(
+    MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS,
+    Math.max(MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS, proportional)
+  );
+}
+
 function delay(ms: number) {
   return ms > 0
     ? new Promise((resolve) => window.setTimeout(resolve, ms))
     : Promise.resolve();
+}
+
+function elapsedMs(start: number, end = performance.now()) {
+  return Math.max(0, Math.round(end - start));
+}
+
+function remainingBatchMs(closeTimeUnixMs: number) {
+  return Math.max(0, closeTimeUnixMs - Date.now());
+}
+
+export function attachOrderIngressTelemetry<T>(
+  payload: T,
+  telemetry: OrderIngressTelemetry
+): T {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  return {
+    ...(payload as Record<string, unknown>),
+    ingress_telemetry: telemetry,
+  } as T;
 }
 
 function randomPadding(targetBytes: number) {

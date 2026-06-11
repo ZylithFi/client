@@ -175,6 +175,7 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
         renewal_package_id: None,
         renewal_package_commitment: None,
         renewal_relay_mode: None,
+        ingress_telemetry: None,
         padding: request.padding,
     };
     to_json(&BuildPrivateOrderSubmissionResponse {

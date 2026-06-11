@@ -200,7 +200,7 @@ export function OrderTicket({
       <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Deposit before trading.</div>
-          <div className="gate-body">Add funds to your Zylith wallet before entering a batch auction.</div>
+          <div className="gate-body">Add funds to your Zylith wallet before placing an order.</div>
           <button className="btn-accent gate-primary" onClick={onDeposit}>
             Deposit
           </button>
@@ -335,7 +335,7 @@ export function OrderTicket({
             {walletReady && fundingAvailable <= 0n && (
               <div className="field-note warn">
                 No available {fundingAsset} note for this {state.side.toLowerCase()}.
-                {lockedDisplay ? ` ${lockedDisplay} ${fundingAsset} is locked in active batches.` : " Switch side or deposit this asset."}
+                {lockedDisplay ? ` ${lockedDisplay} ${fundingAsset} is locked in active orders.` : " Switch side or deposit this asset."}
               </div>
             )}
           </div>
@@ -433,12 +433,12 @@ export function OrderTicket({
             <div className="strategy-explainer">
               <div className="strategy-preview">
                 {strategyChildCount === null
-                  ? "Batch timing loading"
-                  : `${strategyChildCount} child batch${strategyChildCount !== 1 ? "es" : ""} · ${strategyChildSize} ${baseAsset} per child`}
+                  ? "Auction timing loading"
+                  : `${strategyChildCount} slice${strategyChildCount !== 1 ? "s" : ""} · ${strategyChildSize} ${baseAsset} each`}
               </div>
-              {state.stratKind === "TWAP" && "TWAP splits your order into equal time-weighted slices across batches."}
+              {state.stratKind === "TWAP" && "TWAP splits your order into equal time-weighted slices."}
               {state.stratKind === "VWAP" && "VWAP-style execution uses a deterministic private weight schedule for child sizes; it does not depend on public venue volume."}
-              {state.stratKind === "Repeat" && "Repeat submits the configured child size each batch until the total amount is exhausted or the parent is cancelled."}
+              {state.stratKind === "Repeat" && "Repeat submits the configured child size until the total amount is exhausted or the parent is cancelled."}
             </div>
           </>
         )}
@@ -499,7 +499,7 @@ export function OrderTicket({
                 )}
                 <div className="wc-row">
                   <span className="l">Settlement</span>
-                  <span className="r">Batched at epoch close</span>
+                  <span className="r">Clears automatically</span>
                 </div>
               </div>
             )}

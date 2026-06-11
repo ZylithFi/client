@@ -201,7 +201,7 @@ export function RightColumn({
     <div className="ticket-col">
       <div className="right-section">
         <div className="right-hd">
-          <span>Batch</span>
+          <span>Auction</span>
           {!batchInfo && online === false && (
             <span className="pill muted">Offline</span>
           )}
@@ -217,7 +217,7 @@ export function RightColumn({
           )}
         </div>
         <div className="rb-row">
-          <span>Closes in</span>
+          <span>Next clearing</span>
           <span className="z-amt">
             {activeBatch?.status === "Open" ? msToCountdown(msLeft) : "—"}
           </span>

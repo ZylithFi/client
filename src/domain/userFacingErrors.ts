@@ -198,7 +198,7 @@ export function userFacingErrorMessage(
     return "Curve parameters are inconsistent. Check the band prices and depths, then retry.";
   }
   if (/\/api\/private\/orders failed with HTTP 400/i.test(message)) {
-    return "Private order was rejected by validation. Check available notes, curve bands, and batch status, then retry.";
+    return "Private order was rejected by validation. Check available notes and curve bands, then retry.";
   }
   if (/request to .* failed with HTTP 5\d\d|private ingress|prover|target service is not configured/i.test(message)) {
     return "Private execution service is unavailable. Please retry later.";
@@ -212,6 +212,9 @@ export function userFacingErrorMessage(
   if (/RPC:|Starknet RPC/i.test(message)) {
     return "Starknet network returned an error. Please retry later.";
   }
+  if (/auction window.*no longer open/i.test(message)) {
+    return "Auction window rolled forward. Please retry if this persists.";
+  }
   const noUnlockedFunding = message.match(/no unlocked ([A-Za-z0-9]+) (shielded )?note can fund this order/i);
   if (noUnlockedFunding) {
     const asset = noUnlockedFunding[1];
@@ -224,7 +227,7 @@ export function userFacingErrorMessage(
     return "No unlocked note is available to withdraw.";
   }
   if (/safety buffer/i.test(message)) {
-    return "Batch is inside the submission safety buffer. Wait for the next epoch.";
+    return "Auction window rolled forward. Please retry if this persists.";
   }
   if (isLowLevelPayload(message)) {
     return fallback;
