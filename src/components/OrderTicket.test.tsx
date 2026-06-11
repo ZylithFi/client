@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { OrderTicket, type PairConfig } from "./OrderTicket";
 
@@ -51,5 +51,38 @@ describe("OrderTicket", () => {
     expect(screen.getByRole("button", { name: /Limit/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Program/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Curve/ })).not.toBeInTheDocument();
+  });
+
+  it("submits the taker order when pressing Enter in a text field", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(
+      <OrderTicket
+        pair={pair}
+        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
+        batchWindowMs={90_000}
+        walletReady={true}
+        hasPrivateBalance={true}
+        submitting={false}
+        submitError={null}
+        onOpenWallet={vi.fn()}
+        onDeposit={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const inputs = screen.getAllByRole("textbox");
+    fireEvent.change(inputs[0], { target: { value: "2" } });
+    fireEvent.change(inputs[1], { target: { value: "0.10" } });
+
+    await act(async () => {
+      fireEvent.keyDown(inputs[1], { key: "Enter" });
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      side: "Buy",
+      shape: "limit",
+      amount: "2",
+      limitPrice: "0.10",
+    }));
   });
 });

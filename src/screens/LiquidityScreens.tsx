@@ -11,6 +11,7 @@ import type {
   PairConfig,
   TicketSubmitIntent,
 } from "../components/OrderTicket";
+import { runPrimaryActionOnEnter } from "../domain/primaryEnter";
 import { normalizeSelfRelayUrl } from "../domain/selfHostedRenewalRelay";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 
@@ -1154,7 +1155,12 @@ export function LiquidityCurvesScreen({
             <span className="liq-pair-head-clearing">{selectedPairClearing ?? "—"}</span>
           </header>
 
-          <section className="liq-builder">
+          <section
+            className="liq-builder"
+            onKeyDown={event => {
+              runPrimaryActionOnEnter(event, canSubmit, () => { void submit(); });
+            }}
+          >
           <div className="liq-panel-hd">
             <span>Quote liquidity</span>
           </div>
@@ -1335,60 +1341,52 @@ export function LiquidityCurvesScreen({
               <div className="empty-mark">—</div>
             </div>
           ) : (
-            activeCurveRecords(records).map(record => (
-              <div className="liq-active-card" key={record.id}>
-                <div className="liq-active-top">
-                  <span>{record.pair}</span>
-                  <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>{record.sideLabel}</span>
-                  <span className={`pill ${curveStatusPillTone(record.status)}`}>{record.status}</span>
+            activeCurveRecords(records).map(record => {
+              let fallbackRemaining = depthFilled(record.relatedOrders);
+              const bands = record.points.map((point, index) => {
+                const depth = parseHuman(point.baseAmount);
+                const filled = displayedBandFill(record, index, fallbackRemaining);
+                fallbackRemaining = Math.max(0, fallbackRemaining - filled);
+                return { point, depth, filled };
+              });
+              const maxDepth = Math.max(1, ...bands.map(band => band.depth));
+              const sideTone = record.side === "Buy" ? "bid" : "ask";
+              return (
+                <div className="liq-active-card liq-active-ladder-card" key={record.id}>
+                  <div className="liq-active-top">
+                    <span>{record.pair}</span>
+                    <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>{record.sideLabel}</span>
+                    <span className={`pill ${curveStatusPillTone(record.status)}`}>{record.status}</span>
+                    <span className="liq-active-rate">{formatPct(curveFillRate(record.relatedOrders))}</span>
+                  </div>
+                  <div className="liq-active-ladder">
+                    {bands.map(({ point, depth, filled }, index) => {
+                      const depthWidth = Math.min(100, depth > 0 ? (depth / maxDepth) * 100 : 0);
+                      const fillWidth = Math.min(100, filled > 0 ? (filled / maxDepth) * 100 : 0);
+                      return (
+                        <div className="liq-active-ladder-row" key={`${record.id}:${index}`}>
+                          <span className="liq-active-price">{point.price}</span>
+                          <span className="liq-active-track">
+                            <span className={`liq-active-depth ${sideTone}`} style={{ width: `${depthWidth}%` }} />
+                            <span className={`liq-active-fill ${sideTone}`} style={{ width: `${fillWidth}%` }} />
+                          </span>
+                          <span className="liq-active-depth-value">{point.baseAmount}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="liq-card-actions">
+                    {record.strategy && (
+                      record.status === "Paused"
+                        ? <button type="button" onClick={() => onResumeCurve(record)}>Resume</button>
+                        : <button type="button" onClick={() => onPauseCurve(record)}>Pause</button>
+                    )}
+                    <button type="button" onClick={() => onEditCurve(record)}>Edit</button>
+                    <button type="button" className="danger" onClick={() => onCancelCurve(record)}>Cancel</button>
+                  </div>
                 </div>
-                <div className="liq-active-rate">{formatPct(curveFillRate(record.relatedOrders))}</div>
-                <div className="liq-depth-bar">
-                  <span style={{ width: `${Math.min(100, committedDepth(record.points, record.relatedOrders) > 0 ? (depthFilled(record.relatedOrders) / committedDepth(record.points, record.relatedOrders)) * 100 : 0)}%` }} />
-                </div>
-                <table className="data-table liq-band-table">
-                  <thead>
-                    <tr>
-                      <th>Band</th>
-                      <th>Depth</th>
-                      <th>Filled</th>
-                      <th>Fill rate</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(() => {
-                      let fallbackRemaining = depthFilled(record.relatedOrders);
-                      return record.points.map((point, index) => {
-                        const depth = parseHuman(point.baseAmount);
-                        const filled = displayedBandFill(record, index, fallbackRemaining);
-                        fallbackRemaining = Math.max(0, fallbackRemaining - filled);
-                        return (
-                          <tr key={`${record.id}:${index}`}>
-                            <td className="num">{point.price}</td>
-                            <td className="num">{point.baseAmount}</td>
-                            <td className="num">{formatHuman(filled)}</td>
-                            <td>
-                              <div className="liq-mini-bar">
-                                <span style={{ width: `${Math.min(100, depth > 0 ? (filled / depth) * 100 : 0)}%` }} />
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      });
-                    })()}
-                  </tbody>
-                </table>
-                <div className="liq-card-actions">
-                  {record.strategy && (
-                    record.status === "Paused"
-                      ? <button type="button" onClick={() => onResumeCurve(record)}>Resume</button>
-                      : <button type="button" onClick={() => onPauseCurve(record)}>Pause</button>
-                  )}
-                  <button type="button" onClick={() => onEditCurve(record)}>Edit</button>
-                  <button type="button" className="danger" onClick={() => onCancelCurve(record)}>Cancel</button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </section>
       </div>

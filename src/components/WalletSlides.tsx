@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { fromAtomicStr, toAtomicStr } from "../domain/assets";
 import type { PublicSettlementTranscript } from "../domain/auctionEpoch";
 import {
@@ -13,6 +13,7 @@ import {
   walletRuntime,
 } from "../domain/browserWallet";
 import { settlementReadyAtMs } from "../domain/noteLifecycle";
+import { runPrimaryActionOnEnter, shouldRunPrimaryActionForEnter } from "../domain/primaryEnter";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 import type { WithdrawalRoutePreference } from "../domain/userPreferences";
 
@@ -70,11 +71,13 @@ export function WalletSlide({
   const [passphraseConfirm, setPassphraseConfirm] = useState("");
   const [phrase, setPhrase] = useState("");
   const [mnemonic, setMnemonic] = useState("");
+  const [mnemonicCopied, setMnemonicCopied] = useState(false);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   const [connectingWalletId, setConnectingWalletId] = useState<string | null>(null);
   const [walletOptions, setWalletOptions] = useState<StarknetWalletOption[]>([]);
   const [walletScanState, setWalletScanState] = useState<"idle" | "scanning" | "complete">("idle");
+  const [showStarknetFirstHint, setShowStarknetFirstHint] = useState(false);
   const scanGenerationRef = useRef(0);
 
   async function refreshWalletOptions({ showLoading = false }: { showLoading?: boolean } = {}) {
@@ -99,7 +102,9 @@ export function WalletSlide({
       setPassphrase("");
       setPhrase("");
       setMnemonic("");
+      setMnemonicCopied(false);
       setError("");
+      setShowStarknetFirstHint(false);
       void refreshWalletOptions({ showLoading: true });
     }
   }, [open, hasVault]);
@@ -138,7 +143,10 @@ export function WalletSlide({
     setError("");
     try {
       const addr = await connectStarknetProvider(wallet.provider, wallet.id);
-      if (addr) onStarknetConnected(addr);
+      if (addr) {
+        setShowStarknetFirstHint(false);
+        onStarknetConnected(addr);
+      }
       else setError("Wallet did not return an account. Unlock it and retry.");
     } catch (e) {
       setError(userFacingErrorMessage(e, "Wallet connection failed."));
@@ -174,6 +182,7 @@ export function WalletSlide({
         await w.createWallet(passphrase);
       }
       setMnemonic(await w.exportRecoverySeed(passphrase));
+      setMnemonicCopied(false);
     } catch (e) {
       setError(userFacingErrorMessage(e));
     } finally {
@@ -221,6 +230,36 @@ export function WalletSlide({
   const divider = (
     <div style={{ margin: "16px 0", boxShadow: "inset 0 -1px 0 var(--z-border)" }} />
   );
+  const hasStarknetAccount = Boolean(starknetAddress);
+  const createEnabled = hasStarknetAccount && !working;
+  const importEnabled = hasStarknetAccount && !working;
+  const unlockEnabled = hasStarknetAccount && !working;
+  const handlePrimaryEnter = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!hasStarknetAccount && shouldRunPrimaryActionForEnter(event)) {
+      event.preventDefault();
+      setShowStarknetFirstHint(true);
+      return;
+    }
+    if (privKeyTab === "create" && !mnemonic) {
+      runPrimaryActionOnEnter(event, createEnabled, () => { void handleCreate(); });
+    } else if (privKeyTab === "import") {
+      runPrimaryActionOnEnter(event, importEnabled, () => { void handleImport(); });
+    } else if (privKeyTab === "unlock") {
+      runPrimaryActionOnEnter(event, unlockEnabled, () => { void handleUnlock(); });
+    }
+  };
+
+  async function handleCopyGeneratedMnemonic() {
+    if (!mnemonic) return;
+    await navigator.clipboard?.writeText(mnemonic).catch(() => undefined);
+    setMnemonicCopied(true);
+  }
+
+  function requireStarknetFirst() {
+    if (hasStarknetAccount) return false;
+    setShowStarknetFirstHint(true);
+    return true;
+  }
 
   return (
     <div className={`slide-panel ${open ? "open" : ""}`}>
@@ -228,7 +267,7 @@ export function WalletSlide({
         <span className="slide-title">Connect Wallet</span>
         <button className="slide-close" onClick={onClose}>×</button>
       </div>
-      <div className="slide-body">
+      <div className="slide-body" onKeyDown={handlePrimaryEnter}>
         {!w && (
           <div style={{ fontSize: 11, color: "var(--z-status-warn)", marginBottom: 12, lineHeight: 1.5 }}>
             {runtimeStatus === "loading"
@@ -239,10 +278,7 @@ export function WalletSlide({
           </div>
         )}
 
-        <div className="f-label" style={{ marginBottom: 6 }}>Starknet account</div>
-        <div style={{ fontSize: 11, color: "var(--z-text-body)", lineHeight: 1.5, marginBottom: 10 }}>
-          Ready X or Xverse — used for deposits and withdrawals.
-        </div>
+        <div className="f-label" style={{ marginBottom: 10 }}>Starknet account</div>
         {starknetAddress ? (
           <div className="wallet-connected-box">
             <div className="wallet-connected-row">
@@ -275,7 +311,6 @@ export function WalletSlide({
                     <span className="wallet-choice-mark" />
                     <span className="wallet-choice-copy">
                       <strong>{wallet.name}</strong>
-                      <small>{wallet.id}</small>
                     </span>
                     <em>{connectingWalletId === wallet.id ? "Connecting" : "Connect"}</em>
                   </button>
@@ -299,6 +334,12 @@ export function WalletSlide({
 
         {divider}
 
+        {showStarknetFirstHint && !hasStarknetAccount && (
+          <div className="slide-note warn">
+            Connect a Starknet wallet first.
+          </div>
+        )}
+
         {!hasVault && (
           <div style={{ display: "flex", gap: 0, marginBottom: 14, height: 30 }}>
             <button
@@ -316,9 +357,6 @@ export function WalletSlide({
 
         {hasVault && privKeyTab === "unlock" && (
           <>
-            <div className="slide-note">
-              This unlocks the same Zylith wallet used across Trade and Liquidity.
-            </div>
             <button
               type="button"
               className="wallet-recover-link"
@@ -348,11 +386,6 @@ export function WalletSlide({
 
         {privKeyTab === "create" && !mnemonic && (
           <>
-            {hasVault && (
-              <div className="slide-note warn">
-                This replaces the local Zylith wallet in this browser. Keep the old recovery phrase if you need the old notes or history.
-              </div>
-            )}
             <div className="f-row">
               <label className="f-label">Encryption passphrase</label>
               <div className="f-input-box">
@@ -361,7 +394,10 @@ export function WalletSlide({
                   type="password"
                   placeholder={hasVault ? "Choose a new passphrase" : "Choose a passphrase"}
                   value={passphrase}
+                  disabled={working}
+                  readOnly={!hasStarknetAccount}
                   onChange={e => setPassphrase(e.target.value)}
+                  onFocus={() => { requireStarknetFirst(); }}
                 />
               </div>
             </div>
@@ -373,17 +409,25 @@ export function WalletSlide({
                   type="password"
                   placeholder="Re-enter passphrase"
                   value={passphraseConfirm}
+                  disabled={working}
+                  readOnly={!hasStarknetAccount}
                   onChange={e => setPassphraseConfirm(e.target.value)}
+                  onFocus={() => { requireStarknetFirst(); }}
                 />
               </div>
             </div>
-            <div className="slide-note">
-              This passphrase encrypts the local Zylith seed in this browser.
-            </div>
+            {hasVault && (
+              <div className="slide-note warn">
+                This will replace your local wallet. Save your current recovery phrase before continuing.
+              </div>
+            )}
             <button
               className="slide-submit"
-              disabled={!passphrase || !passphraseConfirm || working || !w}
-              onClick={() => { void handleCreate(); }}
+              disabled={!createEnabled}
+              onClick={() => {
+                if (requireStarknetFirst()) return;
+                void handleCreate();
+              }}
             >
               {working ? "Creating…" : hasVault ? "Replace with new Zylith wallet" : "Create Zylith wallet"}
             </button>
@@ -406,23 +450,37 @@ export function WalletSlide({
 
         {privKeyTab === "create" && mnemonic && (
           <>
-            <div className="f-label" style={{ marginBottom: 6 }}>Recovery phrase</div>
-            <div style={{
-              background: "var(--z-app-elevated-solid)",
-              boxShadow: "inset 0 0 0 1px var(--z-border)",
-              borderRadius: 1, padding: "10px 12px",
-              fontSize: 11, lineHeight: 1.8,
-              color: "var(--z-text-strong)",
-              marginBottom: 10, wordBreak: "break-word",
-              fontFamily: "var(--z-font-mono)",
-            }}>
-              {mnemonic}
+            <div className="recovery-phrase-head">
+              <span className="f-label">Recovery phrase</span>
+              <button
+                type="button"
+                className={`recovery-phrase-copy ${mnemonicCopied ? "copied" : ""}`}
+                onClick={() => { void handleCopyGeneratedMnemonic(); }}
+                aria-label="Copy recovery phrase"
+              >
+                {mnemonicCopied ? (
+                  <span>Copied!</span>
+                ) : (
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M5 2.5h6.5v8H5z" />
+                    <path d="M3.5 5.5v8H10" />
+                  </svg>
+                )}
+              </button>
             </div>
-            <div style={{ fontSize: 11, color: "var(--z-status-warn)", marginBottom: 12, lineHeight: 1.5 }}>
-              Save this. It is the only way to recover your private order history and note balances.
+            <div className="recovery-grid generated">
+              {mnemonic.trim().split(/\s+/).filter(Boolean).map((word, index) => (
+                <div key={`${word}-${index}`} className="recovery-word">
+                  <span>{index + 1}</span>
+                  <strong>{word}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="slide-note warn">
+              Save this recovery phrase. You’ll need it to restore your wallet.
             </div>
             <button className="slide-submit" onClick={onClose}>
-              Saved — continue
+              Continue
             </button>
           </>
         )}
@@ -441,7 +499,10 @@ export function WalletSlide({
                 }}
                 placeholder="24-word phrase or 64-char hex seed…"
                 value={phrase}
+                disabled={working}
+                readOnly={!hasStarknetAccount}
                 onChange={e => setPhrase(e.target.value)}
+                onFocus={() => { requireStarknetFirst(); }}
               />
             </div>
             <div className="f-row">
@@ -452,7 +513,10 @@ export function WalletSlide({
                   type="password"
                   placeholder="Choose a passphrase"
                   value={passphrase}
+                  disabled={working}
+                  readOnly={!hasStarknetAccount}
                   onChange={e => setPassphrase(e.target.value)}
+                  onFocus={() => { requireStarknetFirst(); }}
                 />
               </div>
             </div>
@@ -464,17 +528,20 @@ export function WalletSlide({
                   type="password"
                   placeholder="Re-enter passphrase"
                   value={passphraseConfirm}
+                  disabled={working}
+                  readOnly={!hasStarknetAccount}
                   onChange={e => setPassphraseConfirm(e.target.value)}
+                  onFocus={() => { requireStarknetFirst(); }}
                 />
               </div>
             </div>
-            <div className="slide-note">
-              This passphrase encrypts the recovered Zylith seed locally.
-            </div>
             <button
               className="slide-submit"
-              disabled={!phrase.trim() || !passphrase || !passphraseConfirm || working || !w}
-              onClick={() => { void handleImport(); }}
+              disabled={!importEnabled}
+              onClick={() => {
+                if (requireStarknetFirst()) return;
+                void handleImport();
+              }}
             >
               {working ? "Importing…" : hasVault ? "Replace local Zylith wallet" : "Import Zylith wallet"}
             </button>
@@ -506,15 +573,20 @@ export function WalletSlide({
                   type="password"
                   placeholder="Enter your passphrase"
                   value={passphrase}
+                  disabled={working}
+                  readOnly={!hasStarknetAccount}
                   onChange={e => setPassphrase(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter") void handleUnlock(); }}
+                  onFocus={() => { requireStarknetFirst(); }}
                 />
               </div>
             </div>
             <button
               className="slide-submit"
-              disabled={!passphrase || working || !w}
-              onClick={() => { void handleUnlock(); }}
+              disabled={!unlockEnabled}
+              onClick={() => {
+                if (requireStarknetFirst()) return;
+                void handleUnlock();
+              }}
             >
               {working ? "Unlocking…" : "Unlock Zylith wallet"}
             </button>
@@ -540,17 +612,26 @@ export function RecoverySlide({
 }) {
   const [passphrase, setPassphrase] = useState("");
   const [mnemonic, setMnemonic] = useState("");
+  const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (open) {
       setPassphrase("");
       setMnemonic("");
+      setCopied(false);
       setError("");
       setWorking(false);
     }
   }, [open]);
+
+  useEffect(() => () => {
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+  }, []);
 
   async function handleReveal() {
     const w = walletRuntime();
@@ -558,6 +639,7 @@ export function RecoverySlide({
     if (!passphrase) { setError("Enter your passphrase"); return; }
     setWorking(true);
     setError("");
+    setCopied(false);
     try {
       setMnemonic(await w.exportRecoverySeed(passphrase));
     } catch (e) {
@@ -570,9 +652,18 @@ export function RecoverySlide({
   async function handleCopy() {
     if (!mnemonic) return;
     await navigator.clipboard?.writeText(mnemonic).catch(() => undefined);
+    setCopied(true);
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopied(false);
+      copyTimerRef.current = null;
+    }, 1600);
   }
 
   const words = mnemonic.trim().split(/\s+/).filter(Boolean);
+  const revealEnabled = Boolean(passphrase && !working);
 
   return (
     <div className={`slide-panel ${open ? "open" : ""}`}>
@@ -580,7 +671,12 @@ export function RecoverySlide({
         <span className="slide-title">Recovery Phrase</span>
         <button className="slide-close" onClick={onClose}>×</button>
       </div>
-      <div className="slide-body">
+      <div
+        className="slide-body"
+        onKeyDown={event => {
+          runPrimaryActionOnEnter(event, revealEnabled, () => { void handleReveal(); });
+        }}
+      >
         <div style={{ fontSize: 11, color: "var(--z-text-body)", lineHeight: 1.5, marginBottom: 14 }}>
           Re-enter your Zylith wallet passphrase to reveal the recovery phrase.
         </div>
@@ -592,7 +688,6 @@ export function RecoverySlide({
               type="password"
               value={passphrase}
               onChange={e => setPassphrase(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") void handleReveal(); }}
             />
           </div>
         </div>
@@ -601,7 +696,7 @@ export function RecoverySlide({
         )}
         <button
           className="slide-submit"
-          disabled={!passphrase || working}
+          disabled={!revealEnabled}
           onClick={() => { void handleReveal(); }}
         >
           {working ? "Checking…" : "Reveal phrase"}
@@ -616,9 +711,8 @@ export function RecoverySlide({
                 </div>
               ))}
             </div>
-            <div className="recovery-meta">{words.length} words</div>
-            <button className="btn-ghost recovery-copy" onClick={() => { void handleCopy(); }}>
-              Copy phrase
+            <button className={`btn-ghost recovery-copy ${copied ? "copied" : ""}`} onClick={() => { void handleCopy(); }}>
+              {copied ? "Copied!" : "Copy phrase"}
             </button>
           </>
         )}
@@ -701,6 +795,7 @@ export function DepositSlide({
       setWorking(false);
     }
   }
+  const depositEnabled = Boolean(starknetAddress && amount.trim() && !working);
 
   return (
     <div className={`slide-panel ${open ? "open" : ""}`}>
@@ -708,7 +803,12 @@ export function DepositSlide({
         <span className="slide-title">Deposit</span>
         <button className="slide-close" onClick={onClose}>×</button>
       </div>
-      <div className="slide-body">
+      <div
+        className="slide-body"
+        onKeyDown={event => {
+          runPrimaryActionOnEnter(event, depositEnabled, () => { void handleDeposit(); });
+        }}
+      >
         {!starknetAddress && (
           <div className="slide-inline-notice">
             <span>Connect a Starknet wallet to deposit.</span>
@@ -744,7 +844,7 @@ export function DepositSlide({
         )}
         <button
           className="slide-submit"
-          disabled={!starknetAddress || !amount.trim() || working}
+          disabled={!depositEnabled}
           onClick={() => { void handleDeposit(); }}
         >
           {working ? "Depositing…" : starknetAddress ? `Deposit ${asset}` : "Connect wallet first"}
@@ -854,6 +954,7 @@ export function WithdrawSlide({
       setWorking(false);
     }
   }
+  const withdrawEnabled = Boolean(hostedWithdrawalAvailable && selectedWithdrawNote && !working);
 
   return (
     <div className={`slide-panel ${open ? "open" : ""}`}>
@@ -861,7 +962,12 @@ export function WithdrawSlide({
         <span className="slide-title">Withdraw</span>
         <button className="slide-close" onClick={onClose}>×</button>
       </div>
-      <div className="slide-body">
+      <div
+        className="slide-body"
+        onKeyDown={event => {
+          runPrimaryActionOnEnter(event, withdrawEnabled, () => { void handleWithdraw(); });
+        }}
+      >
         <div className="f-row">
           <label className="f-label">Asset</label>
           <div className="f-input-box">
@@ -922,7 +1028,7 @@ export function WithdrawSlide({
         )}
         <button
           className="slide-submit"
-          disabled={!hostedWithdrawalAvailable || !selectedWithdrawNote || working}
+          disabled={!withdrawEnabled}
           onClick={() => { void handleWithdraw(); }}
         >
           {working ? "Submitting…" : selectedIsRetry ? "Retry STRK20 note claim" : "Withdraw to STRK20 note"}

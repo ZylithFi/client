@@ -6,10 +6,7 @@ import {
   fmtAddr,
   walletRuntime,
 } from "../domain/browserWallet";
-import type {
-  SubmissionTimingPreference,
-  WithdrawalRoutePreference,
-} from "../domain/userPreferences";
+import type { WithdrawalRoutePreference } from "../domain/userPreferences";
 
 export type AppTab = "trade" | "orders" | "assets" | "reports";
 export type Workspace = "taker" | "liquidity";
@@ -26,12 +23,8 @@ export function TopNav({
   activeOrderCount,
   claimableOutputCount,
   walletReady,
-  submissionTimingPreference,
-  setSubmissionTimingPreference,
   withdrawalRoutePreference,
   setWithdrawalRoutePreference,
-  redactSensitiveUi,
-  setRedactSensitiveUi,
   starknetAddress,
   onOpenWallet,
   onDeposit,
@@ -50,12 +43,8 @@ export function TopNav({
   activeOrderCount: number;
   claimableOutputCount: number;
   walletReady: boolean;
-  submissionTimingPreference: SubmissionTimingPreference;
-  setSubmissionTimingPreference: (v: SubmissionTimingPreference) => void;
   withdrawalRoutePreference: WithdrawalRoutePreference;
   setWithdrawalRoutePreference: (v: WithdrawalRoutePreference) => void;
-  redactSensitiveUi: boolean;
-  setRedactSensitiveUi: (v: boolean) => void;
   starknetAddress: string | null;
   onOpenWallet: () => void;
   onDeposit: () => void;
@@ -82,11 +71,6 @@ export function TopNav({
   const btnLabel = starknetAddress
     ? walletReady ? fmtAddr(starknetAddress) : "UNLOCK ZYLITH WALLET"
     : "CONNECT WALLET";
-  const submissionTimingDescription: Record<SubmissionTimingPreference, string> = {
-    fast: "Submit immediately when the batch window is safe.",
-    balanced: "Use moderate timing smoothing inside the batch window.",
-    private: "Use the largest submission delay window for stronger timing privacy.",
-  };
 
   function handleWalletClick() {
     if (!starknetAddress || !walletReady) {
@@ -215,33 +199,10 @@ export function TopNav({
                     onClick={() => { setMenuOpen(false); onRecovery(); }}
                   >
                     View recovery phrase
-                    <span className="meta">24 words</span>
                   </button>
                   <div className="wallet-pref">
                     <div className="wallet-pref-head">
-                      <span>Submission timing</span>
-                      <span>{submissionTimingPreference}</span>
-                    </div>
-                    <div className="wallet-pref-options" aria-label="Submission timing preference">
-                      {(["fast", "balanced", "private"] as SubmissionTimingPreference[]).map(option => (
-                        <button
-                          key={option}
-                          type="button"
-                          className={`wallet-pref-chip ${submissionTimingPreference === option ? "on" : ""}`}
-                          onClick={() => setSubmissionTimingPreference(option)}
-                        >
-                          {option}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="wallet-pref-note">
-                      {submissionTimingDescription[submissionTimingPreference]}
-                    </div>
-                  </div>
-                  <div className="wallet-pref">
-                    <div className="wallet-pref-head">
                       <span>Withdrawal note selection</span>
-                      <span>{withdrawalRoutePreference === "privacy_window" ? "oldest ready" : "largest ready"}</span>
                     </div>
                     <div
                       className="wallet-pref-options"
@@ -249,8 +210,8 @@ export function TopNav({
                       aria-label="Withdrawal note preference"
                     >
                       {([
-                        ["privacy_window", "Oldest ready"],
-                        ["immediate", "Largest ready"],
+                        ["privacy_window", "Oldest"],
+                        ["immediate", "Largest"],
                       ] as Array<[WithdrawalRoutePreference, string]>).map(([option, label]) => (
                         <button
                           key={option}
@@ -261,34 +222,6 @@ export function TopNav({
                           {label}
                         </button>
                       ))}
-                    </div>
-                  </div>
-                  <div className="wallet-pref">
-                    <div className="wallet-pref-head">
-                      <span>Screen privacy</span>
-                      <span>{redactSensitiveUi ? "redacted" : "visible"}</span>
-                    </div>
-                    <div
-                      className="wallet-pref-options"
-                      style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
-                      aria-label="Screen privacy mode"
-                    >
-                      {([
-                        [true, "Redact"],
-                        [false, "Show"],
-                      ] as Array<[boolean, string]>).map(([option, label]) => (
-                        <button
-                          key={String(option)}
-                          type="button"
-                          className={`wallet-pref-chip ${redactSensitiveUi === option ? "on" : ""}`}
-                          onClick={() => setRedactSensitiveUi(option)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="wallet-pref-note">
-                      Hides amounts, refs, commitments, and detailed timelines for screen sharing.
                     </div>
                   </div>
                   <button
@@ -302,14 +235,12 @@ export function TopNav({
                     onClick={() => { setMenuOpen(false); onWithdraw(); }}
                   >
                     Withdraw
-                    <span className="meta">Proof</span>
                   </button>
                   <button
                     className="wallet-menu-item"
                     onClick={handleSwitchWallet}
                   >
                     Switch wallet
-                    <span className="meta">Choose</span>
                   </button>
                 </div>
               )}

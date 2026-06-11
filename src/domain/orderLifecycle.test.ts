@@ -166,7 +166,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("filled");
   });
 
-  it("fails old orders closed for many epochs into no_fill instead of leaving them settling", () => {
+  it("marks settled orders with no matching output as no_fill after the artifact lookback window", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ expectedOutputMetadataCommitment: undefined })],
       batches: [
@@ -298,7 +298,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].filledAmount).toBe("10");
   });
 
-  it("does not mutate legacy orders by amount-only output matching", () => {
+  it("does not mutate orders by amount-only output matching", () => {
     const updated = reconcileOrderLifecycle({
       orders: [
         order({
@@ -560,7 +560,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("no_fill");
   });
 
-  it("does not treat legacy public zero matched count as authoritative no-fill", () => {
+  it("does not treat public zero matched count as authoritative no-fill", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
       batches: [
@@ -604,12 +604,12 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("proof_failed");
   });
 
-  it("marks closed batches with no proof job as no_fill after the grace window", () => {
+  it("marks closed batches with no proof job as stalled after the blocked-settlement window", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
       batches: [
         { batch_id: "batch-1", epoch_id: 10, status: "Closed" },
-        { batch_id: "batch-latest", epoch_id: 12, status: "Open" },
+        { batch_id: "batch-latest", epoch_id: 20, status: "Open" },
       ],
       settlementTranscripts: {},
       withdrawableNotes: [],
@@ -617,6 +617,6 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated[0].status).toBe("no_fill");
+    expect(updated[0].status).toBe("stalled");
   });
 });

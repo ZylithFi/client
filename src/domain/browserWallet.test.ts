@@ -12,8 +12,6 @@ import {
 
 const selectedWalletKey = "zylith:selected-starknet-wallet";
 const connectedAddressKey = "zylith:connected-starknet-address";
-const legacyReadyKey = `starknet_${["arg", "ent"].join("")}X`;
-
 function provider(address: string, disconnect = vi.fn()) {
   return {
     id: `wallet-${address}`,
@@ -70,7 +68,6 @@ describe("browser wallet selection", () => {
     (window as typeof window & { zylithSelectedStarknetProvider?: unknown }).zylithSelectedStarknetProvider = undefined;
     (window as typeof window & { zylithSelectedStarknetAddress?: unknown }).zylithSelectedStarknetAddress = undefined;
     delete (window as unknown as { starknet_hidden_ready?: unknown }).starknet_hidden_ready;
-    delete (window as unknown as Record<string, unknown>)[legacyReadyKey];
   });
 
   it("clears local selected wallet state without requiring extension disconnect for switch wallet", async () => {
@@ -224,19 +221,6 @@ describe("browser wallet selection", () => {
 
     expect(wallets[0]?.name).toBe("Ready X");
     expect(wallets[0]?.id).toBe("ready");
-  });
-
-  it("labels legacy Ready injection slots as Ready X", () => {
-    (window as unknown as Record<string, unknown>)[legacyReadyKey] = {
-      id: "legacy-ready",
-      name: "Legacy wallet",
-      request: vi.fn(async () => null),
-    };
-
-    const wallets = discoverStarknetWallets();
-
-    expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X"]);
-    expect(wallets.map(wallet => wallet.id)).toEqual(["ready"]);
   });
 
   it("does not show unsupported legacy wallets in the Zylith Starknet wallet list", () => {

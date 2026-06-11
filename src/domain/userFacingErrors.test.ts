@@ -39,12 +39,12 @@ describe("userFacingErrorMessage", () => {
     expect(message).not.toMatch(/PaymasterV2Error|TRANSACTION_EXECUTION_ERROR|embedded signer/i);
   });
 
-  it("explains undeployed connected wallets during private deposits", () => {
+  it("explains inactive connected wallets during private deposits", () => {
     const message = userFacingErrorMessage(
       new Error("Private deposit funding setup failed: Connected Starknet wallet must be deployed before depositing."),
     );
 
-    expect(message).toBe("Connected Starknet wallet must be activated with one outgoing transaction before depositing.");
+    expect(message).toBe("Connected wallet could not execute the funding transfer. Activate it in your Starknet wallet and retry.");
     expect(message).not.toMatch(/class hash|contract not found|deployed before depositing/i);
   });
 
@@ -96,6 +96,19 @@ describe("userFacingErrorMessage", () => {
 
     expect(message).toBe("Zylith relay could not verify this renewal package. Refresh, unlock, and retry.");
     expect(message).not.toMatch(/token|bearer|signature|authorization/i);
+  });
+
+  it("explains withdrawal claim-window timing", () => {
+    const message = userFacingErrorMessage(
+      JSON.stringify({
+        error:
+          "Settlement output claim window is not open yet. Retry after the claim delay.",
+      }),
+    );
+
+    expect(message).toBe(
+      "Withdrawal claim window is not open yet. Please retry after the claim delay.",
+    );
   });
 
   it("keeps relayer HTTP failures out of the generic renewal-package bucket", () => {

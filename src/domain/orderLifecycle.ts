@@ -248,7 +248,6 @@ export function reconcileOrderLifecycle({
   withdrawableNotes,
   pairs,
   noFillFallbackEpochs = 10,
-  closedNoProofFallbackEpochs = 2,
   settlementBlockedFallbackEpochs = 10,
   formatClearingPrice,
   toAtomicStr,
@@ -262,7 +261,6 @@ export function reconcileOrderLifecycle({
   withdrawableNotes: OrderLifecycleOutputNote[];
   pairs: OrderLifecyclePair[];
   noFillFallbackEpochs?: number;
-  closedNoProofFallbackEpochs?: number;
   settlementBlockedFallbackEpochs?: number;
   formatClearingPrice: (price: {
     batchId: string;
@@ -406,15 +404,6 @@ export function reconcileOrderLifecycle({
         return { ...order, status: "settling" as LocalOrderStatus };
       }
       const batchEpoch = batch.epoch_id ?? order.epochId;
-      if (
-        batch.status === "Closed" &&
-        !proofStatus &&
-        latestEpoch > 0 &&
-        Number.isFinite(batchEpoch) &&
-        latestEpoch - batchEpoch >= closedNoProofFallbackEpochs
-      ) {
-        return { ...order, status: "no_fill" as LocalOrderStatus };
-      }
       if (
         latestEpoch > 0 &&
         Number.isFinite(batchEpoch) &&

@@ -1,15 +1,5 @@
-@import "@fontsource-variable/archivo/index.css";
-@import "@fontsource/ibm-plex-mono/400.css";
-@import "@fontsource/ibm-plex-mono/500.css";
-@import "@fontsource/syne/700.css";
-@import "@fontsource/inter/400.css";
-@import "@fontsource/inter/500.css";
-@import "@fontsource/jetbrains-mono/400.css";
-@import "@fontsource/jetbrains-mono/500.css";
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.ts";
 
 /* =============================================================================
    Zylith trading-app — canonical design tokens + all app styles
@@ -289,6 +279,7 @@ table  { border-collapse: collapse; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 5px;
   border-radius: 2px;
   background: rgba(var(--z-good-rgb), 0.14);
   box-shadow: inset 0 0 0 1px rgba(var(--z-good-rgb), 0.36);
@@ -357,7 +348,6 @@ table  { border-collapse: collapse; }
 .wallet-pref-chip { height: 24px; box-shadow: inset 0 0 0 1px var(--z-border); border-radius: 0; font-size: 9px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--z-text-muted); background: var(--z-app-inset); }
 .wallet-pref-chip:hover { color: var(--z-text-strong); box-shadow: inset 0 0 0 1px var(--z-border-md); }
 .wallet-pref-chip.on { color: var(--z-accent-text); background: var(--z-accent-dim); box-shadow: inset 0 0 0 1px var(--z-accent-mid); }
-.wallet-pref-note { color: var(--z-text-muted); font-size: 10px; line-height: 1.45; }
 .wallet-connected-box {
   padding: 8px 10px 10px;
   box-shadow: inset 0 1px 0 var(--z-edge-top), inset 1px 0 0 var(--z-edge-left), inset -1px 0 0 var(--z-edge-right), inset 0 -1px 0 var(--z-edge-bottom);
@@ -989,9 +979,9 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   flex-direction: column;
   justify-content: flex-start;
   gap: 12px;
-  padding: 18px;
-  box-shadow: inset 0 0 0 1px var(--z-border-md);
-  background: var(--z-app-inset);
+  padding: 0;
+  box-shadow: none;
+  background: transparent;
 }
 .gate-kicker {
   color: var(--z-accent-text);
@@ -1006,11 +996,13 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   font-size: 22px;
   font-weight: 700;
   line-height: 1.08;
+  text-align: left;
 }
 .gate-body {
   color: var(--z-text-body);
   font-size: 12px;
   line-height: 1.55;
+  text-align: left;
 }
 .gate-primary {
   width: 100%;
@@ -1056,18 +1048,18 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   font-size: 13px;
   letter-spacing: 0.02em;
   color: var(--z-text-body);
-  box-shadow: inset 0 0 0 1px transparent;
+  box-shadow: none;
   background: transparent;
 }
 .side-segment-btn.buy.on {
   color: var(--z-buy-text);
   background: rgba(var(--z-buy-rgb), 0.28);
-  box-shadow: inset 0 0 0 1px var(--z-buy);
+  box-shadow: inset 0 -2px 0 var(--z-buy);
 }
 .side-segment-btn.sell.on {
   color: var(--z-sell-text);
   background: rgba(var(--z-sell-rgb), 0.30);
-  box-shadow: inset 0 0 0 1px var(--z-sell);
+  box-shadow: inset 0 -2px 0 var(--z-sell);
 }
 .amount-side-row { display: block; margin-bottom: 4px; }
 .amount-side-row .f-input-box { border-radius: 0; height: 52px; }
@@ -1115,9 +1107,15 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 
 .f-row     { margin-bottom: 12px; }
 .f-label   { display: block; font-size: 12px; letter-spacing: 0.02em; text-transform: none; color: var(--z-text-body); margin-bottom: 6px; font-weight: 500; }
-.f-input-box { display: flex; align-items: center; height: 42px; background: var(--z-app-inset); box-shadow: inset 0 0 0 1px var(--z-border-md); padding: 0 12px; border-radius: 0; gap: 10px; transition: box-shadow 120ms ease, background 120ms ease; }
+.f-input-box { display: flex; align-items: center; height: 42px; background: var(--z-app-inset); border: 0; box-shadow: inset 0 0 0 1px var(--z-border-md); padding: 0 12px; border-radius: 0; gap: 10px; transition: box-shadow 120ms ease, background 120ms ease; }
 .f-input-box:focus-within { background: var(--z-app-elevated-solid); box-shadow: inset 0 0 0 1px var(--z-border-lit); }
 .f-input   { flex: 1; font-family: var(--z-font-mono); font-weight: 500; font-size: 15px; color: var(--z-text-strong); font-feature-settings: "tnum" 1, "lnum" 1; min-width: 0; }
+.f-input:focus-visible,
+.f-input-box :is(input, select, textarea):focus-visible,
+.asset-select-input:focus-visible,
+.amount-asset-select:focus-visible {
+  outline: 0;
+}
 .f-input::placeholder { color: var(--z-text-muted); opacity: 0.78; }
 .f-unit    { font-size: 11px; letter-spacing: 0.08em; color: var(--z-text-body); text-transform: uppercase; }
 
@@ -1207,7 +1205,8 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .curve-band-cell:last-child { padding-right: 0; width: 22px; text-align: right; }
 .curve-band-input { width: 100%; background: transparent; color: var(--z-text-strong); font-family: var(--z-font-mono); font-size: 12px; padding: 2px 0; outline: none; border: none; }
 .curve-band-input::placeholder { color: var(--z-text-muted); opacity: 0.58; }
-.curve-band-input:focus { outline: none; }
+.curve-band-input:focus,
+.curve-band-input:focus-visible { outline: none; }
 .curve-band-remove { color: var(--z-text-muted); font-size: 14px; line-height: 1; opacity: 0.45; transition: opacity 120ms ease, color 120ms ease; }
 .curve-band-remove:hover { opacity: 1; color: var(--z-status-danger); }
 
@@ -1302,6 +1301,10 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   box-shadow: inset 0 0 0 1px var(--z-border); border-radius: 0;
   background: var(--z-app-inset); color: var(--z-text-strong);
   font-family: var(--z-font-mono); width: 200px;
+}
+.search-input:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--z-border-lit);
 }
 
 .table-zone { flex: 1; min-height: 0; overflow-y: auto; padding: 0 28px 28px; }
@@ -2066,8 +2069,9 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .liq-active-top {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   justify-content: flex-start;
+  min-width: 0;
 }
 .liq-active-top .liq-card-cancel { margin-left: auto; }
 .liq-active-top > span:first-child {
@@ -2077,6 +2081,14 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   font-weight: 700;
   letter-spacing: 0.015em;
 }
+.liq-active-top .side {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.liq-active-top .side.buy { color: var(--z-buy-text); }
+.liq-active-top .side.sell { color: var(--z-sell-text); }
 .liq-panel-hd span {
   color: var(--z-text-strong);
   font-family: var(--z-font-display);
@@ -2085,11 +2097,14 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   letter-spacing: 0.01em;
 }
 .liq-active-rate {
-  margin-top: 12px;
+  margin-left: auto;
   color: var(--z-text-strong);
   font-family: var(--z-font-amount);
-  font-size: 30px;
+  font-size: 14px;
+  font-weight: 700;
   line-height: 1;
+  font-feature-settings: "tnum" 1;
+  white-space: nowrap;
 }
 .liq-depth-bar,
 .liq-mini-bar,
@@ -2111,7 +2126,7 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .liq-card-actions,
 .liq-parent-actions {
   display: flex;
-  gap: 10px;
+  gap: 11px;
   margin-top: 12px;
 }
 .liq-card-actions button {
@@ -2408,6 +2423,10 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   font-family: var(--z-font-mono);
   font-size: 12px;
 }
+.liq-select:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--z-border-lit);
+}
 .liq-select.compact { margin-bottom: 0; height: 34px; }
 .liq-select option { background: var(--z-app-surface-solid); }
 .liq-inventory-strip {
@@ -2510,16 +2529,62 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   margin: 0;
 }
 .liq-active-card {
-  padding: 13px;
-  margin-bottom: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
 }
-.liq-active-card .data-table th,
-.liq-active-card .data-table td {
-  padding-block: 8px;
+.liq-active-ladder-card {
+  display: grid;
+  gap: 10px;
 }
-.liq-band-table {
-  margin-top: 12px;
-  min-width: 0 !important;
+.liq-active-ladder {
+  display: grid;
+  gap: 7px;
+}
+.liq-active-ladder-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.liq-active-price,
+.liq-active-depth-value {
+  color: var(--z-text-body);
+  font-family: var(--z-font-mono);
+  font-size: 10px;
+  line-height: 1;
+  font-feature-settings: "tnum" 1;
+  white-space: nowrap;
+}
+.liq-active-depth-value {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+}
+.liq-active-track {
+  position: relative;
+  display: block;
+  height: 9px;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--z-app-inset);
+  box-shadow: inset 0 0 0 1px var(--z-border);
+}
+.liq-active-depth,
+.liq-active-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  min-width: 1px;
+}
+.liq-active-depth.bid { background: rgba(var(--z-buy-rgb), 0.20); }
+.liq-active-depth.ask { background: rgba(var(--z-sell-rgb), 0.20); }
+.liq-active-fill.bid { background: rgba(var(--z-buy-rgb), 0.62); }
+.liq-active-fill.ask { background: rgba(var(--z-sell-rgb), 0.58); }
+.liq-active-ladder-card .liq-card-actions {
+  margin-top: 0;
+  padding-top: 2px;
+  box-shadow: none;
 }
 .liq-mini-bar {
   margin-top: 0;
@@ -3206,6 +3271,10 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
 .slide-close:hover { color: var(--z-text-strong); }
 .slide-body { flex: 1; padding: 16px 14px; overflow-y: auto; scrollbar-width: none; }
 .slide-body::-webkit-scrollbar { display: none; }
+.slide-body textarea:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--z-border-lit) !important;
+}
 .slide-submit { display: flex; align-items: center; justify-content: center; width: 100%; height: 38px; background: var(--z-accent); color: var(--z-text-strong); font-size: 12px; letter-spacing: 0.10em; text-transform: uppercase; border-radius: var(--z-radius-sm); transition: background 150ms; margin-top: 14px; font-weight: 600; }
 .slide-submit:hover:not(:disabled) { background: var(--z-accent-mid); }
 .slide-submit:disabled { background: var(--z-app-elevated-solid); color: var(--z-text-muted); cursor: not-allowed; }
@@ -3351,11 +3420,56 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   box-shadow: inset 0 0 0 1px var(--z-accent-mid);
   background: var(--z-accent-dim);
 }
+.recovery-phrase-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.recovery-phrase-head .f-label {
+  margin-bottom: 0;
+}
+.recovery-phrase-copy {
+  min-width: 24px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  color: var(--z-text-body);
+  background: transparent;
+  box-shadow: none;
+}
+.recovery-phrase-copy:hover {
+  color: var(--z-text-strong);
+  background: transparent;
+  box-shadow: none;
+}
+.recovery-phrase-copy svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+.recovery-phrase-copy.copied {
+  color: var(--z-accent-text);
+  background: transparent;
+  box-shadow: none;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 .recovery-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   margin-top: 14px;
+}
+.recovery-grid.generated {
+  margin-top: 0;
+  margin-bottom: 10px;
 }
 .recovery-word {
   display: grid;
@@ -3378,28 +3492,10 @@ input.z-range { width: 100%; accent-color: var(--z-accent); }
   text-transform: uppercase;
 }
 .recovery-copy { width: 100%; margin-top: 10px; }
-
-.redact-sensitive-ui .data-table td,
-.redact-sensitive-ui .amount-value,
-.redact-sensitive-ui .balance-value,
-.redact-sensitive-ui .asset-balance-amount,
-.redact-sensitive-ui .capital-state-value,
-.redact-sensitive-ui .liq-stat-strip em,
-.redact-sensitive-ui .liq-package-row em,
-.redact-sensitive-ui .liq-parent-head em,
-.redact-sensitive-ui .kpi-value,
-.redact-sensitive-ui .tca-stat-value,
-.redact-sensitive-ui .curve-preview-val,
-.redact-sensitive-ui .wallet-pill .meta,
-.redact-sensitive-ui .right-asset-amount {
-  color: transparent !important;
-  text-shadow: 0 0 8px rgba(232, 238, 255, 0.64);
-  user-select: none;
-}
-
-.redact-sensitive-ui .data-table td::selection,
-.redact-sensitive-ui .curve-preview-val::selection {
-  background: transparent;
+.recovery-copy.copied {
+  color: var(--z-accent-text);
+  background: var(--z-accent-dim);
+  box-shadow: inset 0 0 0 1px var(--z-accent-mid);
 }
 
 @media (max-width: 1100px) {

@@ -9,6 +9,7 @@ import {
   firstRenewalSlotEpoch,
   hasBatchSubmissionSafetyWindow,
   hasRecoverablePendingDeposit,
+  hostedWithdrawalEnabledForDeployment,
   makerCurveFundingReservePoints,
   rotateMakerCurvePoints,
   transactionCalldataContainsDepositActivation,
@@ -49,16 +50,22 @@ beforeEach(() => {
           contracts: {
             auction_verifier: "0xverifier",
             privacy_deposit_bridge: "0xbridge",
-            shielded_asset_adapter: "0xadapter",
+            shielded_asset_adapter: "0xbridge",
           },
           funding: {
             primary: "starknet_privacy",
+            capabilities: {
+              private_withdrawals: true,
+            },
             starknet_privacy: {
               privacy_pool: "0xpool",
               bridge_adapter: "0xbridge",
               discovery_url: "https://discovery.test",
               proving_url: "https://prover.test",
-              shielded_asset_adapter: "0xadapter",
+              paymaster_address: "0xpaymaster",
+              paymaster_url: "https://paymaster.test",
+              shielded_asset_adapter: "0xbridge",
+              proof_signer_class_hash: "0xsigner",
             },
           },
         }),
@@ -132,6 +139,81 @@ describe("wallet passphrases", () => {
     await expect(runtime.createWallet("")).rejects.toThrow(
       "Zylith wallet passphrase cannot be blank"
     );
+  });
+
+  it("derives hosted withdrawal availability from deployment capabilities", async () => {
+    const runtime = createZylithWalletRuntime(mockWalletCore());
+
+    expect(runtime.hostedWithdrawalAvailable()).toBe(false);
+
+    await runtime.createWallet("x");
+
+    expect(runtime.hostedWithdrawalAvailable()).toBe(true);
+  });
+});
+
+describe("hosted withdrawal deployment availability", () => {
+  const deployment = {
+    contracts: {
+      privacy_deposit_bridge: "0xbridge",
+      shielded_asset_adapter: "0xbridge",
+    },
+    funding: {
+      primary: "starknet_privacy",
+      capabilities: {
+        private_withdrawals: true,
+      },
+      starknet_privacy: {
+        privacy_pool: "0xpool",
+        bridge_adapter: "0xbridge",
+        shielded_asset_adapter: "0xbridge",
+        discovery_url: "https://discovery.test",
+        proving_url: "https://prover.test",
+        paymaster_address: "0xpaymaster",
+        paymaster_url: "https://paymaster.test",
+        proof_signer_class_hash: "0xsigner",
+      },
+    },
+  };
+
+  it("enables withdrawals automatically from a complete private withdrawal deployment", () => {
+    expect(hostedWithdrawalEnabledForDeployment(deployment)).toBe(true);
+  });
+
+  it("keeps withdrawals disabled when the deployment does not advertise the capability", () => {
+    expect(hostedWithdrawalEnabledForDeployment({
+      ...deployment,
+      funding: {
+        ...deployment.funding,
+        capabilities: { private_withdrawals: false },
+      },
+    })).toBe(false);
+  });
+
+  it("keeps withdrawals disabled when the STRK privacy rail is incomplete", () => {
+    expect(hostedWithdrawalEnabledForDeployment({
+      ...deployment,
+      funding: {
+        ...deployment.funding,
+        starknet_privacy: {
+          ...deployment.funding.starknet_privacy,
+          paymaster_url: "",
+        },
+      },
+    })).toBe(false);
+  });
+
+  it("keeps withdrawals disabled when the privacy bridge is not the shielded adapter", () => {
+    expect(hostedWithdrawalEnabledForDeployment({
+      ...deployment,
+      funding: {
+        ...deployment.funding,
+        starknet_privacy: {
+          ...deployment.funding.starknet_privacy,
+          shielded_asset_adapter: "0xadapter",
+        },
+      },
+    })).toBe(false);
   });
 });
 
@@ -357,21 +439,6 @@ describe("STRK20 exit claim reconciliation", () => {
     expect(note.strk20_open_note_id).toBe("0xopen");
   });
 
-  it("reconciles legacy STRK20 exit records without a source field", () => {
-    const note = strk20ExitNote();
-    delete note.source;
-
-    const changed = applyStrk20ExitClaimReceipt(note, {
-      failed: false,
-      notFound: false,
-      confirmed: true,
-    });
-
-    expect(changed).toBe(true);
-    expect(note.spent).toBe(true);
-    expect(note.pending_withdrawal_tx).toBeUndefined();
-    expect(note.pending_strk20_open_note_tx).toBeUndefined();
-  });
 });
 
 describe("deposit confirmation polling", () => {

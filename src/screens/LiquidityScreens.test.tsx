@@ -287,6 +287,53 @@ describe("LiquidityCurvesScreen", () => {
     }));
   });
 
+  it("submits the maker curve when pressing Enter in a band input", async () => {
+    const onSubmitCurve = vi.fn().mockResolvedValue(true);
+    render(
+      <LiquidityCurvesScreen
+        pairs={pairs}
+        records={[]}
+        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
+        pendingDeposits={[]}
+        activePairId="STRK/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onSubmitCurve={onSubmitCurve}
+        onCancelCurve={vi.fn()}
+        onEditCurve={vi.fn()}
+        onPauseCurve={vi.fn()}
+        onResumeCurve={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    const inputs = screen.getAllByRole("textbox");
+    fireEvent.change(inputs[0], { target: { value: "0.01" } });
+    fireEvent.change(inputs[1], { target: { value: "1" } });
+    fireEvent.change(inputs[2], { target: { value: "0.015" } });
+    fireEvent.change(inputs[3], { target: { value: "1" } });
+    fireEvent.change(inputs[4], { target: { value: "0.02" } });
+    fireEvent.change(inputs[5], { target: { value: "1" } });
+
+    await act(async () => {
+      fireEvent.keyDown(inputs[5], { key: "Enter" });
+    });
+
+    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
+      pairId: "STRK/USDC",
+      side: "Buy",
+      curvePoints: [
+        { price: "0.01", baseAmount: "1" },
+        { price: "0.015", baseAmount: "1" },
+        { price: "0.02", baseAmount: "1" },
+      ],
+    }));
+  });
+
   it("shows cancel with the active curve management actions", () => {
     const onCancelCurve = vi.fn();
     const record = {

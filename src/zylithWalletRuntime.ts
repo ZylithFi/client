@@ -36,20 +36,9 @@ const STRATEGY_ORDER_MODES = new Set<OrderMode>([
 ]);
 const MAX_ORDER_FUNDING_INPUTS = 4;
 const DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS = 10;
-const hostedNoteProofPrivacyAcknowledged =
-  normalizeText(
-    import.meta.env.VITE_ZYLITH_ACK_HOSTED_NOTE_PROOF_PRIVACY
-  ).toLowerCase() === "true";
 const hostedNoteConsolidationEnabled =
-  hostedNoteProofPrivacyAcknowledged &&
-  normalizeText(
-    import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_NOTE_CONSOLIDATION
-  ).toLowerCase() === "true";
-const hostedWithdrawalEnabled =
-  hostedNoteProofPrivacyAcknowledged &&
-  normalizeText(
-    import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_WITHDRAWALS
-  ).toLowerCase() === "true";
+  normalizeText(import.meta.env.VITE_ZYLITH_ACK_HOSTED_NOTE_PROOF_PRIVACY).toLowerCase() === "true" &&
+  normalizeText(import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_NOTE_CONSOLIDATION).toLowerCase() === "true";
 const privateReportOutputTagsEnabled =
   normalizeText(
     import.meta.env.VITE_ZYLITH_ENABLE_PRIVATE_REPORT_OUTPUT_TAGS
@@ -712,6 +701,9 @@ type DeploymentConfig = {
   token_addresses?: Record<string, string>;
   funding?: {
     primary?: "starknet_privacy" | string;
+    capabilities?: {
+      private_withdrawals?: boolean;
+    };
     starknet_privacy?: {
       privacy_pool?: string;
       bridge_adapter?: string;
@@ -1108,6 +1100,7 @@ export function createZylithWalletRuntime(
   let recoverySyncInFlight = false;
   let postUnlockSyncInFlight = false;
   let lastRecoverySnapshotAtUnixMs = 0;
+  let deploymentConfigCache: DeploymentConfig | null = null;
   let scanState: WalletScanState = {
     version: 1,
     scanned_artifact_ids: [],
@@ -4253,7 +4246,8 @@ export function createZylithWalletRuntime(
   }
 
   async function submitHostedWithdrawal(rawRequest: unknown) {
-    if (!hostedWithdrawalEnabled) {
+    const deployment = await loadDeploymentConfig();
+    if (!hostedWithdrawalEnabledForDeployment(deployment)) {
       throw new Error("Withdrawals are disabled for this deployment.");
     }
     const request = rawRequest as HostedWithdrawalRequest;
@@ -4275,7 +4269,6 @@ export function createZylithWalletRuntime(
         "Withdrawal proof data is missing. Refresh private state and retry."
       );
     }
-    const deployment = await loadDeploymentConfig();
     const fundingRail = selectedDepositFundingRail(deployment);
     const privacyPoolAddress = requiredNonZeroFelt(
       fundingRail.privacyPool,
@@ -4547,7 +4540,7 @@ export function createZylithWalletRuntime(
   }
 
   function hostedWithdrawalAvailable() {
-    return hostedWithdrawalEnabled;
+    return hostedWithdrawalEnabledForDeployment(deploymentConfigCache ?? {});
   }
 
   function getWithdrawableNotes() {
@@ -5265,10 +5258,12 @@ export function createZylithWalletRuntime(
       const response = await fetch("/deployment.json", {
         headers: { accept: "application/json" },
       });
-      if (!response.ok) return {};
-      return (await response.json()) as DeploymentConfig;
+      if (!response.ok) return deploymentConfigCache ?? {};
+      const deployment = (await response.json()) as DeploymentConfig;
+      deploymentConfigCache = deployment;
+      return deployment;
     } catch {
-      return {};
+      return deploymentConfigCache ?? {};
     }
   }
 
@@ -6219,11 +6214,39 @@ function selectedDepositFundingRail(
     selected.bridgeAdapter &&
     selected.discoveryUrl &&
     selected.provingUrl &&
-    selected.shieldedAssetAdapter
+    selected.shieldedAssetAdapter &&
+    selected.privacyProofSignerClassHash &&
+    normalizeFeltForComparison(selected.bridgeAdapter) ===
+      normalizeFeltForComparison(selected.shieldedAssetAdapter)
   ) {
     return selected;
   }
   throw new Error("Private deposit funding is not fully configured");
+}
+
+export function hostedWithdrawalEnabledForDeployment(deployment: DeploymentConfig) {
+  if (deployment.funding?.primary !== "starknet_privacy") return false;
+  if (deployment.funding?.capabilities?.private_withdrawals !== true) return false;
+  const rail = deployment.funding.starknet_privacy;
+  const bridgeAdapter = rail?.bridge_adapter || deployment.contracts?.privacy_deposit_bridge;
+  const shieldedAssetAdapter =
+    rail?.shielded_asset_adapter || deployment.contracts?.shielded_asset_adapter;
+  if (
+    normalizeFeltForComparison(bridgeAdapter) !==
+    normalizeFeltForComparison(shieldedAssetAdapter)
+  ) {
+    return false;
+  }
+  return Boolean(
+    rail?.privacy_pool &&
+      bridgeAdapter &&
+      shieldedAssetAdapter &&
+      rail.discovery_url &&
+      rail.proving_url &&
+      rail.paymaster_address &&
+      rail.paymaster_url &&
+      rail.proof_signer_class_hash
+  );
 }
 
 async function executeInjectedStarknetCalls(

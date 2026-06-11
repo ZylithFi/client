@@ -366,6 +366,9 @@ export async function submitPrivacyBridgeDeposit(
         (isProofBlockTooRecent(error) || retryableContractVisibilityLag)
       ) {
         lastRetryableError = error;
+        setFundingStage(
+          `Private deposit proof retrying with an older proof block (attempt ${attempt + 2} of ${proofDelayScheduleBlocks.length})`
+        );
         await new Promise((resolve) => setTimeout(resolve, retryableContractVisibilityLag ? 15_000 : 5_000));
         continue;
       }
@@ -498,6 +501,9 @@ export async function submitPrivacyOpenNoteWithdrawal(
         (isProofBlockTooRecent(error) || retryableContractVisibilityLag)
       ) {
         lastRetryableError = error;
+        setFundingStage(
+          `Private withdrawal proof retrying with an older proof block (attempt ${attempt + 2} of ${proofDelayScheduleBlocks.length})`
+        );
         await new Promise((resolve) => setTimeout(resolve, retryableContractVisibilityLag ? 15_000 : 5_000));
         continue;
       }
@@ -518,13 +524,17 @@ async function requireHealthyDiscovery(discoveryProvider: IndexerDiscoveryProvid
 }
 
 async function runFundingStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {
-  setFundingStage(stage);
+  // Stage constants are failure-phrased for error prefixes ("… setup failed");
+  // show the neutral activity in the live progress label so users never see
+  // "… failed: complete" while a step is merely running or done.
+  const activity = stage.replace(/\s+failed$/i, "");
+  setFundingStage(activity);
   try {
     const result = await operation();
-    setFundingStage(`${stage}: complete`);
+    setFundingStage(`${activity}: complete`);
     return result;
   } catch (error) {
-    setFundingStage(`${stage}: failed`);
+    setFundingStage(`${activity}: failed`);
     if (isUserRejected(error)) throw error;
     const wrapped = new Error(`${stage}: ${summarizeFundingError(error)}`);
     (wrapped as Error & { cause?: unknown }).cause = error;
@@ -658,12 +668,6 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     }
     if (activeSourceOwner !== normalizeAddress(input.sourceOwner)) {
       throw new Error("Connected Starknet wallet changed during deposit");
-    }
-    const sourceAccountDeployed = await withFundingSetupStep("checking connected Starknet wallet deployment", () =>
-      isClassDeployed(input.rpcProvider, activeSourceOwner)
-    );
-    if (!sourceAccountDeployed) {
-      throw new Error("Connected Starknet wallet must be deployed before depositing.");
     }
     const sourceBalance = await withFundingSetupStep("reading connected wallet token balance", () =>
       readTokenBalance(

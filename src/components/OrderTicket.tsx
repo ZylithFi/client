@@ -1,6 +1,7 @@
 import { useReducer } from "react";
 import { assetScale, fromAtomicStr, toPriceAtomicStr } from "../domain/assets";
 import type { CurvePoint } from "../domain/makerCurves";
+import { runPrimaryActionOnEnter } from "../domain/primaryEnter";
 import type { WalletBalance } from "../domain/shieldedBalances";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 
@@ -284,7 +285,12 @@ export function OrderTicket({
   }
 
   return (
-    <div className="ticket-zone">
+    <div
+      className="ticket-zone"
+      onKeyDown={event => {
+        runPrimaryActionOnEnter(event, canSubmit, () => { void submitStandard(); });
+      }}
+    >
       <div className="ticket-scroll">
         <div className="side-segment" aria-label="Order side">
           <button

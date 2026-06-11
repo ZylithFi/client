@@ -62,7 +62,7 @@ function privateDepositErrorMessage(message: string): string | null {
     return "Connected wallet changed during deposit. Reconnect the wallet you started with and retry.";
   }
   if (/wallet must be deployed before depositing/i.test(message)) {
-    return "Connected Starknet wallet must be activated with one outgoing transaction before depositing.";
+    return "Connected wallet could not execute the funding transfer. Activate it in your Starknet wallet and retry.";
   }
   if (/PaymasterV2Error|Paymaster error\s*\d+|TRANSACTION_EXECUTION_ERROR/i.test(message)) {
     return "The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.";
@@ -222,6 +222,9 @@ export function userFacingErrorMessage(
   }
   if (/selected (shielded )?note is not withdrawable/i.test(message)) {
     return "Selected note is not withdrawable.";
+  }
+  if (/claim window is not open|claim window.*closed|CLAIM_WINDOW_CLOSED|claim delay/i.test(message)) {
+    return "Withdrawal claim window is not open yet. Please retry after the claim delay.";
   }
   if (/no unlocked (shielded )?note is available to withdraw/i.test(message)) {
     return "No unlocked note is available to withdraw.";
