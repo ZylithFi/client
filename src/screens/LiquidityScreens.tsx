@@ -6,6 +6,7 @@ import { defaultCurveBands } from "../domain/makerCurves";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 import { statusLabel, statusTone } from "../domain/orderLifecycle";
 import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/shieldedBalances";
+import { buildMakerOpsSnapshot } from "../domain/managedLiquidity";
 import type {
   FundingPreview,
   PairConfig,
@@ -1825,9 +1826,13 @@ function LiquidityUtilBars({ values }: { values: number[] }) {
 export function LiquidityAnalyticsScreen({
   records,
   settlementTranscripts,
+  strategies = [],
+  balances = [],
 }: {
   records: LiquidityCurveRecord[];
   settlementTranscripts: Record<string, PublicSettlementTranscript>;
+  strategies?: PrivateStrategySummary[];
+  balances?: WalletBalance[];
 }) {
   const [period, setPeriod] = useState<Period>("30d");
   const cutoff = period === "all" ? 0 : Date.now() - ({ "7d": 7, "30d": 30, "90d": 90 }[period] * 24 * 60 * 60 * 1000);
@@ -1858,6 +1863,12 @@ export function LiquidityAnalyticsScreen({
   const captureBps = weightedMakerCaptureBps(terminalOrders);
   const activeMarkets = new Set(activityRecords.map(record => record.pair)).size;
   const rolledPct = records.length > 0 ? (records.filter(record => record.strategy).length / records.length) * 100 : Number.NaN;
+  const opsSnapshot = buildMakerOpsSnapshot({
+    strategies,
+    orders: records.flatMap(record => record.relatedOrders),
+    balances,
+    fairPrices: [],
+  });
   const marketGroups = new Map<string, {
     pair: string;
     sides: Set<LiquidityCurveRecord["side"]>;
@@ -2028,6 +2039,33 @@ export function LiquidityAnalyticsScreen({
               ))}
             </div>
           </section>
+
+          <section className="an-market-section">
+            <div className="an-market-hd">
+              <div className="an-sec-hd">
+                <span>Maker ops</span>
+                <em>Strategy health and relay attention</em>
+              </div>
+            </div>
+            <div className="an-markets">
+              <div className="an-mkt-hdr" role="row">
+                <span>Area</span>
+                <span>Active</span>
+                <span>Delegated</span>
+                <span>Paused</span>
+                <span>Needs refresh</span>
+                <span>Failures</span>
+              </div>
+              <div className="an-mkt-row" role="row">
+                <span className="an-mkt-name">Managed curves</span>
+                <span className="an-mkt-num">{opsSnapshot.activeStrategies.toLocaleString("en-US")}</span>
+                <span className="an-mkt-num">{opsSnapshot.delegatedStrategies.toLocaleString("en-US")}</span>
+                <span className="an-mkt-num">{opsSnapshot.pausedStrategies.toLocaleString("en-US")}</span>
+                <span className="an-mkt-num">{opsSnapshot.awaitingWalletRefreshSlots.toLocaleString("en-US")}</span>
+                <span className={`an-cap-bps ${opsSnapshot.failedSlots > 0 ? "neg" : "pos"}`}>{opsSnapshot.failedSlots.toLocaleString("en-US")}</span>
+              </div>
+            </div>
+          </section>
         </>
       )}
     </div>
@@ -2171,7 +2209,12 @@ export function LiquidityWorkspace({
         />
       )}
       {tab === "analytics" && (
-        <LiquidityAnalyticsScreen records={records} settlementTranscripts={settlementTranscripts} />
+        <LiquidityAnalyticsScreen
+          records={records}
+          settlementTranscripts={settlementTranscripts}
+          strategies={strategies}
+          balances={balances}
+        />
       )}
     </Fragment>
   );
