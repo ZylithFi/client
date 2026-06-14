@@ -307,9 +307,9 @@ describe("batch submission safety", () => {
     ).toBe(43);
   });
 
-  it("gives managed relays a wider package submission window than self relay", () => {
+  it("submits managed relay packages as soon as their batch opens", () => {
     expect(renewalPackageMaxSubmissionDelayMs("SelfRelay")).toBe(7_000);
-    expect(renewalPackageMaxSubmissionDelayMs("ZylithRelay")).toBe(45_000);
+    expect(renewalPackageMaxSubmissionDelayMs("ZylithRelay")).toBe(0);
   });
 });
 
