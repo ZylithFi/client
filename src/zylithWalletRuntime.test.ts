@@ -11,6 +11,7 @@ import {
   hasRecoverablePendingDeposit,
   hostedWithdrawalEnabledForDeployment,
   makerCurveFundingReservePoints,
+  renewalPackageMaxSubmissionDelayMs,
   rotateMakerCurvePoints,
   transactionCalldataContainsDepositActivation,
   walletWasmModuleUrlAllowed,
@@ -276,6 +277,11 @@ describe("batch submission safety", () => {
         now
       )
     ).toBe(43);
+  });
+
+  it("gives managed relays a wider package submission window than self relay", () => {
+    expect(renewalPackageMaxSubmissionDelayMs("SelfRelay")).toBe(7_000);
+    expect(renewalPackageMaxSubmissionDelayMs("ZylithRelay")).toBe(45_000);
   });
 });
 

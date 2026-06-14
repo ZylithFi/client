@@ -1007,6 +1007,7 @@ const STARKNET_PRIVACY_REGISTRY_PREFIX =
 const STRATEGY_WORKER_INTERVAL_MS = 12_000;
 const DEPOSIT_CONFIRMATION_WORKER_INTERVAL_MS = 5_000;
 const PRIVATE_SUBMISSION_MAX_DELAY_MS = 7_000;
+const MANAGED_RELAY_SUBMISSION_MAX_DELAY_MS = 45_000;
 const MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 5_000;
 const MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
 const BATCH_SUBMISSION_SAFETY_BUFFER_BPS = 2_000;
@@ -3837,7 +3838,9 @@ export function createZylithWalletRuntime(
         submission_safety_buffer_ms: batchSubmissionSafetyBufferMs(
           draft.batchWindowMs
         ),
-        max_submission_delay_ms: PRIVATE_SUBMISSION_MAX_DELAY_MS,
+        max_submission_delay_ms: renewalPackageMaxSubmissionDelayMs(
+          draft.relayMode ?? "SelfRelay"
+        ),
       },
       slots,
     };
@@ -4061,7 +4064,9 @@ export function createZylithWalletRuntime(
         submission_safety_buffer_ms: batchSubmissionSafetyBufferMs(
           strategy.batch_window_ms
         ),
-        max_submission_delay_ms: PRIVATE_SUBMISSION_MAX_DELAY_MS,
+        max_submission_delay_ms: renewalPackageMaxSubmissionDelayMs(
+          strategy.offline_package?.relay_mode ?? "SelfRelay"
+        ),
       },
       slots,
     };
@@ -7297,6 +7302,14 @@ export function firstRenewalSlotEpoch(
   )
     ? batch.epoch_id
     : batch.epoch_id + 1;
+}
+
+export function renewalPackageMaxSubmissionDelayMs(
+  relayMode: "SelfRelay" | "ZylithRelay" = "SelfRelay"
+) {
+  return relayMode === "ZylithRelay"
+    ? MANAGED_RELAY_SUBMISSION_MAX_DELAY_MS
+    : PRIVATE_SUBMISSION_MAX_DELAY_MS;
 }
 
 function privateSubmissionDelayMs(
