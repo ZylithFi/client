@@ -19,10 +19,6 @@ import {
 import { msToCountdown } from "../domain/uiFormat";
 import { noteConsolidationPlans, type NoteConsolidationPlan } from "../domain/noteConsolidation";
 
-const hostedNoteConsolidationEnabled =
-  String(import.meta.env.VITE_ZYLITH_ACK_HOSTED_NOTE_PROOF_PRIVACY ?? "").toLowerCase() === "true" &&
-  String(import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_NOTE_CONSOLIDATION ?? "").toLowerCase() === "true";
-
 function fmtAddr(value?: string): string {
   if (!value) return "—";
   if (value.length < 12) return value;
@@ -111,6 +107,7 @@ export function AssetsScreen({
   claimDelaySeconds,
   orders,
   walletReady,
+  noteConsolidationAvailable,
   starknetAddress,
   onDeposit,
   onClaimNote,
@@ -126,6 +123,7 @@ export function AssetsScreen({
   claimDelaySeconds: number;
   orders: LocalOrder[];
   walletReady: boolean;
+  noteConsolidationAvailable: boolean;
   starknetAddress: string | null;
   onDeposit: (asset?: string) => void;
   onWithdraw: (asset?: string, noteCommitment?: string) => void;
@@ -350,7 +348,7 @@ export function AssetsScreen({
         </div>
       </section>
 
-      {hostedNoteConsolidationEnabled && consolidationPlans.length > 0 && (
+      {noteConsolidationAvailable && consolidationPlans.length > 0 && (
         <section className="asset-lifecycle">
           <div className="asset-section-hd">
             <h2>Note consolidation</h2>

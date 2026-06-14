@@ -36,9 +36,6 @@ const STRATEGY_ORDER_MODES = new Set<OrderMode>([
 ]);
 const MAX_ORDER_FUNDING_INPUTS = 4;
 const DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS = 10;
-const hostedNoteConsolidationEnabled =
-  normalizeText(import.meta.env.VITE_ZYLITH_ACK_HOSTED_NOTE_PROOF_PRIVACY).toLowerCase() === "true" &&
-  normalizeText(import.meta.env.VITE_ZYLITH_ENABLE_HOSTED_NOTE_CONSOLIDATION).toLowerCase() === "true";
 const privateReportOutputTagsEnabled =
   normalizeText(
     import.meta.env.VITE_ZYLITH_ENABLE_PRIVATE_REPORT_OUTPUT_TAGS
@@ -124,6 +121,7 @@ type WalletRuntime = {
   getWithdrawableNotes: () => WithdrawableNote[];
   getPrivateStrategies: () => PrivateStrategySummary[];
   hostedWithdrawalAvailable: () => boolean;
+  hostedNoteConsolidationAvailable: () => boolean;
   loadLocalOrders: () => Promise<LocalOrder[]>;
   saveLocalOrders: (orders: LocalOrder[]) => Promise<void>;
   previewFundingNotes: (order: PrivateOrderDraft) => FundingPreview;
@@ -689,6 +687,9 @@ type DeploymentConfig = {
   rpc_url?: string;
   proof?: {
     native_prover_rpc_url?: string;
+    native_tx_prover_url?: string;
+    note_consolidation_statement_program_address?: string;
+    withdrawal_statement_program_address?: string;
   };
   proof_config?: {
     native_prover_rpc_url?: string;
@@ -703,6 +704,7 @@ type DeploymentConfig = {
     primary?: "starknet_privacy" | string;
     capabilities?: {
       private_withdrawals?: boolean;
+      private_transfers?: boolean;
     };
     starknet_privacy?: {
       privacy_pool?: string;
@@ -2002,7 +2004,8 @@ export function createZylithWalletRuntime(
   async function consolidateNotes(
     request: NoteConsolidationRequest
   ): Promise<NoteConsolidationResult> {
-    if (!hostedNoteConsolidationEnabled) {
+    const deployment = await loadDeploymentConfig();
+    if (!hostedNoteConsolidationEnabledForDeployment(deployment)) {
       throw new Error(
         "Note consolidation is not available in this deployment."
       );
@@ -4548,6 +4551,12 @@ export function createZylithWalletRuntime(
     return hostedWithdrawalEnabledForDeployment(deploymentConfigCache ?? {});
   }
 
+  function hostedNoteConsolidationAvailable() {
+    return hostedNoteConsolidationEnabledForDeployment(
+      deploymentConfigCache ?? {}
+    );
+  }
+
   function getWithdrawableNotes() {
     return notes
       .filter(
@@ -4677,6 +4686,7 @@ export function createZylithWalletRuntime(
     getWithdrawableNotes,
     getPrivateStrategies,
     hostedWithdrawalAvailable,
+    hostedNoteConsolidationAvailable,
     loadLocalOrders,
     saveLocalOrders,
     previewFundingNotes,
@@ -6251,6 +6261,23 @@ export function hostedWithdrawalEnabledForDeployment(deployment: DeploymentConfi
       rail.paymaster_address &&
       rail.paymaster_url &&
       rail.proof_signer_class_hash
+  );
+}
+
+export function hostedNoteConsolidationEnabledForDeployment(
+  deployment: DeploymentConfig
+) {
+  if (deployment.funding?.primary !== "starknet_privacy") return false;
+  if (
+    deployment.funding?.capabilities?.private_withdrawals !== true &&
+    deployment.funding?.capabilities?.private_transfers !== true
+  ) {
+    return false;
+  }
+  return Boolean(
+    deployment.contracts?.auction_verifier &&
+      deployment.proof?.note_consolidation_statement_program_address &&
+      deployment.proof?.native_tx_prover_url
   );
 }
 

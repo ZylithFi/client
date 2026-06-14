@@ -1707,6 +1707,9 @@ export default function App() {
   const withdrawableNotes: WithdrawableNote[] = walletReady
     ? wallet?.getWithdrawableNotes() ?? []
     : [];
+  const noteConsolidationAvailable = walletReady
+    ? wallet?.hostedNoteConsolidationAvailable?.() ?? false
+    : false;
   const strategies: PrivateStrategySummary[] = walletReady
     ? wallet?.getPrivateStrategies?.() ?? []
     : [];
@@ -2779,6 +2782,7 @@ export default function App() {
             claimDelaySeconds={claimDelaySeconds}
             orders={renderOrders}
             walletReady={renderWalletReady}
+            noteConsolidationAvailable={noteConsolidationAvailable}
             starknetAddress={starknetAddress}
             onDeposit={(asset) => {
               if (asset) setSlideAsset(asset);

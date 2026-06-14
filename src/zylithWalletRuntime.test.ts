@@ -9,6 +9,7 @@ import {
   firstRenewalSlotEpoch,
   hasBatchSubmissionSafetyWindow,
   hasRecoverablePendingDeposit,
+  hostedNoteConsolidationEnabledForDeployment,
   hostedWithdrawalEnabledForDeployment,
   makerCurveFundingReservePoints,
   renewalPackageMaxSubmissionDelayMs,
@@ -53,10 +54,15 @@ beforeEach(() => {
             privacy_deposit_bridge: "0xbridge",
             shielded_asset_adapter: "0xbridge",
           },
+          proof: {
+            note_consolidation_statement_program_address: "0xconsolidation",
+            native_tx_prover_url: "https://tx-prover.test",
+          },
           funding: {
             primary: "starknet_privacy",
             capabilities: {
               private_withdrawals: true,
+              private_transfers: true,
             },
             starknet_privacy: {
               privacy_pool: "0xpool",
@@ -146,23 +152,31 @@ describe("wallet passphrases", () => {
     const runtime = createZylithWalletRuntime(mockWalletCore());
 
     expect(runtime.hostedWithdrawalAvailable()).toBe(false);
+    expect(runtime.hostedNoteConsolidationAvailable()).toBe(false);
 
     await runtime.createWallet("x");
 
     expect(runtime.hostedWithdrawalAvailable()).toBe(true);
+    expect(runtime.hostedNoteConsolidationAvailable()).toBe(true);
   });
 });
 
 describe("hosted withdrawal deployment availability", () => {
   const deployment = {
     contracts: {
+      auction_verifier: "0xverifier",
       privacy_deposit_bridge: "0xbridge",
       shielded_asset_adapter: "0xbridge",
+    },
+    proof: {
+      note_consolidation_statement_program_address: "0xconsolidation",
+      native_tx_prover_url: "https://tx-prover.test",
     },
     funding: {
       primary: "starknet_privacy",
       capabilities: {
         private_withdrawals: true,
+        private_transfers: true,
       },
       starknet_privacy: {
         privacy_pool: "0xpool",
@@ -213,6 +227,20 @@ describe("hosted withdrawal deployment availability", () => {
           ...deployment.funding.starknet_privacy,
           shielded_asset_adapter: "0xadapter",
         },
+      },
+    })).toBe(false);
+  });
+
+  it("enables note consolidation automatically from proof deployment capabilities", () => {
+    expect(hostedNoteConsolidationEnabledForDeployment(deployment)).toBe(true);
+  });
+
+  it("keeps note consolidation disabled without the native statement program", () => {
+    expect(hostedNoteConsolidationEnabledForDeployment({
+      ...deployment,
+      proof: {
+        ...deployment.proof,
+        note_consolidation_statement_program_address: "",
       },
     })).toBe(false);
   });

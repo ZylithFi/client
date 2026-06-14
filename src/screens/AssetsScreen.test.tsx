@@ -12,6 +12,7 @@ const baseProps = {
   settlementTranscripts: {},
   claimDelaySeconds: 900,
   orders: [],
+  noteConsolidationAvailable: false,
   onDeposit: vi.fn(),
   onWithdraw: vi.fn(),
   onClaimNote: vi.fn(),
