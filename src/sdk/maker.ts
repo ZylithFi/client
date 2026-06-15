@@ -1,4 +1,5 @@
 import type { PairConfig, TicketSubmitIntent } from "../components/OrderTicket";
+import type { MarketDataEngine } from "../domain/marketData";
 import {
   authorizeDelegatedMakerCurve,
   buildInventorySnapshot,
@@ -59,6 +60,30 @@ export class ZylithMakerSdk {
       input.fairPricePolicy,
       input.now
     );
+    const inventory = buildInventorySnapshot(
+      input.pair,
+      input.balances,
+      pendingExposureFromOrders(input.orders),
+      fairPrice.ok ? fairPrice.price : undefined
+    );
+    return buildManagedCurvePlan({
+      pair: input.pair,
+      fairPrice,
+      inventory,
+      config: input.strategy,
+      risk: input.risk,
+    });
+  }
+
+  async buildCurvesFromMarketData(input: {
+    pair: PairConfig;
+    balances: WalletBalance[];
+    orders: LocalOrder[];
+    marketData: MarketDataEngine;
+    strategy: ManagedStrategyConfig;
+    risk: ManagedRiskPolicy;
+  }): Promise<ManagedCurvePlan> {
+    const fairPrice = await input.marketData.fairPrice(input.pair.pair_id);
     const inventory = buildInventorySnapshot(
       input.pair,
       input.balances,

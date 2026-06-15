@@ -3,6 +3,7 @@ import { ZylithMakerSdk } from "./maker";
 import { ZylithRelaySdk } from "./relay";
 import { ZylithTraderSdk, type TraderWalletRuntime } from "./trader";
 import type { OfflineRenewalPackage } from "../offlineRenewalOperator";
+import { MarketDataEngine } from "../domain/marketData";
 
 describe("ZylithTraderSdk", () => {
   it("submits orders through the wallet runtime and polls settlement", async () => {
@@ -101,6 +102,60 @@ describe("ZylithMakerSdk", () => {
     const result = await sdk.submitCurve(wallet, plan.curves[0]);
     expect(result.relayStatus).toMatchObject({ package_id: "pkg" });
     expect(wallet.markPrivateStrategyRelayRegistered).toHaveBeenCalledWith("strategy-1");
+  });
+
+  it("builds managed curves from a market data engine", async () => {
+    const sdk = new ZylithMakerSdk();
+    const marketData = new MarketDataEngine({
+      sources: [
+        { id: "a", observe: async (pair) => ({ source: "a", pair, price: 1000, observedAt: 100 }) },
+        { id: "b", observe: async (pair) => ({ source: "b", pair, price: 1001, observedAt: 100 }) },
+      ],
+      fairPricePolicy: { maxStalenessMs: 1000, maxDivergenceBps: 50, minSources: 2 },
+      now: () => 100,
+    });
+    const plan = await sdk.buildCurvesFromMarketData({
+      pair: {
+        pair_id: "ETH/USDC",
+        base_asset_id: "ETH",
+        quote_asset_id: "USDC",
+        min_order_amount: "0.01",
+        enabled: true,
+      },
+      balances: [
+        { asset: "ETH", available: "5", locked: "0" },
+        { asset: "USDC", available: "5000", locked: "0" },
+      ],
+      orders: [],
+      marketData,
+      strategy: {
+        pair: "ETH/USDC",
+        side: "Ask",
+        targetBaseRatio: 0.5,
+        baseSpreadBps: 30,
+        volatilityBps: 10,
+        inventorySkewBps: 50,
+        bandCount: 3,
+        maxEpochBase: 3,
+        minBandBase: 0.1,
+        maxExposureBase: 3,
+        relayMode: "ZylithRelay",
+        durationHours: 24,
+      },
+      risk: {
+        minSpreadBps: 10,
+        maxSpreadBps: 200,
+        maxPriceDeviationBps: 500,
+        maxEpochBase: 5,
+        maxInventoryImbalanceBps: 9000,
+        allowBid: true,
+        allowAsk: true,
+      },
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.fairPrice.price).toBe(1000.5);
+    expect(plan.curves).toHaveLength(1);
   });
 });
 
