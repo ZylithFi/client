@@ -35,7 +35,7 @@ export class ZylithRelaySdk {
 
   constructor(options: RelaySdkOptions) {
     this.relayUrl = stripTrailingSlash(options.relayUrl);
-    this.fetcher = options.fetchImpl ?? fetch;
+    this.fetcher = options.fetchImpl ?? defaultFetch();
   }
 
   async registerPackage(renewalPackage: OfflineRenewalPackage): Promise<RelayPackageStatus> {
@@ -148,4 +148,8 @@ async function responseError(response: Response): Promise<string> {
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+function defaultFetch(): typeof fetch {
+  return fetch.bind(globalThis);
 }

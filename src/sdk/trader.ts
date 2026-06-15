@@ -30,6 +30,12 @@ export type PrivateReportRequest = {
   orders?: Array<{ order_commitment: string; cancellation_secret: string }>;
 };
 
+export type SettlementOutputWithdrawalOptions = {
+  noteCommitment?: string;
+  asset?: string;
+  pair?: string;
+};
+
 export type PublicProofJobStatus = {
   batch_id: string;
   state: string;
@@ -47,7 +53,7 @@ export class ZylithTraderSdk {
   constructor(options: TraderSdkOptions) {
     this.coordinatorUrl = stripTrailingSlash(options.coordinatorUrl);
     this.proverUrl = stripTrailingSlash(options.proverUrl);
-    this.fetcher = options.fetchImpl ?? fetch;
+    this.fetcher = options.fetchImpl ?? defaultFetch();
   }
 
   async currentBatch(pair: string): Promise<BatchSummary> {
@@ -95,6 +101,23 @@ export class ZylithTraderSdk {
     return wallet.submitHostedWithdrawal({ note_commitment: noteCommitment, asset });
   }
 
+  async withdrawSettlementOutput(
+    wallet: TraderWalletRuntime,
+    options: SettlementOutputWithdrawalOptions = {}
+  ): Promise<unknown> {
+    const notes = wallet.getWithdrawableNotes?.() ?? [];
+    const note = notes.find((candidate) =>
+      candidate.source === "settlement_output" &&
+      !candidate.locked &&
+      !candidate.spent &&
+      (!options.noteCommitment || candidate.note_commitment === options.noteCommitment) &&
+      (!options.asset || candidate.asset === options.asset) &&
+      (!options.pair || candidate.maker_attribution?.pair_id === options.pair)
+    );
+    if (!note) throw new Error("No withdrawable settlement output matches the request");
+    return this.withdraw(wallet, note.note_commitment, note.asset);
+  }
+
   private async getJson<T>(url: string): Promise<T> {
     const response = await this.fetcher(url, { headers: { accept: "application/json" } });
     if (!response.ok) throw new Error(await responseError(response));
@@ -116,6 +139,10 @@ async function responseError(response: Response): Promise<string> {
 
 function stripTrailingSlash(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+function defaultFetch(): typeof fetch {
+  return fetch.bind(globalThis);
 }
 
 function sleep(ms: number): Promise<void> {

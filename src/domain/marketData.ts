@@ -56,7 +56,7 @@ export type HttpJsonPriceSourceOptions = {
 };
 
 export function createHttpJsonPriceSource(options: HttpJsonPriceSourceOptions): MarketDataSource {
-  const fetcher = options.fetchImpl ?? fetch;
+  const fetcher = options.fetchImpl ?? defaultFetch();
   return {
     id: options.id,
     async observe(pair, requestOptions) {
@@ -95,7 +95,7 @@ export type StarknetOraclePriceSourceOptions = {
 };
 
 export function createStarknetOraclePriceSource(options: StarknetOraclePriceSourceOptions): MarketDataSource {
-  const fetcher = options.fetchImpl ?? fetch;
+  const fetcher = options.fetchImpl ?? defaultFetch();
   return {
     id: options.id,
     async observe(pair, requestOptions) {
@@ -203,4 +203,8 @@ function feltNumber(value: string | undefined): number {
   } catch {
     return Number.NaN;
   }
+}
+
+function defaultFetch(): typeof fetch {
+  return fetch.bind(globalThis);
 }

@@ -86,7 +86,7 @@ describe("market data adapters", () => {
     });
   });
 
-  it("uses latest settlement transcript as an explicit fallback source", async () => {
+  it("reads latest settlement transcript as an analytics source", async () => {
     const source = createLastClearingPriceSource("last-clearing", {
       old: {
         batch_id: "old",

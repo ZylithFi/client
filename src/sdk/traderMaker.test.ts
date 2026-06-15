@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ZylithMakerSdk } from "./maker";
+import { createMakerWalletRuntimeAdapter, MakerCurveSubmissionError, ZylithMakerSdk, type RawMakerOrderDraft } from "./maker";
 import { ZylithRelaySdk } from "./relay";
 import { ZylithTraderSdk, type TraderWalletRuntime } from "./trader";
 import type { OfflineRenewalPackage } from "../offlineRenewalOperator";
@@ -31,6 +31,58 @@ describe("ZylithTraderSdk", () => {
     await expect(sdk.submitPrivateOrder(wallet, intent())).resolves.toMatchObject({ order_commitment: "0xorder" });
     await expect(sdk.waitForSettlement("batch-1", { intervalMs: 1, timeoutMs: 100 })).resolves.toMatchObject({ state: "confirmed-onchain" });
   });
+
+  it("withdraws runner settlement outputs without selecting deposit notes", async () => {
+    const submitHostedWithdrawal = vi.fn(async () => ({ transaction_hash: "0xwithdraw" }));
+    const wallet: TraderWalletRuntime = {
+      submitPrivateOrder: vi.fn(async () => ({ order_commitment: "0xorder" })),
+      submitHostedWithdrawal,
+      getWithdrawableNotes: () => [
+        {
+          note_commitment: "0xdeposit",
+          source: "deposit",
+          asset: "STRK",
+          amount: "1",
+          locked: false,
+          spent: false,
+          metadata_commitment: "0xmeta1",
+        },
+        {
+          note_commitment: "0xlocked",
+          source: "settlement_output",
+          asset: "STRK",
+          amount: "1",
+          locked: true,
+          spent: false,
+          metadata_commitment: "0xmeta2",
+          maker_attribution: { version: 1, pair_id: "ETH/USDC", order_commitment: "0xorder", funding_note_ref: "0xfund", side: "Sell", clearing_price: "1000", filled_base_amount: "1", bands: [] },
+        },
+        {
+          note_commitment: "0xsettlement",
+          source: "settlement_output",
+          asset: "STRK",
+          amount: "1",
+          locked: false,
+          spent: false,
+          metadata_commitment: "0xmeta3",
+          maker_attribution: { version: 1, pair_id: "ETH/USDC", order_commitment: "0xorder", funding_note_ref: "0xfund", side: "Sell", clearing_price: "1000", filled_base_amount: "1", bands: [] },
+        },
+      ],
+    };
+    const sdk = new ZylithTraderSdk({
+      coordinatorUrl: "https://coordinator.example",
+      proverUrl: "https://prover.example",
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+    });
+
+    await expect(sdk.withdrawSettlementOutput(wallet, { pair: "ETH/USDC", asset: "STRK" })).resolves.toMatchObject({
+      transaction_hash: "0xwithdraw",
+    });
+    expect(submitHostedWithdrawal).toHaveBeenCalledWith({
+      note_commitment: "0xsettlement",
+      asset: "STRK",
+    });
+  });
 });
 
 describe("ZylithMakerSdk", () => {
@@ -59,8 +111,8 @@ describe("ZylithMakerSdk", () => {
         enabled: true,
       },
       balances: [
-        { asset: "ETH", available: "5", locked: "0" },
-        { asset: "USDC", available: "5000", locked: "0" },
+        { asset: "ETH", available: "5000000000000000000", locked: "0" },
+        { asset: "USDC", available: "5000000000", locked: "0" },
       ],
       orders: [],
       marketObservations: [
@@ -104,6 +156,27 @@ describe("ZylithMakerSdk", () => {
     expect(wallet.markPrivateStrategyRelayRegistered).toHaveBeenCalledWith("strategy-1");
   });
 
+  it("marks relay registration outages as partial maker exposure", async () => {
+    const relay = new ZylithRelaySdk({
+      relayUrl: "https://relay.example",
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({ error: "relay unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch,
+    });
+    const sdk = new ZylithMakerSdk({ relay });
+    const wallet = {
+      submitPrivateOrder: vi.fn(async () => ({ offline_package: packageFixture(), strategy_id: "strategy-1" })),
+    };
+
+    await expect(sdk.submitCurve(wallet, managedCurve())).rejects.toMatchObject({
+      name: "MakerCurveSubmissionError",
+      partial: true,
+      strategyId: "strategy-1",
+      offlinePackage: expect.objectContaining({ package_id: "pkg" }),
+    } satisfies Partial<MakerCurveSubmissionError>);
+  });
+
   it("builds managed curves from a market data engine", async () => {
     const sdk = new ZylithMakerSdk();
     const marketData = new MarketDataEngine({
@@ -123,8 +196,8 @@ describe("ZylithMakerSdk", () => {
         enabled: true,
       },
       balances: [
-        { asset: "ETH", available: "5", locked: "0" },
-        { asset: "USDC", available: "5000", locked: "0" },
+        { asset: "ETH", available: "5000000000000000000", locked: "0" },
+        { asset: "USDC", available: "5000000000", locked: "0" },
       ],
       orders: [],
       marketData,
@@ -156,6 +229,130 @@ describe("ZylithMakerSdk", () => {
     if (!plan.ok) return;
     expect(plan.fairPrice.price).toBe(1000.5);
     expect(plan.curves).toHaveLength(1);
+  });
+
+  it("normalizes raw wallet balances before compiling managed curve sizes", async () => {
+    const sdk = new ZylithMakerSdk();
+    const plan = sdk.buildCurves({
+      pair: {
+        pair_id: "ETH/USDC",
+        base_asset_id: "ETH",
+        quote_asset_id: "USDC",
+        min_order_amount: "0.01",
+        enabled: true,
+      },
+      balances: [
+        { asset: "ETH", available: "2000000000000000000", locked: "0" },
+        { asset: "USDC", available: "1000000000", locked: "0" },
+      ],
+      orders: [],
+      marketObservations: [
+        { pair: "ETH/USDC", source: "a", price: 1000, observedAt: 100 },
+        { pair: "ETH/USDC", source: "b", price: 1000, observedAt: 100 },
+      ],
+      fairPricePolicy: { maxStalenessMs: 1000, maxDivergenceBps: 50, minSources: 2 },
+      strategy: {
+        pair: "ETH/USDC",
+        side: "Both",
+        targetBaseRatio: 0.5,
+        baseSpreadBps: 30,
+        volatilityBps: 10,
+        inventorySkewBps: 50,
+        bandCount: 2,
+        maxEpochBase: 5,
+        minBandBase: 0.1,
+        maxExposureBase: 5,
+        relayMode: "SelfRelay",
+        durationHours: 1,
+      },
+      risk: {
+        minSpreadBps: 10,
+        maxSpreadBps: 200,
+        maxPriceDeviationBps: 500,
+        maxEpochBase: 5,
+        maxInventoryImbalanceBps: 9000,
+        allowBid: true,
+        allowAsk: true,
+      },
+      now: 100,
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.inventory.availableBase).toBe(2);
+    expect(plan.inventory.availableQuote).toBe(1000);
+    expect(plan.curves.find((curve) => curve.side === "Sell")?.maxBaseAmount).toBeLessThanOrEqual(2);
+    expect(plan.curves.find((curve) => curve.side === "Buy")?.maxBaseAmount).toBeLessThanOrEqual(1);
+  });
+
+  it("adapts managed curve intents to the raw wallet runtime submission shape", async () => {
+    const submitted: RawMakerOrderDraft[] = [];
+    const rawRuntime = {
+      submitPrivateOrder: vi.fn(async (draft: RawMakerOrderDraft) => {
+        submitted.push(draft);
+        return { strategy_id: "strategy-1" };
+      }),
+    };
+    const adapter = createMakerWalletRuntimeAdapter({
+      runtime: rawRuntime,
+      pairForIntent: () => ({
+        pair_id: "ETH/USDC",
+        base_asset_id: "ETH",
+        quote_asset_id: "USDC",
+        min_order_amount: "0.01",
+        enabled: true,
+      }),
+      currentBatch: async () => ({
+        batch_id: "batch-1",
+        pair_id: "ETH/USDC",
+        epoch_id: 1,
+        close_time_unix_ms: 60_000,
+        status: "Open",
+        order_count_bucket: "0-7",
+      }),
+      batchWindowMs: 90_000,
+    });
+
+    await expect(adapter.submitPrivateOrder({
+      pairId: "ETH/USDC",
+      side: "Buy",
+      shape: "curve",
+      stratKind: "Repeat",
+      resting: true,
+      amount: "1",
+      limitPrice: "",
+      minFill: "0",
+      fillOrKill: false,
+      curvePoints: [
+        { price: "990", baseAmount: "0.5" },
+        { price: "1000", baseAmount: "0.5" },
+      ],
+      inventoryCap: "1",
+      durationHours: "1",
+      childSize: "1",
+      priceLimit: "",
+      jitter: 0,
+      relayMode: "ZylithRelay",
+      relayOperator: "ZylithRelay",
+    })).resolves.toMatchObject({ strategy_id: "strategy-1" });
+
+    expect(submitted).toEqual([expect.objectContaining({
+      pair: "ETH/USDC",
+      side: "Buy",
+      mode: "Resting",
+      amount: "1000000000000000000",
+      limitPrice: "1000000000",
+      minFill: "0",
+      batchId: "batch-1",
+      durationBatches: 40,
+      childAmount: "1000000000000000000",
+      makerInventoryCap: "1000000000000000000",
+      offlineDelegation: true,
+      relayMode: "ZylithRelay",
+    })]);
+    expect(submitted[0].makerCurvePoints).toEqual([
+      { price: "990000000", baseAmount: "500000000000000000" },
+      { price: "1000000000", baseAmount: "500000000000000000" },
+    ]);
   });
 });
 
@@ -204,6 +401,21 @@ function packageFixture(): OfflineRenewalPackage {
       max_submission_delay_ms: 0,
     },
     slots: [],
+  };
+}
+
+function managedCurve() {
+  return {
+    pair: "ETH/USDC",
+    side: "Sell" as const,
+    fairPrice: 1000,
+    reservationPrice: 1000,
+    spreadBps: 40,
+    inventorySkewBps: 0,
+    maxBaseAmount: 1,
+    points: [{ price: 1002, baseAmount: 1 }],
+    relayMode: "ZylithRelay" as const,
+    durationHours: 1,
   };
 }
 

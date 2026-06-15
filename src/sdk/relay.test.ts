@@ -1,8 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OfflineRenewalPackage } from "../offlineRenewalOperator";
 import { relayAuthorizationHeaders, ZylithRelaySdk } from "./relay";
 
 describe("ZylithRelaySdk", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("registers packages and fetches results with package auth headers", async () => {
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -23,6 +27,28 @@ describe("ZylithRelaySdk", () => {
 
   it("omits auth headers when package authorization is incomplete", () => {
     expect(relayAuthorizationHeaders({ package_id: "pkg" })).toEqual({});
+  });
+
+  it("binds the default browser fetch before issuing relay requests", async () => {
+    vi.stubGlobal("fetch", function (this: unknown, input: RequestInfo | URL) {
+      expect(this).toBe(globalThis);
+      expect(String(input)).toBe("https://relay.example/packages");
+      return Promise.resolve(jsonResponse({
+        package_id: "pkg",
+        package_commitment: "0xpkg",
+        pair: "ETH/USDC",
+        start_epoch: 1,
+        end_epoch: 2,
+        slot_count: 1,
+        relay_mode: "ZylithRelay",
+        pending_slots: 1,
+        submitted_slots: 0,
+        failed_slots: 0,
+        updated_at_unix_ms: 1,
+      }));
+    });
+    const sdk = new ZylithRelaySdk({ relayUrl: "https://relay.example" });
+    await expect(sdk.registerPackage(packageFixture())).resolves.toMatchObject({ package_id: "pkg" });
   });
 });
 

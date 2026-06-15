@@ -131,7 +131,7 @@ export async function relayOfflineRenewalPackage(
     const verified = await options.verifyPackage(renewalPackage);
     if (!verified) throw new Error("Offline renewal package authorization is invalid");
   }
-  const fetcher = options.fetchImpl ?? fetch;
+  const fetcher = options.fetchImpl ?? defaultFetch();
   const coordinatorUrl = normalizeUrl(options.coordinatorUrl || renewalPackage.relay_policy.coordinator_url);
   const proverUrl = normalizeUrl(options.proverUrl || renewalPackage.relay_policy.prover_url);
   if (!coordinatorUrl || !proverUrl) {
@@ -413,4 +413,8 @@ function delay(ms: number) {
 
 function normalizeUrl(value: string) {
   return value.replace(/\/+$/, "");
+}
+
+function defaultFetch(): typeof fetch {
+  return fetch.bind(globalThis);
 }

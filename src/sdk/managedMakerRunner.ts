@@ -14,7 +14,7 @@ import {
 } from "../domain/managedLiquidity";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 import type { WalletBalance } from "../domain/shieldedBalances";
-import { ZylithMakerSdk, type MakerWalletRuntime } from "./maker";
+import { MakerCurveSubmissionError, ZylithMakerSdk, type MakerWalletRuntime } from "./maker";
 
 export type ManagedMakerRunnerRuntime = MakerWalletRuntime & {
   getBalances: () => WalletBalance[];
@@ -67,6 +67,17 @@ export type ManagedMakerRunnerEvent =
   | { type: "skipped"; strategyId: string; pair: string; batchId?: string; epochId?: number; reason: string }
   | { type: "failed"; strategyId: string; pair: string; batchId?: string; epochId?: number; reason: string };
 
+export type ManagedMakerRunnerTelemetry = {
+  submitted: number;
+  skipped: number;
+  failed: number;
+  lastEventAt?: number;
+  lastSubmittedAt?: number;
+  lastSkippedAt?: number;
+  lastFailedAt?: number;
+  lastFailureReason?: string;
+};
+
 export type ManagedMakerRunnerOptions = {
   sdk: ZylithMakerSdk;
   runtime: ManagedMakerRunnerRuntime;
@@ -103,6 +114,7 @@ export class ZylithManagedMakerRunner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private state: ManagedMakerRunnerState = emptyState();
+  private telemetry: ManagedMakerRunnerTelemetry = emptyTelemetry();
 
   constructor(options: ManagedMakerRunnerOptions) {
     this.sdk = options.sdk;
@@ -186,6 +198,10 @@ export class ZylithManagedMakerRunner {
     return cloneState(this.state);
   }
 
+  telemetrySnapshot(): ManagedMakerRunnerTelemetry {
+    return { ...this.telemetry };
+  }
+
   private async runStrategy(
     entry: ManagedMakerRunnerStrategy,
     balances: WalletBalance[],
@@ -233,13 +249,25 @@ export class ZylithManagedMakerRunner {
     };
     this.state.submittedEpochs[key] = submission;
     await this.persistState();
-    for (const curve of curves) {
-      const result = await this.sdk.submitCurve(this.runtime, curve);
-      if (result.strategyId) submission.strategyIds.push(result.strategyId);
-      if (result.offlinePackage?.package_id) submission.packageIds.push(result.offlinePackage.package_id);
-      submission.curveCount += 1;
-      this.state.submittedEpochs[key] = submission;
+    try {
+      for (const curve of curves) {
+        const result = await this.sdk.submitCurve(this.runtime, curve);
+        if (result.strategyId) submission.strategyIds.push(result.strategyId);
+        if (result.offlinePackage?.package_id) submission.packageIds.push(result.offlinePackage.package_id);
+        submission.curveCount += 1;
+        this.state.submittedEpochs[key] = submission;
+        await this.persistState();
+      }
+    } catch (error) {
+      if (error instanceof MakerCurveSubmissionError && error.partial) {
+        if (error.strategyId) submission.strategyIds.push(error.strategyId);
+        if (error.offlinePackage?.package_id) submission.packageIds.push(error.offlinePackage.package_id);
+        this.state.submittedEpochs[key] = submission;
+      } else if (!hasPartialSubmission(submission)) {
+        delete this.state.submittedEpochs[key];
+      }
       await this.persistState();
+      throw error;
     }
     this.emit({
       type: "submitted",
@@ -286,6 +314,19 @@ export class ZylithManagedMakerRunner {
   }
 
   private emit(event: ManagedMakerRunnerEvent): void {
+    const now = this.now();
+    this.telemetry.lastEventAt = now;
+    if (event.type === "submitted") {
+      this.telemetry.submitted += 1;
+      this.telemetry.lastSubmittedAt = now;
+    } else if (event.type === "skipped") {
+      this.telemetry.skipped += 1;
+      this.telemetry.lastSkippedAt = now;
+    } else {
+      this.telemetry.failed += 1;
+      this.telemetry.lastFailedAt = now;
+      this.telemetry.lastFailureReason = event.reason;
+    }
     this.onEvent?.(event);
   }
 }
@@ -323,6 +364,16 @@ function emptyState(): ManagedMakerRunnerState {
   return { submittedEpochs: {}, failures: [] };
 }
 
+function emptyTelemetry(): ManagedMakerRunnerTelemetry {
+  return { submitted: 0, skipped: 0, failed: 0 };
+}
+
 function epochKey(strategyId: string, batchId: string): string {
   return `${strategyId}:${batchId}`;
+}
+
+function hasPartialSubmission(submission: ManagedMakerEpochSubmission): boolean {
+  return submission.curveCount > 0 ||
+    submission.strategyIds.length > 0 ||
+    submission.packageIds.length > 0;
 }

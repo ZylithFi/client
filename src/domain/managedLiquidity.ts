@@ -60,6 +60,8 @@ export type ManagedStrategyConfig = {
   pair: string;
   side: "Bid" | "Ask" | "Both";
   targetBaseRatio: number;
+  targetBaseRatioMin?: number;
+  targetBaseRatioMax?: number;
   baseSpreadBps: number;
   volatilityBps: number;
   inventorySkewBps: number;
@@ -142,6 +144,39 @@ export type MakerOpsSnapshot = {
   balances: WalletBalance[];
 };
 
+export type ManagedBacktestEpoch = {
+  epochId: number;
+  observedAt: number;
+  observations: MarketObservation[];
+  clearingPrice?: number;
+  fillFractions?: Partial<Record<"Buy" | "Sell", number>>;
+  pending?: PendingExposure[];
+};
+
+export type ManagedBacktestEpochResult = {
+  epochId: number;
+  plan: ManagedCurvePlan;
+  fills: Array<{
+    side: "Buy" | "Sell";
+    baseAmount: number;
+    quoteAmount: number;
+    executionPrice: number;
+  }>;
+  baseBalance: number;
+  quoteBalance: number;
+  markedValueQuote: number;
+};
+
+export type ManagedBacktestResult = {
+  pair: string;
+  epochs: ManagedBacktestEpochResult[];
+  finalBase: number;
+  finalQuote: number;
+  initialMarkedValueQuote: number;
+  finalMarkedValueQuote: number;
+  pnlQuote: number;
+};
+
 export function selectFairPrice(
   pair: string,
   observations: MarketObservation[],
@@ -219,7 +254,9 @@ export function buildInventorySnapshot(
   const pendingSellBase = pairPending
     .filter((exposure) => exposure.side === "Sell")
     .reduce((sum, exposure) => sum + exposure.baseAmount, 0);
-  const pendingQuote = pairPending.reduce((sum, exposure) => sum + exposure.quoteAmount, 0);
+  const pendingQuote = pairPending
+    .filter((exposure) => exposure.side === "Buy")
+    .reduce((sum, exposure) => sum + exposure.quoteAmount, 0);
   const totalBase = availableBase + lockedBase + pendingBuyBase - pendingSellBase;
   const totalQuoteAsBase = availableQuote > 0 && referencePrice && referencePrice > 0 ? availableQuote / referencePrice : 0;
   const denominator = totalBase + totalQuoteAsBase;
@@ -250,23 +287,21 @@ export function buildManagedCurvePlan(input: {
   }
   const fairPrice = input.fairPrice;
   const clipped: string[] = [];
+  const target = targetBand(input.config);
   const spreadBps = clamp(
     input.config.baseSpreadBps + input.config.volatilityBps,
     input.risk.minSpreadBps,
     input.risk.maxSpreadBps
   );
   if (spreadBps !== input.config.baseSpreadBps + input.config.volatilityBps) clipped.push("spread");
-  const imbalanceBps = (input.inventory.baseRatio - input.config.targetBaseRatio) * 10_000;
-  if (Math.abs(imbalanceBps) > input.risk.maxInventoryImbalanceBps) {
-    return {
-      ok: false,
-      reason: "inventory imbalance exceeds risk policy",
-      fairPrice: input.fairPrice,
-      inventory: input.inventory,
-    };
-  }
+  const imbalanceRatio = inventoryImbalanceRatio(input.inventory.baseRatio, target);
+  const imbalanceBps = imbalanceRatio * 10_000;
+  const forceAskOnly = imbalanceBps > input.risk.maxInventoryImbalanceBps;
+  const forceBidOnly = imbalanceBps < -input.risk.maxInventoryImbalanceBps;
+  if (forceAskOnly) clipped.push("bid-disabled-by-inventory");
+  if (forceBidOnly) clipped.push("ask-disabled-by-inventory");
   const inventorySkewBps = clamp(
-    (imbalanceBps / 10_000) * input.config.inventorySkewBps,
+    imbalanceRatio * input.config.inventorySkewBps,
     -input.risk.maxPriceDeviationBps,
     input.risk.maxPriceDeviationBps
   );
@@ -274,13 +309,21 @@ export function buildManagedCurvePlan(input: {
   const maxBaseAmount = Math.min(input.config.maxEpochBase, input.risk.maxEpochBase, input.config.maxExposureBase);
   if (maxBaseAmount <= 0) return { ok: false, reason: "max epoch size is zero", fairPrice: input.fairPrice, inventory: input.inventory };
   const curves: ManagedCurveDraft[] = [];
-  if ((input.config.side === "Bid" || input.config.side === "Both") && input.risk.allowBid) {
-    curves.push(buildSideCurve({ ...input, fairPrice }, "Buy", reservationPrice, spreadBps, inventorySkewBps, maxBaseAmount));
+  if (!forceAskOnly && (input.config.side === "Bid" || input.config.side === "Both") && input.risk.allowBid) {
+    const quoteCapacity = Math.max(0, input.inventory.availableQuote - input.inventory.pendingQuote);
+    const capacityPrice = Math.max(reservationPrice, input.fairPrice.price);
+    const quoteCapacityBase = capacityPrice > 0 ? quoteCapacity / capacityPrice : 0;
+    const buyBaseAmount = Math.min(maxBaseAmount, quoteCapacityBase);
+    const curve = buildSideCurve({ ...input, fairPrice }, "Buy", reservationPrice, spreadBps, inventorySkewBps, buyBaseAmount);
+    if (curve) curves.push(curve);
   }
-  if ((input.config.side === "Ask" || input.config.side === "Both") && input.risk.allowAsk) {
-    curves.push(buildSideCurve({ ...input, fairPrice }, "Sell", reservationPrice, spreadBps, inventorySkewBps, maxBaseAmount));
+  if (!forceBidOnly && (input.config.side === "Ask" || input.config.side === "Both") && input.risk.allowAsk) {
+    const baseCapacity = Math.max(0, input.inventory.availableBase - input.inventory.pendingSellBase);
+    const sellBaseAmount = Math.min(maxBaseAmount, baseCapacity);
+    const curve = buildSideCurve({ ...input, fairPrice }, "Sell", reservationPrice, spreadBps, inventorySkewBps, sellBaseAmount);
+    if (curve) curves.push(curve);
   }
-  if (curves.length === 0) return { ok: false, reason: "risk policy disables all sides", fairPrice: input.fairPrice, inventory: input.inventory };
+  if (curves.length === 0) return { ok: false, reason: "insufficient inventory for generated sides", fairPrice: input.fairPrice, inventory: input.inventory };
   return { ok: true, fairPrice, inventory: input.inventory, curves, clipped };
 }
 
@@ -387,6 +430,95 @@ export function buildMakerOpsSnapshot(input: {
   };
 }
 
+export function backtestManagedStrategy(input: {
+  pair: PairConfig;
+  initialBase: number;
+  initialQuote: number;
+  fairPricePolicy: FairPricePolicy;
+  strategy: ManagedStrategyConfig;
+  risk: ManagedRiskPolicy;
+  epochs: ManagedBacktestEpoch[];
+}): ManagedBacktestResult {
+  let base = Math.max(0, input.initialBase);
+  let quote = Math.max(0, input.initialQuote);
+  const initialPrice = firstUsablePrice(input.pair.pair_id, input.epochs, input.fairPricePolicy)
+    ?? input.epochs.find((epoch) => epoch.clearingPrice && epoch.clearingPrice > 0)?.clearingPrice
+    ?? 0;
+  const initialMarkedValueQuote = quote + base * initialPrice;
+  const epochs: ManagedBacktestEpochResult[] = [];
+  let lastMarkPrice = initialPrice;
+
+  for (const epoch of input.epochs) {
+    const fairPrice = selectFairPrice(
+      input.pair.pair_id,
+      epoch.observations,
+      input.fairPricePolicy,
+      epoch.observedAt
+    );
+    if (fairPrice.ok) lastMarkPrice = fairPrice.price;
+    const inventory = buildInventorySnapshot(
+      input.pair,
+      [
+        { asset: input.pair.base_asset_id, available: String(base), locked: "0" },
+        { asset: input.pair.quote_asset_id, available: String(quote), locked: "0" },
+      ],
+      epoch.pending ?? [],
+      fairPrice.ok ? fairPrice.price : lastMarkPrice
+    );
+    const plan = buildManagedCurvePlan({
+      pair: input.pair,
+      fairPrice,
+      inventory,
+      config: input.strategy,
+      risk: input.risk,
+    });
+    const fills: ManagedBacktestEpochResult["fills"] = [];
+    if (plan.ok) {
+      for (const curve of plan.curves) {
+        const fillFraction = clamp(epoch.fillFractions?.[curve.side] ?? 0, 0, 1);
+        const fillBase = totalCurveBase(curve) * fillFraction;
+        if (fillBase <= 0) continue;
+        const executionPrice = epoch.clearingPrice && epoch.clearingPrice > 0
+          ? epoch.clearingPrice
+          : weightedCurvePrice(curve);
+        const quoteAmount = fillBase * executionPrice;
+        if (curve.side === "Buy") {
+          const affordableBase = executionPrice > 0 ? Math.min(fillBase, quote / executionPrice) : 0;
+          if (affordableBase <= 0) continue;
+          base += affordableBase;
+          quote -= affordableBase * executionPrice;
+          fills.push({ side: "Buy", baseAmount: affordableBase, quoteAmount: affordableBase * executionPrice, executionPrice });
+        } else {
+          const sellBase = Math.min(fillBase, base);
+          if (sellBase <= 0) continue;
+          base -= sellBase;
+          quote += sellBase * executionPrice;
+          fills.push({ side: "Sell", baseAmount: sellBase, quoteAmount: sellBase * executionPrice, executionPrice });
+        }
+      }
+    }
+    epochs.push({
+      epochId: epoch.epochId,
+      plan,
+      fills,
+      baseBalance: base,
+      quoteBalance: quote,
+      markedValueQuote: quote + base * lastMarkPrice,
+    });
+  }
+
+  const finalMarkedValueQuote = quote + base * lastMarkPrice;
+  return {
+    pair: input.pair.pair_id,
+    epochs,
+    finalBase: base,
+    finalQuote: quote,
+    initialMarkedValueQuote,
+    finalMarkedValueQuote,
+    pnlQuote: finalMarkedValueQuote - initialMarkedValueQuote,
+  };
+}
+
 function buildSideCurve(
   input: {
     pair: PairConfig;
@@ -398,9 +530,16 @@ function buildSideCurve(
   spreadBps: number,
   inventorySkewBps: number,
   maxBaseAmount: number
-): ManagedCurveDraft {
-  const bandCount = Math.max(1, Math.floor(input.config.bandCount));
-  const perBand = Math.max(input.config.minBandBase, maxBaseAmount / bandCount);
+): ManagedCurveDraft | null {
+  if (!Number.isFinite(maxBaseAmount) || maxBaseAmount <= 0) return null;
+  const requestedBandCount = Math.max(1, Math.floor(input.config.bandCount));
+  const minBandBase = Math.max(0, input.config.minBandBase);
+  const bandCount = minBandBase > 0
+    ? Math.min(requestedBandCount, Math.floor(maxBaseAmount / minBandBase))
+    : requestedBandCount;
+  if (bandCount <= 0) return null;
+  const perBand = maxBaseAmount / bandCount;
+  if (minBandBase > 0 && perBand < minBandBase) return null;
   const points = Array.from({ length: bandCount }, (_, index) => {
     const depthBps = (index / Math.max(1, bandCount - 1)) * spreadBps;
     const signedBps = side === "Buy"
@@ -418,7 +557,7 @@ function buildSideCurve(
     reservationPrice,
     spreadBps,
     inventorySkewBps,
-    maxBaseAmount: perBand * bandCount,
+    maxBaseAmount,
     points,
     relayMode: input.config.relayMode,
     durationHours: input.config.durationHours,
@@ -440,6 +579,50 @@ function bps(delta: number, base: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function targetBand(config: ManagedStrategyConfig): { min: number; max: number; mid: number } {
+  const configuredMin = config.targetBaseRatioMin;
+  const configuredMax = config.targetBaseRatioMax;
+  const min = typeof configuredMin === "number" && Number.isFinite(configuredMin)
+    ? clamp(configuredMin, 0, 1)
+    : undefined;
+  const max = typeof configuredMax === "number" && Number.isFinite(configuredMax)
+    ? clamp(configuredMax, 0, 1)
+    : undefined;
+  if (min !== undefined && max !== undefined && min <= max) {
+    return { min, max, mid: (min + max) / 2 };
+  }
+  const point = clamp(config.targetBaseRatio, 0, 1);
+  return { min: point, max: point, mid: point };
+}
+
+function inventoryImbalanceRatio(baseRatio: number, target: { min: number; max: number; mid: number }): number {
+  if (baseRatio < target.min) return baseRatio - target.min;
+  if (baseRatio > target.max) return baseRatio - target.max;
+  return 0;
+}
+
+function totalCurveBase(curve: ManagedCurveDraft): number {
+  return curve.points.reduce((sum, point) => sum + point.baseAmount, 0);
+}
+
+function weightedCurvePrice(curve: ManagedCurveDraft): number {
+  const total = totalCurveBase(curve);
+  if (total <= 0) return curve.reservationPrice;
+  return curve.points.reduce((sum, point) => sum + point.price * point.baseAmount, 0) / total;
+}
+
+function firstUsablePrice(
+  pair: string,
+  epochs: ManagedBacktestEpoch[],
+  policy: FairPricePolicy
+): number | null {
+  for (const epoch of epochs) {
+    const fairPrice = selectFairPrice(pair, epoch.observations, policy, epoch.observedAt);
+    if (fairPrice.ok) return fairPrice.price;
+  }
+  return null;
 }
 
 function numberValue(value?: string | number): number {
