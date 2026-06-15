@@ -13,7 +13,7 @@ import {
   ZylithTraderSdk,
   ZylithManagedMakerRunner,
   type ManagedMakerRunnerState,
-} from "./index";
+} from "./index.js";
 
 const pair = {
   pair_id: "ETH/USDC",
@@ -32,7 +32,7 @@ const strategy: ManagedStrategyConfig = {
   baseSpreadBps: 40,
   volatilityBps: 20,
   inventorySkewBps: 100,
-  bandCount: 2,
+  bandCount: 3,
   maxEpochBase: 2,
   minBandBase: 0.1,
   maxExposureBase: 2,
@@ -62,6 +62,48 @@ describe("@zylith/sdk common", () => {
     if (!plan.ok) return;
     expect(plan.clipped).toContain("bid-disabled-by-inventory");
     expect(plan.curves.map((curve) => curve.side)).toEqual(["Sell"]);
+  });
+
+  it("uses protocol pair-specific maker curve spread and band minimums", () => {
+    const stablePair = {
+      pair_id: "USDC/USDT",
+      base_asset_id: "USDC",
+      quote_asset_id: "USDT",
+      min_order_amount: "1",
+      enabled: true,
+    };
+    const fairPrice = { ok: true as const, pair: "USDC/USDT", price: 1, observedAt: 1, sources: ["oracle"], maxDivergenceBps: 0 };
+    const inventory = buildInventorySnapshot(stablePair, [
+      { asset: "USDC", available: "100", locked: "0" },
+      { asset: "USDT", available: "100", locked: "0" },
+    ], [], 1);
+    const stableStrategy: ManagedStrategyConfig = {
+      ...strategy,
+      pair: "USDC/USDT",
+      side: "Both",
+      baseSpreadBps: 6,
+      volatilityBps: 0,
+      minBandBase: 0,
+      maxEpochBase: 3,
+      maxExposureBase: 3,
+    };
+    const stableRisk: ManagedRiskPolicy = { ...risk, minSpreadBps: 0, maxSpreadBps: 100 };
+
+    expect(buildManagedCurvePlan({
+      pair: stablePair,
+      fairPrice,
+      inventory,
+      config: stableStrategy,
+      risk: stableRisk,
+    }).ok).toBe(true);
+
+    expect(buildManagedCurvePlan({
+      pair: stablePair,
+      fairPrice,
+      inventory,
+      config: { ...stableStrategy, baseSpreadBps: 4 },
+      risk: stableRisk,
+    })).toMatchObject({ ok: false, reason: "maker curve spread is below protocol minimum" });
   });
 });
 
@@ -163,7 +205,11 @@ describe("@zylith/sdk maker", () => {
       spreadBps: 40,
       inventorySkewBps: 0,
       maxBaseAmount: 1,
-      points: [{ price: 1002, baseAmount: 1 }],
+      points: [
+        { price: 1002, baseAmount: 0.33 },
+        { price: 1005, baseAmount: 0.33 },
+        { price: 1008, baseAmount: 0.34 },
+      ],
       relayMode: "ZylithRelay",
       durationHours: 1,
     })).rejects.toMatchObject({
@@ -172,6 +218,24 @@ describe("@zylith/sdk maker", () => {
       strategyId: "strategy-1",
       offlinePackage: expect.objectContaining({ package_id: "pkg" }),
     });
+  });
+
+  it("rejects direct invalid maker curves before wallet or relay submission", async () => {
+    const submitPrivateOrder = vi.fn(async () => ({ strategy_id: "should-not-submit" }));
+    const sdk = new ZylithMakerSdk();
+    await expect(sdk.submitCurve({ submitPrivateOrder }, {
+      pair: "ETH/USDC",
+      side: "Buy",
+      fairPrice: 1000,
+      reservationPrice: 1000,
+      spreadBps: 0,
+      inventorySkewBps: 0,
+      maxBaseAmount: 1,
+      points: [{ price: 1000, baseAmount: 1 }],
+      relayMode: "SelfRelay",
+      durationHours: 1,
+    })).rejects.toThrow(/at least 3 bands/);
+    expect(submitPrivateOrder).not.toHaveBeenCalled();
   });
 });
 

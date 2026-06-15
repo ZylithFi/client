@@ -1,4 +1,4 @@
-import type { RelayMode } from "./common";
+import type { RelayMode } from "./common.js";
 
 export type OfflineRenewalRelayResult = {
   package_id?: string;

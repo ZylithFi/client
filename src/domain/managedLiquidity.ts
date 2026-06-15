@@ -2,6 +2,8 @@ import type { PairConfig, TicketSubmitIntent } from "../components/OrderTicket";
 import type { LocalOrder, PrivateStrategySummary } from "./orderLifecycle";
 import type { WalletBalance } from "./shieldedBalances";
 
+const MIN_MANAGED_MAKER_CURVE_POINTS = 3;
+
 export type MarketObservation = {
   source: string;
   pair: string;
@@ -293,6 +295,12 @@ export function buildManagedCurvePlan(input: {
     input.risk.minSpreadBps,
     input.risk.maxSpreadBps
   );
+  if (Math.floor(input.config.bandCount) < MIN_MANAGED_MAKER_CURVE_POINTS) {
+    return { ok: false, reason: "maker curve requires at least 3 bands", fairPrice: input.fairPrice, inventory: input.inventory };
+  }
+  if (spreadBps < makerCurveMinSpreadBps(input.pair.pair_id)) {
+    return { ok: false, reason: "maker curve spread is below protocol minimum", fairPrice: input.fairPrice, inventory: input.inventory };
+  }
   if (spreadBps !== input.config.baseSpreadBps + input.config.volatilityBps) clipped.push("spread");
   const imbalanceRatio = inventoryImbalanceRatio(input.inventory.baseRatio, target);
   const imbalanceBps = imbalanceRatio * 10_000;
@@ -344,6 +352,8 @@ export function authorizeDelegatedMakerCurve(
 }
 
 export function compileManagedCurveIntent(curve: ManagedCurveDraft): TicketSubmitIntent {
+  const invalid = validateManagedCurveDraft(curve);
+  if (invalid) throw new Error(invalid);
   return {
     shape: "curve",
     side: curve.side,
@@ -366,6 +376,27 @@ export function compileManagedCurveIntent(curve: ManagedCurveDraft): TicketSubmi
     relayMode: curve.relayMode,
     relayOperator: curve.relayMode === "ZylithRelay" ? "ZylithRelay" : "SelfHostedRelay",
   };
+}
+
+export function validateManagedCurveDraft(curve: ManagedCurveDraft): string | null {
+  if (curve.points.length < MIN_MANAGED_MAKER_CURVE_POINTS) {
+    return "maker curve requires at least 3 bands";
+  }
+  let previousPrice = 0;
+  for (const point of curve.points) {
+    if (!Number.isFinite(point.price) || !Number.isFinite(point.baseAmount) || point.price <= 0 || point.baseAmount <= 0) {
+      return "maker curve prices and base amounts must be positive";
+    }
+    if (point.price <= previousPrice) return "maker curve points must be strictly increasing by price";
+    previousPrice = point.price;
+  }
+  const first = curve.points[0]?.price ?? 0;
+  const last = curve.points[curve.points.length - 1]?.price ?? 0;
+  const outerSpreadBps = first > 0 ? ((last - first) / first) * 10_000 : 0;
+  if (outerSpreadBps < makerCurveMinSpreadBps(curve.pair)) {
+    return "maker curve spread is below protocol minimum";
+  }
+  return null;
 }
 
 export function reconcileMakerPnl(pair: string, orders: LocalOrder[]): MakerPnlSummary {
@@ -532,18 +563,18 @@ function buildSideCurve(
   maxBaseAmount: number
 ): ManagedCurveDraft | null {
   if (!Number.isFinite(maxBaseAmount) || maxBaseAmount <= 0) return null;
-  const requestedBandCount = Math.max(1, Math.floor(input.config.bandCount));
-  const minBandBase = Math.max(0, input.config.minBandBase);
+  const requestedBandCount = Math.max(MIN_MANAGED_MAKER_CURVE_POINTS, Math.floor(input.config.bandCount));
+  const minBandBase = Math.max(makerCurveMinBandBaseAmount(input.pair.pair_id), input.config.minBandBase);
   const bandCount = minBandBase > 0
     ? Math.min(requestedBandCount, Math.floor(maxBaseAmount / minBandBase))
     : requestedBandCount;
-  if (bandCount <= 0) return null;
+  if (bandCount < MIN_MANAGED_MAKER_CURVE_POINTS) return null;
   const perBand = maxBaseAmount / bandCount;
   if (minBandBase > 0 && perBand < minBandBase) return null;
   const points = Array.from({ length: bandCount }, (_, index) => {
     const depthBps = (index / Math.max(1, bandCount - 1)) * spreadBps;
     const signedBps = side === "Buy"
-      ? -(spreadBps / 2 + depthBps)
+      ? -(spreadBps / 2 + (spreadBps - depthBps))
       : spreadBps / 2 + depthBps;
     return {
       price: reservationPrice * (1 + signedBps / 10_000),
@@ -571,6 +602,20 @@ function makerCaptureBps(order: LocalOrder): number | null {
   return order.side === "Buy"
     ? ((limit - clearing) / limit) * 10_000
     : ((clearing - limit) / limit) * 10_000;
+}
+
+function makerCurveMinBandBaseAmount(pairId: string): number {
+  if (pairId === "ETH/USDC") return 0.001;
+  if (pairId === "strkBTC/USDC" || pairId === "WBTC/strkBTC") return 0.001;
+  if (pairId === "USDC/USDT") return 1;
+  if (pairId === "STRK/USDC" || pairId === "STRK/ETH" || pairId === "STRK/strkBTC") return 1;
+  return 0;
+}
+
+function makerCurveMinSpreadBps(pairId: string): number {
+  if (pairId === "USDC/USDT") return 5;
+  if (pairId === "WBTC/strkBTC") return 10;
+  return 20;
 }
 
 function bps(delta: number, base: number): number {

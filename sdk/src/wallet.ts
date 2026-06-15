@@ -1,5 +1,5 @@
-import type { OfflineRenewalPackage } from "./relay";
-import type { PrivateStrategySummary, TicketSubmitIntent, WalletBalance, WithdrawableNote } from "./common";
+import type { OfflineRenewalPackage } from "./relay.js";
+import type { PrivateStrategySummary, TicketSubmitIntent, WalletBalance, WithdrawableNote } from "./common.js";
 
 export type PrivateOrderSubmission = {
   order_id?: string;

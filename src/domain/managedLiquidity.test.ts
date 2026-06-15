@@ -125,6 +125,48 @@ describe("managed liquidity inventory and strategy engine", () => {
     expect(plan.curves.find((curve) => curve.side === "Sell")?.points[0].price).toBeGreaterThan(999);
   });
 
+  it("uses protocol pair-specific maker curve spread and band minimums", () => {
+    const stablePair = {
+      pair_id: "USDC/USDT",
+      base_asset_id: "USDC",
+      quote_asset_id: "USDT",
+      min_order_amount: "1",
+      enabled: true,
+    };
+    const fairPrice = { ok: true as const, pair: "USDC/USDT", price: 1, observedAt: 1, sources: ["oracle"], maxDivergenceBps: 0 };
+    const inventory = buildInventorySnapshot(stablePair, [
+      { asset: "USDC", available: "100", locked: "0" },
+      { asset: "USDT", available: "100", locked: "0" },
+    ], [], 1);
+    const stableStrategy: ManagedStrategyConfig = {
+      ...strategy,
+      pair: "USDC/USDT",
+      side: "Both",
+      baseSpreadBps: 6,
+      volatilityBps: 0,
+      minBandBase: 0,
+      maxEpochBase: 3,
+      maxExposureBase: 3,
+    };
+    const stableRisk: ManagedRiskPolicy = { ...risk, minSpreadBps: 0, maxSpreadBps: 100 };
+
+    expect(buildManagedCurvePlan({
+      pair: stablePair,
+      fairPrice,
+      inventory,
+      config: stableStrategy,
+      risk: stableRisk,
+    }).ok).toBe(true);
+
+    expect(buildManagedCurvePlan({
+      pair: stablePair,
+      fairPrice,
+      inventory,
+      config: { ...stableStrategy, baseSpreadBps: 4 },
+      risk: stableRisk,
+    })).toMatchObject({ ok: false, reason: "maker curve spread is below protocol minimum" });
+  });
+
   it("clips generated curve size instead of exceeding max epoch exposure", () => {
     const fairPrice = { ok: true as const, pair: "ETH/USDC", price: 1000, observedAt: 1, sources: ["oracle"], maxDivergenceBps: 0 };
     const inventory = buildInventorySnapshot(pair, [
@@ -139,7 +181,7 @@ describe("managed liquidity inventory and strategy engine", () => {
         ...strategy,
         side: "Ask",
         maxEpochBase: 1,
-        minBandBase: 0.6,
+        minBandBase: 0.2,
         bandCount: 3,
       },
       risk: { ...risk, maxEpochBase: 1 },
@@ -149,7 +191,7 @@ describe("managed liquidity inventory and strategy engine", () => {
     expect(plan.curves).toHaveLength(1);
     expect(plan.curves[0].maxBaseAmount).toBeLessThanOrEqual(1);
     expect(totalCurveBase(plan.curves[0])).toBeLessThanOrEqual(1);
-    expect(plan.curves[0].points.every((point) => point.baseAmount >= 0.6)).toBe(true);
+    expect(plan.curves[0].points.every((point) => point.baseAmount >= 0.2)).toBe(true);
   });
 
   it("does not quote sell-side inventory the wallet cannot fund", () => {

@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { MarketDataEngine } from "../domain/marketData";
+import { MarketDataEngine } from "@zylith/sdk/common";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 import type { WalletBalance } from "../domain/shieldedBalances";
-import type { OfflineRenewalPackage } from "../offlineRenewalOperator";
 import { ZylithMakerSdk, type MakerWalletRuntime } from "./maker";
 import {
   ZylithManagedMakerRunner,
@@ -10,7 +9,7 @@ import {
   type ManagedMakerRunnerState,
   type ManagedMakerRunnerStrategy,
 } from "./managedMakerRunner";
-import { ZylithRelaySdk } from "./relay";
+import { ZylithRelaySdk, type OfflineRenewalPackage } from "./relay";
 
 const pair = {
   pair_id: "ETH/USDC",
@@ -30,7 +29,7 @@ const baseStrategy: ManagedMakerRunnerStrategy = {
     baseSpreadBps: 30,
     volatilityBps: 10,
     inventorySkewBps: 50,
-    bandCount: 2,
+    bandCount: 3,
     maxEpochBase: 2,
     minBandBase: 0.1,
     maxExposureBase: 2,
@@ -405,8 +404,8 @@ describe("ZylithManagedMakerRunner", () => {
         ...baseStrategy.strategy,
         pair: "STRK/ETH",
         side: "Ask",
-        maxEpochBase: 2,
-        maxExposureBase: 2,
+        maxEpochBase: 3,
+        maxExposureBase: 3,
         minBandBase: 1,
       },
     };

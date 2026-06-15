@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { OfflineRenewalPackage } from "../offlineRenewalOperator";
-import { relayAuthorizationHeaders, ZylithRelaySdk } from "./relay";
+import { relayAuthorizationHeaders, ZylithRelaySdk, type OfflineRenewalPackage } from "./relay";
 
 describe("ZylithRelaySdk", () => {
   afterEach(() => {

@@ -4,12 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "npm run build:wallet && tsc -b && vite build",
-    "build:app": "tsc -b && vite build",
+    "dev": "npm run build:sdk && vite",
+    "build": "npm run build:sdk && npm run build:wallet && tsc -b && vite build",
+    "build:app": "npm run build:sdk && tsc -b && vite build",
+    "build:sdk": "tsc -p ./sdk/tsconfig.json",
     "build:wallet": "./build-wallet-wasm.sh",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "npm run build:sdk && vitest run",
+    "test:watch": "npm run build:sdk && vitest",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -19,6 +20,7 @@
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@fontsource/syne": "^5.2.7",
     "@starkware-libs/starknet-privacy-sdk": "0.14.2-rc.2",
+    "@zylith/sdk": "file:./sdk",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "starknet": "git+https://github.com/starkware-libs/starknet.js.git#PRIVACY-0.14.2-RC.2"

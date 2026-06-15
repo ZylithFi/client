@@ -11,6 +11,7 @@ import {
   selectFairPrice,
   toAtomicStr,
   toPriceAtomicStr,
+  validateManagedCurveDraft,
   type BatchSummary,
   type DelegatedMakerPermission,
   type FairPricePolicy,
@@ -27,9 +28,11 @@ import {
   type PrivateStrategySummary,
   type TicketSubmitIntent,
   type WalletBalance,
-} from "./common";
-import { type MakerWalletRuntime } from "./wallet";
-import { ZylithRelaySdk, type OfflineRenewalPackage, type RelayPackageResults, type RelayPackageStatus } from "./relay";
+} from "./common.js";
+import { type MakerWalletRuntime } from "./wallet.js";
+import { ZylithRelaySdk, type OfflineRenewalPackage, type RelayPackageResults, type RelayPackageStatus } from "./relay.js";
+
+export type { MakerWalletRuntime } from "./wallet.js";
 
 export type MakerSdkOptions = {
   relay?: ZylithRelaySdk;
@@ -129,6 +132,8 @@ export class ZylithMakerSdk {
   }
 
   compileCurve(curve: ManagedCurveDraft): TicketSubmitIntent {
+    const invalid = validateManagedCurveDraft(curve);
+    if (invalid) throw new Error(invalid);
     return compileManagedCurveIntent(curve);
   }
 

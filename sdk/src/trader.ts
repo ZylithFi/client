@@ -1,5 +1,7 @@
-import type { BatchSummary, TicketSubmitIntent } from "./common";
-import type { PrivateReportRequest, TraderWalletRuntime, PrivateOrderSubmission } from "./wallet";
+import type { BatchSummary, TicketSubmitIntent } from "./common.js";
+import type { PrivateReportRequest, TraderWalletRuntime, PrivateOrderSubmission } from "./wallet.js";
+
+export type { PrivateOrderSubmission, PrivateReportRequest, TraderWalletRuntime } from "./wallet.js";
 
 export type TraderSdkOptions = {
   coordinatorUrl: string;

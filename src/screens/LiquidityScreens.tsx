@@ -6,7 +6,7 @@ import { defaultCurveBands } from "../domain/makerCurves";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 import { statusLabel, statusTone } from "../domain/orderLifecycle";
 import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/shieldedBalances";
-import { buildMakerOpsSnapshot } from "../domain/managedLiquidity";
+import { buildMakerOpsSnapshot } from "@zylith/sdk/common";
 import type {
   FundingPreview,
   PairConfig,

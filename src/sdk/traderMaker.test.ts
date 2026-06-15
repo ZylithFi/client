@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMakerWalletRuntimeAdapter, MakerCurveSubmissionError, ZylithMakerSdk, type RawMakerOrderDraft } from "./maker";
-import { ZylithRelaySdk } from "./relay";
+import { ZylithRelaySdk, type OfflineRenewalPackage } from "./relay";
 import { ZylithTraderSdk, type TraderWalletRuntime } from "./trader";
-import type { OfflineRenewalPackage } from "../offlineRenewalOperator";
-import { MarketDataEngine } from "../domain/marketData";
+import { MarketDataEngine } from "@zylith/sdk/common";
 
 describe("ZylithTraderSdk", () => {
   it("submits orders through the wallet runtime and polls settlement", async () => {
@@ -258,7 +257,7 @@ describe("ZylithMakerSdk", () => {
         baseSpreadBps: 30,
         volatilityBps: 10,
         inventorySkewBps: 50,
-        bandCount: 2,
+        bandCount: 3,
         maxEpochBase: 5,
         minBandBase: 0.1,
         maxExposureBase: 5,
@@ -323,8 +322,9 @@ describe("ZylithMakerSdk", () => {
       minFill: "0",
       fillOrKill: false,
       curvePoints: [
-        { price: "990", baseAmount: "0.5" },
-        { price: "1000", baseAmount: "0.5" },
+        { price: "990", baseAmount: "0.33" },
+        { price: "1000", baseAmount: "0.33" },
+        { price: "1010", baseAmount: "0.34" },
       ],
       inventoryCap: "1",
       durationHours: "1",
@@ -340,7 +340,7 @@ describe("ZylithMakerSdk", () => {
       side: "Buy",
       mode: "Resting",
       amount: "1000000000000000000",
-      limitPrice: "1000000000",
+      limitPrice: "1010000000",
       minFill: "0",
       batchId: "batch-1",
       durationBatches: 40,
@@ -350,8 +350,9 @@ describe("ZylithMakerSdk", () => {
       relayMode: "ZylithRelay",
     })]);
     expect(submitted[0].makerCurvePoints).toEqual([
-      { price: "990000000", baseAmount: "500000000000000000" },
-      { price: "1000000000", baseAmount: "500000000000000000" },
+      { price: "990000000", baseAmount: "330000000000000000" },
+      { price: "1000000000", baseAmount: "330000000000000000" },
+      { price: "1010000000", baseAmount: "340000000000000000" },
     ]);
   });
 });
@@ -413,7 +414,11 @@ function managedCurve() {
     spreadBps: 40,
     inventorySkewBps: 0,
     maxBaseAmount: 1,
-    points: [{ price: 1002, baseAmount: 1 }],
+    points: [
+      { price: 1002, baseAmount: 0.33 },
+      { price: 1005, baseAmount: 0.33 },
+      { price: 1008, baseAmount: 0.34 },
+    ],
     relayMode: "ZylithRelay" as const,
     durationHours: 1,
   };
