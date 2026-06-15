@@ -8,6 +8,10 @@ export const PROVER_URL: string =
   ((import.meta.env.VITE_ZYLITH_PRIVATE_INGRESS_URL as string | undefined) ||
     (import.meta.env.VITE_ZYLITH_PROVER_URL as string | undefined)) ?? localServiceUrl(3200);
 
+const BACKGROUND_FETCH_TIMEOUT_MS = 8_000;
+const BULK_BATCH_ID_PAGE_SIZE = 16;
+const BACKGROUND_BATCH_ID_POLL_LIMIT = 32;
+
 function localServiceUrl(port: number) {
   if (typeof window === "undefined") return "";
   const host = window.location.hostname;
@@ -103,19 +107,19 @@ export type LastClearingPrice = {
 };
 
 export async function apiCurrentPairBatch(base: string, quote: string): Promise<BatchSummary> {
-  const r = await fetch(`${COORDINATOR_URL}/api/pairs/${base}/${quote}/batches/current`);
+  const r = await fetchWithTimeout(`${COORDINATOR_URL}/api/pairs/${base}/${quote}/batches/current`);
   if (!r.ok) throw new Error(`Coordinator ${r.status}`);
   return r.json() as Promise<BatchSummary>;
 }
 
 async function apiBatches(): Promise<BatchSummary[]> {
-  const r = await fetch(`${COORDINATOR_URL}/api/batches`);
+  const r = await fetchWithTimeout(`${COORDINATOR_URL}/api/batches`);
   if (!r.ok) throw new Error(`Coordinator ${r.status}`);
   return r.json() as Promise<BatchSummary[]>;
 }
 
 async function apiStatus(): Promise<CoordinatorStatus> {
-  const r = await fetch(`${COORDINATOR_URL}/health`);
+  const r = await fetchWithTimeout(`${COORDINATOR_URL}/health`);
   if (!r.ok) throw new Error(`Coordinator ${r.status}`);
   return r.json() as Promise<CoordinatorStatus>;
 }
@@ -125,7 +129,7 @@ async function apiBatchTranscript(batchId: string): Promise<PublicSettlementTran
   const bases = INDEXER_URL ? [COORDINATOR_URL, INDEXER_URL] : [COORDINATOR_URL];
   for (const base of bases) {
     try {
-      const r = await fetch(`${base}${path}`);
+      const r = await fetchWithTimeout(`${base}${path}`);
       if (r.status === 404) continue;
       if (!r.ok) continue;
       return r.json() as Promise<PublicSettlementTranscript>;
@@ -136,41 +140,60 @@ async function apiBatchTranscript(batchId: string): Promise<PublicSettlementTran
   return null;
 }
 
-async function apiBatchTranscripts(batchIds: string[]): Promise<PublicSettlementTranscript[]> {
+export async function apiBatchTranscripts(batchIds: string[]): Promise<PublicSettlementTranscript[]> {
   if (batchIds.length === 0) return [];
-  const query = batchIds.map(encodeURIComponent).join(",");
-  const path = `/api/batches/transcripts?batch_ids=${query}`;
-  const bases = INDEXER_URL ? [COORDINATOR_URL, INDEXER_URL] : [COORDINATOR_URL];
-  for (const base of bases) {
-    try {
-      const r = await fetch(`${base}${path}`);
-      if (!r.ok) continue;
-      return r.json() as Promise<PublicSettlementTranscript[]>;
-    } catch {
+  const loaded: PublicSettlementTranscript[] = [];
+  for (const page of chunks(uniqueStrings(batchIds), BULK_BATCH_ID_PAGE_SIZE)) {
+    const query = page.map(encodeURIComponent).join(",");
+    const path = `/api/batches/transcripts?batch_ids=${query}`;
+    const bases = INDEXER_URL ? [COORDINATOR_URL, INDEXER_URL] : [COORDINATOR_URL];
+    let pageLoaded: PublicSettlementTranscript[] | null = null;
+    for (const base of bases) {
+      try {
+        const r = await fetchWithTimeout(`${base}${path}`);
+        if (!r.ok) continue;
+        pageLoaded = await r.json() as PublicSettlementTranscript[];
+        break;
+      } catch {
+        continue;
+      }
+    }
+    if (pageLoaded) {
+      loaded.push(...pageLoaded);
       continue;
     }
+    const fallback = await Promise.all(page.map(apiBatchTranscript));
+    loaded.push(...fallback.filter((transcript): transcript is PublicSettlementTranscript => Boolean(transcript)));
   }
-  const loaded = await Promise.all(batchIds.map(apiBatchTranscript));
-  return loaded.filter((transcript): transcript is PublicSettlementTranscript => Boolean(transcript));
+  return loaded;
 }
 
 async function apiProofJobStatus(batchId: string): Promise<PublicProofJobStatus | null> {
   if (!PROVER_URL) return null;
-  const r = await fetch(`${PROVER_URL}/api/public/proof-jobs/${encodeURIComponent(batchId)}`);
+  const r = await fetchWithTimeout(`${PROVER_URL}/api/public/proof-jobs/${encodeURIComponent(batchId)}`);
   if (r.status === 404) return null;
   if (!r.ok) return null;
   return r.json() as Promise<PublicProofJobStatus>;
 }
 
-async function apiProofJobStatuses(batchIds: string[]): Promise<PublicProofJobStatus[]> {
+export async function apiProofJobStatuses(batchIds: string[]): Promise<PublicProofJobStatus[]> {
   if (!PROVER_URL || batchIds.length === 0) return [];
-  const query = batchIds.map(encodeURIComponent).join(",");
-  const r = await fetch(`${PROVER_URL}/api/public/proof-jobs?batch_ids=${query}`);
-  if (!r.ok) {
-    const loaded = await Promise.all(batchIds.map(apiProofJobStatus));
-    return loaded.filter((status): status is PublicProofJobStatus => Boolean(status));
+  const loaded: PublicProofJobStatus[] = [];
+  for (const page of chunks(uniqueStrings(batchIds), BULK_BATCH_ID_PAGE_SIZE)) {
+    const query = page.map(encodeURIComponent).join(",");
+    try {
+      const r = await fetchWithTimeout(`${PROVER_URL}/api/public/proof-jobs?batch_ids=${query}`);
+      if (r.ok) {
+        loaded.push(...await r.json() as PublicProofJobStatus[]);
+        continue;
+      }
+    } catch {
+      // Fall back to per-batch status below.
+    }
+    const fallback = await Promise.all(page.map(apiProofJobStatus));
+    loaded.push(...fallback.filter((status): status is PublicProofJobStatus => Boolean(status)));
   }
-  return r.json() as Promise<PublicProofJobStatus[]>;
+  return loaded;
 }
 
 async function loadDeployment(): Promise<DeploymentConfig> {
@@ -237,7 +260,7 @@ export function usePublicSettlementTranscripts(
     let cancelled = false;
 
     async function loadSettledTranscripts() {
-      const settledIds = pendingKey.split("|").filter(Boolean);
+      const settledIds = pendingKey.split("|").filter(Boolean).slice(0, BACKGROUND_BATCH_ID_POLL_LIMIT);
       if (settledIds.length === 0) return;
 
       const loaded = await apiBatchTranscripts(settledIds)
@@ -276,7 +299,7 @@ export function usePublicProofJobStatuses(
     let cancelled = false;
 
     async function loadStatuses() {
-      const ids = key.split("|").filter(Boolean);
+      const ids = key.split("|").filter(Boolean).slice(0, BACKGROUND_BATCH_ID_POLL_LIMIT);
       const loaded = await apiProofJobStatuses(ids).catch(() => [] as PublicProofJobStatus[]);
       if (cancelled) return;
       const next: Record<string, PublicProofJobStatus> = {};
@@ -345,4 +368,26 @@ export function lastClearingByPair(
     };
   }
   return result;
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BACKGROUND_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: init.signal ?? controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function chunks<T>(values: T[], size: number): T[][] {
+  const pages: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    pages.push(values.slice(index, index + size));
+  }
+  return pages;
 }
