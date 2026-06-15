@@ -8,14 +8,12 @@ export default defineConfig({
     historyApiFallback: true,
     proxy: {
       "/starknet-privacy-discovery": {
-        target: "http://35.192.48.142:8080",
+        target: "https://api.zylith.fi",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/starknet-privacy-discovery/, ""),
       },
       "/starknet-privacy-prover": {
-        target: "http://34.29.249.119:3000",
+        target: "https://api.zylith.fi",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/starknet-privacy-prover/, ""),
       },
     },
   },
