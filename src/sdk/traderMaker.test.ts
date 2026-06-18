@@ -311,7 +311,7 @@ describe("ZylithMakerSdk", () => {
       batchWindowMs: 90_000,
     });
 
-    await expect(adapter.submitPrivateOrder({
+    await expect(adapter.submitPrivateOrder!({
       pairId: "ETH/USDC",
       side: "Buy",
       shape: "curve",
@@ -380,7 +380,7 @@ describe("ZylithMakerSdk", () => {
       batchWindowMs: 90_000,
     });
 
-    await expect(adapter.submitPrivateOrder({
+    await expect(adapter.submitPrivateOrder!({
       pairId: "ETH/USDC",
       side: "Buy",
       shape: "curve",

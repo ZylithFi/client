@@ -7,7 +7,7 @@ describe("private report sync keys", () => {
     expect(normalizeFeltForComparison("0x00001A")).toBe("0x1a");
   });
 
-  it("normalizes empty and zero values", () => {
+  it("normalizes empty and zero sync key values", () => {
     expect(normalizeFeltForComparison(undefined)).toBe("");
     expect(normalizeFeltForComparison(null)).toBe("");
     expect(normalizeFeltForComparison("0")).toBe("0x0");

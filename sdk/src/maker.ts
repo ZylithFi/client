@@ -1,6 +1,7 @@
 import {
   assetScale,
   authorizeDelegatedMakerCurve,
+  authorizeManagedMakerCurvePolicy,
   buildInventorySnapshot,
   buildMakerOpsSnapshot,
   buildManagedCurvePlan,
@@ -18,6 +19,7 @@ import {
   type FairPriceResult,
   type LocalOrder,
   type MakerOpsSnapshot,
+  type ManagedMakerAuthorization,
   type ManagedCurveDraft,
   type ManagedCurvePlan,
   type ManagedRiskPolicy,
@@ -29,7 +31,7 @@ import {
   type TicketSubmitIntent,
   type WalletBalance,
 } from "./common.js";
-import { type MakerWalletRuntime } from "./wallet.js";
+import { type MakerWalletRuntime, type PrivateOrderSubmission } from "./wallet.js";
 import { ZylithRelaySdk, type OfflineRenewalPackage, type RelayPackageResults, type RelayPackageStatus } from "./relay.js";
 
 export type { MakerWalletRuntime } from "./wallet.js";
@@ -137,15 +139,21 @@ export class ZylithMakerSdk {
     return compileManagedCurveIntent(curve);
   }
 
-  async submitCurve(wallet: MakerWalletRuntime, curve: ManagedCurveDraft): Promise<{
+  async submitCurve(
+    wallet: MakerWalletRuntime,
+    curve: ManagedCurveDraft,
+    managedMakerAuthorization?: ManagedMakerAuthorization
+  ): Promise<{
     offlinePackage?: OfflineRenewalPackage;
     relayStatus?: RelayPackageStatus;
     strategyId?: string;
   }> {
     const intent = this.compileCurve(curve);
-    let submitted: Awaited<ReturnType<MakerWalletRuntime["submitPrivateOrder"]>>;
+    let submitted: PrivateOrderSubmission;
     try {
-      submitted = await wallet.submitPrivateOrder(intent);
+      submitted = managedMakerAuthorization
+        ? await requiredDelegatedSubmit(wallet)(intent, managedMakerAuthorization)
+        : await requiredDirectSubmit(wallet)(intent);
     } catch (error) {
       throw new MakerCurveSubmissionError(errorMessage(error), { partial: false, cause: error });
     }
@@ -237,7 +245,7 @@ export type RawMakerOrderDraft = {
 };
 
 export type RawMakerWalletRuntime = Omit<MakerWalletRuntime, "submitPrivateOrder"> & {
-  submitPrivateOrder: (order: RawMakerOrderDraft) => ReturnType<MakerWalletRuntime["submitPrivateOrder"]>;
+  submitPrivateOrder: (order: RawMakerOrderDraft) => Promise<PrivateOrderSubmission>;
 };
 
 export type MakerWalletRuntimeAdapterOptions = {
@@ -299,6 +307,7 @@ export type ManagedMakerRunnerStrategy = {
   strategy: ManagedStrategyConfig;
   risk: ManagedRiskPolicy;
   permission?: DelegatedMakerPermission;
+  managedMakerAuthorization?: ManagedMakerAuthorization;
   enabled?: boolean;
 };
 
@@ -360,6 +369,7 @@ export type ManagedMakerRunnerOptions = {
   submissionSafetyBufferMs?: number;
   intervalMs?: number;
   maxFailuresRetained?: number;
+  requireQuoteOnlyAuthorization?: boolean;
   onEvent?: (event: ManagedMakerRunnerEvent) => void;
 };
 
@@ -381,6 +391,7 @@ export class ZylithManagedMakerRunner {
   private readonly submissionSafetyBufferMs: number;
   private readonly intervalMs: number;
   private readonly maxFailuresRetained: number;
+  private readonly requireQuoteOnlyAuthorization: boolean;
   private readonly onEvent?: (event: ManagedMakerRunnerEvent) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
@@ -398,6 +409,7 @@ export class ZylithManagedMakerRunner {
     this.submissionSafetyBufferMs = options.submissionSafetyBufferMs ?? 15_000;
     this.intervalMs = options.intervalMs ?? 30_000;
     this.maxFailuresRetained = options.maxFailuresRetained ?? 50;
+    this.requireQuoteOnlyAuthorization = options.requireQuoteOnlyAuthorization ?? false;
     this.onEvent = options.onEvent;
   }
 
@@ -498,9 +510,15 @@ export class ZylithManagedMakerRunner {
       risk: entry.risk,
     });
     if (!plan.ok) return { kind: "skipped", skip: this.skip(entry, plan.reason, batch) };
-    const curves = authorizedCurves(plan, entry.permission, this.now());
+    const curves = authorizedCurves(plan, entry, batch.epoch_id, this.now());
     if (curves.length === 0) {
-      return { kind: "skipped", skip: this.skip(entry, "delegated permission rejects all curves", batch) };
+      return { kind: "skipped", skip: this.skip(entry, "managed maker policy rejects all curves", batch) };
+    }
+    if (this.requireQuoteOnlyAuthorization && !entry.managedMakerAuthorization) {
+      return { kind: "skipped", skip: this.skip(entry, "missing managed maker quote-only authorization", batch) };
+    }
+    if (entry.managedMakerAuthorization && !this.runtime.submitDelegatedPrivateOrder) {
+      return { kind: "skipped", skip: this.skip(entry, "runtime cannot submit delegated managed maker orders", batch) };
     }
     const submission: ManagedMakerEpochSubmission = {
       strategyId: entry.id,
@@ -516,7 +534,7 @@ export class ZylithManagedMakerRunner {
     await this.persistState();
     try {
       for (const curve of curves) {
-        const result = await this.sdk.submitCurve(this.runtime, curve);
+        const result = await this.sdk.submitCurve(this.runtime, curve, entry.managedMakerAuthorization);
         if (result.strategyId) submission.strategyIds.push(result.strategyId);
         if (result.offlinePackage?.package_id) submission.packageIds.push(result.offlinePackage.package_id);
         submission.curveCount += 1;
@@ -648,11 +666,24 @@ function compileRawCurveIntent(intent: TicketSubmitIntent, pair: PairConfig) {
 
 function authorizedCurves(
   plan: ManagedCurvePlan & { ok: true },
-  permission: DelegatedMakerPermission | undefined,
+  entry: ManagedMakerRunnerStrategy,
+  epochId: number,
   now: number
 ): ManagedCurveDraft[] {
-  if (!permission) return plan.curves;
-  return plan.curves.filter((curve) => authorizeDelegatedMakerCurve(curve, plan.fairPrice.price, permission, now).ok);
+  return plan.curves.filter((curve) => {
+    if (entry.permission && !authorizeDelegatedMakerCurve(curve, plan.fairPrice.price, entry.permission, now).ok) {
+      return false;
+    }
+    if (entry.managedMakerAuthorization) {
+      return authorizeManagedMakerCurvePolicy(
+        curve,
+        entry.pair,
+        entry.managedMakerAuthorization.policy,
+        epochId
+      ).ok;
+    }
+    return true;
+  });
 }
 
 function normalizeState(value: ManagedMakerRunnerState | null | undefined): ManagedMakerRunnerState {
@@ -685,6 +716,20 @@ function epochKey(strategyId: string, batchId: string): string {
 
 function hasPartialSubmission(submission: ManagedMakerEpochSubmission): boolean {
   return submission.curveCount > 0 || submission.strategyIds.length > 0 || submission.packageIds.length > 0;
+}
+
+function requiredDelegatedSubmit(wallet: MakerWalletRuntime): NonNullable<MakerWalletRuntime["submitDelegatedPrivateOrder"]> {
+  if (!wallet.submitDelegatedPrivateOrder) {
+    throw new Error("wallet runtime does not support quote-only delegated managed maker submission");
+  }
+  return wallet.submitDelegatedPrivateOrder.bind(wallet);
+}
+
+function requiredDirectSubmit(wallet: MakerWalletRuntime): NonNullable<MakerWalletRuntime["submitPrivateOrder"]> {
+  if (!wallet.submitPrivateOrder) {
+    throw new Error("wallet runtime does not support direct maker submission");
+  }
+  return wallet.submitPrivateOrder.bind(wallet);
 }
 
 function errorMessage(error: unknown): string {

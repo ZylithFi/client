@@ -1,5 +1,5 @@
 # Zylith Client
 
-Private trading and liquidity web app for Zylith.
+Trading and liquidity web app for Zylith.
 
-This repository is private while it depends on early-access Starknet privacy SDK surfaces.
+This public repository contains the Zylith client application and integration code.

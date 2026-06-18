@@ -4,10 +4,11 @@ use wasm_bindgen::prelude::*;
 use zylith_core::hash::{normalize_felt_hex, tagged_field_hex};
 use zylith_core::{
     AssetId, BatchId, DepositIntent, DepositSubmissionPlan, EncryptedMakerAttributionArtifact,
-    Note, NoteConsolidationWitness, NullifierHistoryBatch, NullifierSparseUpdateWitness,
-    OrderCommitment, OrderIntent, OrderSubmission, OutputCiphertextBundle, OutputNoteMerkleProof,
-    OutputNoteRecord, OutputRecoveryRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload,
-    RecoveryArtifact, RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
+    ManagedMakerAuthorization, ManagedMakerPolicy, Note, NoteConsolidationWitness,
+    NullifierHistoryBatch, NullifierSparseUpdateWitness, OrderCommitment, OrderIntent,
+    OrderSubmission, OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord,
+    OutputRecoveryRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload, RecoveryArtifact,
+    RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
     RenewalParentCancelSubmissionPlan, SettlementOutputWithdrawalPlanRequest,
     SettlementOutputWithdrawalSubmissionPlan, SettlementOutputWithdrawalWitness,
     SpendAuthorization, Strk20ExitClaimMessage, TrustedOrderIngressRequest,
@@ -23,10 +24,11 @@ use zylith_core::{
     output_note_metadata_commitment, output_recovery_key_tag_for_spend_authority,
     renewal_cancel_auth_key_felt_for_parent_from_raw_key_hex,
     renewal_cancel_authority_for_parent_from_raw_key_hex, renewal_parent_commitment,
-    renewal_parent_secret_commitment, sign_note_consolidation_authorization,
-    sign_order_authorization, sign_renewal_relay_package_authorization,
-    sign_settlement_output_withdrawal_witness, sign_strk20_exit_claim_authorization,
-    spend_auth_key_felt_from_raw_key_hex, spend_authority_from_raw_key_hex,
+    renewal_parent_secret_commitment, sign_managed_maker_policy_authorization,
+    sign_note_consolidation_authorization, sign_order_authorization,
+    sign_renewal_relay_package_authorization, sign_settlement_output_withdrawal_witness,
+    sign_strk20_exit_claim_authorization, spend_auth_key_felt_from_raw_key_hex,
+    spend_authority_from_raw_key_hex, spend_authority_from_spend_auth_key_felt,
     verify_output_note_membership, verify_renewal_relay_package_authorization,
     withdraw_auth_key_felt_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
 };
@@ -163,12 +165,142 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
         funding_note: request.funding_note,
         funding_notes,
         funding_authorization,
+        managed_maker_authorization: None,
     };
     let order_submission =
         build_order_submission(&payload, &request.registry, &order_cancel_key_hex)
             .map_err(js_error)?;
     let cancellation_secret =
         derive_order_cancellation_secret(&order_cancel_key_hex, &order_commitment)
+            .map_err(js_error)?;
+    let ingress_request = TrustedOrderIngressRequest {
+        order_submission: order_submission.clone(),
+        renewal_package_id: None,
+        renewal_package_commitment: None,
+        renewal_relay_mode: None,
+        ingress_telemetry: None,
+        padding: request.padding,
+    };
+    to_json(&BuildPrivateOrderSubmissionResponse {
+        order_commitment,
+        cancellation_secret,
+        expected_output_metadata_commitment,
+        funding_note_commitments: funding_commitments
+            .into_iter()
+            .map(|commitment| commitment.0)
+            .collect(),
+        order_submission,
+        ingress_request,
+    })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_authorize_managed_maker_policy(input_json: &str) -> Result<String, JsValue> {
+    let request: AuthorizeManagedMakerPolicyRequest = from_json(input_json)?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let spend_key_hex = hex::encode(keys.spend_auth_key);
+    let owner_key_hex = hex::encode(keys.note_recognition_key);
+    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let spend_auth_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
+    let mut policy = request.policy;
+    policy.recipient_owner_public_key =
+        note_recognition_public_key_from_raw_key_hex(&owner_key_hex).map_err(js_error)?;
+    policy.recipient_spend_authority =
+        spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
+    let withdraw_authority =
+        withdraw_authority_from_raw_key_hex(&withdraw_key_hex).map_err(js_error)?;
+    policy.recipient_withdraw_authority = withdraw_authority.clone();
+    policy.recipient_residual_withdraw_authority = withdraw_authority;
+    policy.commitment().map_err(js_error)?;
+    let owner_authorization =
+        sign_managed_maker_policy_authorization(&spend_auth_key_felt, &policy).map_err(js_error)?;
+    to_json(&ManagedMakerAuthorization {
+        policy,
+        owner_authorization,
+    })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_build_delegated_private_order_submission(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    let request: BuildDelegatedPrivateOrderSubmissionRequest = from_json(input_json)?;
+    let expected_delegate =
+        spend_authority_from_spend_auth_key_felt(&request.delegate_private_key_felt)
+            .map_err(js_error)?;
+    if normalize_felt_hex(&expected_delegate).map_err(js_error)?
+        != normalize_felt_hex(
+            &request
+                .managed_maker_authorization
+                .policy
+                .delegate_public_key,
+        )
+        .map_err(js_error)?
+    {
+        return Err(js_error("managed maker delegate key does not match policy"));
+    }
+    let funding_notes = if request.funding_notes.is_empty() {
+        vec![request.funding_note.clone()]
+    } else {
+        request.funding_notes.clone()
+    };
+    let funding_commitments = funding_notes
+        .iter()
+        .map(|note| note.commitment())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(js_error)?;
+    let funding_nullifiers = funding_notes
+        .iter()
+        .zip(funding_commitments.iter())
+        .map(|(note, commitment)| nullifier_from_note_secret(commitment, &note.blinding))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(js_error)?;
+    let funding_note_ref = funding_input_set_commitment(&funding_commitments).map_err(js_error)?;
+    let funding_nullifier =
+        funding_nullifier_set_commitment(&funding_nullifiers).map_err(js_error)?;
+
+    let mut order = request.order;
+    let policy = &request.managed_maker_authorization.policy;
+    order.funding_note_ref = funding_note_ref;
+    order.funding_nullifier = funding_nullifier;
+    order.recipient_owner_public_key = policy.recipient_owner_public_key.clone();
+    order.recipient_spend_authority = policy.recipient_spend_authority.clone();
+    order.recipient_withdraw_authority = policy.recipient_withdraw_authority.clone();
+    order.recipient_residual_withdraw_authority =
+        policy.recipient_residual_withdraw_authority.clone();
+    order.auditor_view_allowed = policy.auditor_view_allowed;
+    validate_order_before_signing(&order).map_err(js_error)?;
+    policy.validate_order(&order).map_err(js_error)?;
+
+    let order_commitment = order.commitment().map_err(js_error)?;
+    let expected_output_metadata_commitment = output_note_metadata_commitment(
+        &order.batch_id.0,
+        &order_commitment,
+        &order.funding_note_ref,
+        &order.pair_id,
+        &order.recipient_spend_authority,
+        &order.recipient_withdraw_authority,
+    )
+    .map_err(js_error)?;
+    let funding_authorization =
+        sign_order_authorization(&request.delegate_private_key_felt, &order_commitment)
+            .map_err(js_error)?;
+    let payload = PrivateOrderPayload {
+        order,
+        funding_note: request.funding_note,
+        funding_notes,
+        funding_authorization,
+        managed_maker_authorization: Some(request.managed_maker_authorization),
+    };
+    let order_submission = build_order_submission(
+        &payload,
+        &request.registry,
+        &request.order_cancellation_key_hex,
+    )
+    .map_err(js_error)?;
+    let cancellation_secret =
+        derive_order_cancellation_secret(&request.order_cancellation_key_hex, &order_commitment)
             .map_err(js_error)?;
     let ingress_request = TrustedOrderIngressRequest {
         order_submission: order_submission.clone(),
@@ -1307,6 +1439,26 @@ pub struct BuildPrivateOrderSubmissionRequest {
     pub padding: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthorizeManagedMakerPolicyRequest {
+    pub seed_hex: String,
+    pub policy: ManagedMakerPolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildDelegatedPrivateOrderSubmissionRequest {
+    pub delegate_private_key_felt: String,
+    pub order_cancellation_key_hex: String,
+    pub managed_maker_authorization: ManagedMakerAuthorization,
+    pub registry: PrivateExecutionKeyRegistry,
+    pub funding_note: Note,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub funding_notes: Vec<Note>,
+    pub order: OrderIntent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub padding: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct BuildPrivateOrderSubmissionResponse {
     pub order_commitment: OrderCommitment,
@@ -1495,30 +1647,33 @@ fn _assert_wasm_return_types(
 #[cfg(test)]
 mod tests {
     use super::{
+        AuthorizeManagedMakerPolicyRequest, BuildDelegatedPrivateOrderSubmissionRequest,
         BuildNoteConsolidationDraftResponse, BuildPrivateOrderSubmissionRequest,
         derive_public_config, renewal_package_commitment_from_json, validate_order_before_signing,
-        verify_renewal_relay_package_value, zylith_wallet_build_deposit_submission_plan,
-        zylith_wallet_build_note_consolidation_draft, zylith_wallet_build_private_order_submission,
-        zylith_wallet_build_strategy_parent, zylith_wallet_create_recovery_snapshot,
-        zylith_wallet_decrypt_recovery_artifact, zylith_wallet_generate_mnemonic,
-        zylith_wallet_mnemonic_to_seed_hex, zylith_wallet_recovery_auth_tag,
-        zylith_wallet_scan_output_bundle, zylith_wallet_seed_hex_to_mnemonic,
-        zylith_wallet_sign_note_consolidation_witness,
+        verify_renewal_relay_package_value, zylith_wallet_authorize_managed_maker_policy,
+        zylith_wallet_build_delegated_private_order_submission,
+        zylith_wallet_build_deposit_submission_plan, zylith_wallet_build_note_consolidation_draft,
+        zylith_wallet_build_private_order_submission, zylith_wallet_build_strategy_parent,
+        zylith_wallet_create_recovery_snapshot, zylith_wallet_decrypt_recovery_artifact,
+        zylith_wallet_generate_mnemonic, zylith_wallet_mnemonic_to_seed_hex,
+        zylith_wallet_recovery_auth_tag, zylith_wallet_scan_output_bundle,
+        zylith_wallet_seed_hex_to_mnemonic, zylith_wallet_sign_note_consolidation_witness,
         zylith_wallet_sign_renewal_relay_package_authorization,
         zylith_wallet_sign_settlement_output_withdrawal_witness,
         zylith_wallet_sign_strk20_exit_claim, zylith_wallet_verify_renewal_relay_package,
     };
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use zylith_core::{
-        AssetId, BatchId, ConsumedInput, Note, NoteCommitment, NoteConsolidationWitness, Nullifier,
-        OrderIntent, OrderSide, OrderType, OutputCiphertextBundle, OutputNoteMerkleProof,
-        OutputNoteRecord, PairId, PrivateExecutionKeyPublicConfig, PrivateExecutionKeyRegistry,
-        RecoverySeed, RelayMode, SettlementOutputWithdrawalWitness, SpendAuthorization,
-        TimeInForce, deposit_root_from_note, derive_user_keys, encrypt_note_for_owner,
-        note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
-        nullifier_sparse_update_witnesses_for_consumed_inputs,
+        AssetId, BatchId, ConsumedInput, HiddenMakerCurve, MakerCurvePoint,
+        ManagedMakerAuthorization, ManagedMakerPolicy, Note, NoteCommitment,
+        NoteConsolidationWitness, Nullifier, OrderIntent, OrderSide, OrderType,
+        OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord, PairId,
+        PrivateExecutionKeyPublicConfig, PrivateExecutionKeyRegistry, RecoverySeed, RelayMode,
+        SettlementOutputWithdrawalWitness, SpendAuthorization, TimeInForce, deposit_root_from_note,
+        derive_user_keys, encrypt_note_for_owner, note_recognition_public_key_from_raw_key_hex,
+        nullifier_from_note_secret, nullifier_sparse_update_witnesses_for_consumed_inputs,
         settlement_note_root_after_deposit_roots, spend_authority_from_raw_key_hex,
-        withdraw_authority_from_raw_key_hex,
+        spend_authority_from_spend_auth_key_felt, withdraw_authority_from_raw_key_hex,
     };
 
     #[test]
@@ -1894,6 +2049,111 @@ mod tests {
     }
 
     #[test]
+    fn managed_maker_policy_authorization_binds_owner_outputs() {
+        let seed = RecoverySeed([13_u8; 32]);
+        let policy = managed_policy_fixture("0x123456", "0x0", "0x0", "0x0", "0x0");
+        let request = AuthorizeManagedMakerPolicyRequest {
+            seed_hex: seed.to_hex(),
+            policy,
+        };
+
+        let encoded = zylith_wallet_authorize_managed_maker_policy(
+            &serde_json::to_string(&request).expect("request json"),
+        )
+        .expect("policy authorization");
+        let auth: ManagedMakerAuthorization =
+            serde_json::from_str(&encoded).expect("managed authorization json");
+        let keys = derive_user_keys(&seed);
+
+        assert_eq!(
+            auth.policy.recipient_owner_public_key,
+            note_recognition_public_key_from_raw_key_hex(&hex::encode(keys.note_recognition_key))
+                .expect("owner public key")
+        );
+        assert_eq!(
+            auth.policy.recipient_spend_authority,
+            spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key))
+                .expect("spend authority")
+        );
+        assert_eq!(
+            auth.policy.recipient_withdraw_authority,
+            withdraw_authority_from_raw_key_hex(&hex::encode(keys.withdraw_auth_key))
+                .expect("withdraw authority")
+        );
+        assert!(auth.owner_authorization.signature_r.starts_with("0x"));
+        assert!(auth.owner_authorization.signature_s.starts_with("0x"));
+    }
+
+    #[test]
+    fn builds_delegated_managed_maker_order_without_owner_spend_key() {
+        let seed = RecoverySeed([13_u8; 32]);
+        let funding_note = owned_note(&seed, "USDC", 2_000, 13);
+        let managed_maker_authorization = authorize_policy_for_seed(&seed, "0x123456");
+        let request = BuildDelegatedPrivateOrderSubmissionRequest {
+            delegate_private_key_felt: "0x123456".into(),
+            order_cancellation_key_hex: "44".repeat(32),
+            managed_maker_authorization,
+            registry: PrivateExecutionKeyRegistry {
+                keys: vec![PrivateExecutionKeyPublicConfig {
+                    key_id: "ingress-0".into(),
+                    public_key: sample_p256_public_key(),
+                }],
+            },
+            funding_note,
+            funding_notes: vec![],
+            order: delegated_maker_order_fixture(),
+            padding: Some("0".repeat(64)),
+        };
+
+        let encoded = zylith_wallet_build_delegated_private_order_submission(
+            &serde_json::to_string(&request).expect("request json"),
+        )
+        .expect("delegated order");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
+
+        assert!(
+            value["order_commitment"]
+                .as_str()
+                .expect("order commitment")
+                .starts_with("0x")
+        );
+        assert_eq!(
+            value["funding_note_commitments"]
+                .as_array()
+                .expect("funding commitments")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn delegated_managed_maker_order_rejects_wrong_delegate_key() {
+        let seed = RecoverySeed([13_u8; 32]);
+        let funding_note = owned_note(&seed, "USDC", 2_000, 13);
+        let managed_maker_authorization = authorize_policy_for_seed(&seed, "0x123456");
+        let request = BuildDelegatedPrivateOrderSubmissionRequest {
+            delegate_private_key_felt: "0x654321".into(),
+            order_cancellation_key_hex: "44".repeat(32),
+            managed_maker_authorization,
+            registry: PrivateExecutionKeyRegistry {
+                keys: vec![PrivateExecutionKeyPublicConfig {
+                    key_id: "ingress-0".into(),
+                    public_key: sample_p256_public_key(),
+                }],
+            },
+            funding_note,
+            funding_notes: vec![],
+            order: delegated_maker_order_fixture(),
+            padding: None,
+        };
+
+        let error = zylith_wallet_build_delegated_private_order_submission(
+            &serde_json::to_string(&request).expect("request json"),
+        );
+        assert!(error.is_err(), "wrong delegate key rejected");
+    }
+
+    #[test]
     fn rejects_invalid_direct_order_relay_mode_before_signing() {
         let seed = RecoverySeed([9_u8; 32]);
         let keys = derive_user_keys(&seed);
@@ -2170,6 +2430,118 @@ mod tests {
 
         package["slots"][0]["batch_id"] = serde_json::Value::String("STRK-USDC-2".into());
         assert!(verify_renewal_relay_package_value(&package).is_err());
+    }
+
+    fn owned_note(seed: &RecoverySeed, asset_id: &str, amount: u128, nonce: u64) -> Note {
+        let keys = derive_user_keys(seed);
+        Note {
+            asset_id: AssetId(asset_id.into()),
+            amount,
+            owner_public_key: note_recognition_public_key_from_raw_key_hex(&hex::encode(
+                keys.note_recognition_key,
+            ))
+            .expect("owner public key"),
+            spend_authority: spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key))
+                .expect("spend authority"),
+            withdraw_authority: withdraw_authority_from_raw_key_hex(&hex::encode(
+                keys.withdraw_auth_key,
+            ))
+            .expect("withdraw authority"),
+            blinding: format!("0x{:x}", 0x500 + nonce),
+            nonce,
+            metadata_commitment: format!("0x{:x}", 0x600 + nonce),
+        }
+    }
+
+    fn managed_policy_fixture(
+        delegate_private_key_felt: &str,
+        recipient_owner_public_key: &str,
+        recipient_spend_authority: &str,
+        recipient_withdraw_authority: &str,
+        recipient_residual_withdraw_authority: &str,
+    ) -> ManagedMakerPolicy {
+        ManagedMakerPolicy {
+            version: 1,
+            delegate_public_key: spend_authority_from_spend_auth_key_felt(
+                delegate_private_key_felt,
+            )
+            .expect("delegate public key"),
+            pair_id: PairId("STRK/USDC".into()),
+            allow_buy: true,
+            allow_sell: false,
+            max_epoch_base: 1_000,
+            min_price: 1,
+            max_price: 10,
+            valid_from_epoch: 7,
+            valid_until_epoch: 7,
+            relay_mode: RelayMode::SelfRelay,
+            parent_order_commitment: "0x0".into(),
+            recipient_owner_public_key: recipient_owner_public_key.into(),
+            recipient_spend_authority: recipient_spend_authority.into(),
+            recipient_withdraw_authority: recipient_withdraw_authority.into(),
+            recipient_residual_withdraw_authority: recipient_residual_withdraw_authority.into(),
+            auditor_view_allowed: false,
+            policy_nonce: 1,
+        }
+    }
+
+    fn authorize_policy_for_seed(
+        seed: &RecoverySeed,
+        delegate_private_key_felt: &str,
+    ) -> ManagedMakerAuthorization {
+        let request = AuthorizeManagedMakerPolicyRequest {
+            seed_hex: seed.to_hex(),
+            policy: managed_policy_fixture(delegate_private_key_felt, "0x0", "0x0", "0x0", "0x0"),
+        };
+        let encoded = zylith_wallet_authorize_managed_maker_policy(
+            &serde_json::to_string(&request).expect("policy request json"),
+        )
+        .expect("policy authorization");
+        serde_json::from_str(&encoded).expect("managed authorization json")
+    }
+
+    fn delegated_maker_order_fixture() -> OrderIntent {
+        OrderIntent {
+            pair_id: PairId("STRK/USDC".into()),
+            batch_id: BatchId("STRK-USDC-7".into()),
+            side: OrderSide::Buy,
+            order_type: OrderType::MakerCurve,
+            relay_mode: RelayMode::SelfRelay,
+            maker_curve: Some(HiddenMakerCurve {
+                points: vec![
+                    MakerCurvePoint {
+                        price: 2,
+                        base_amount: 300,
+                    },
+                    MakerCurvePoint {
+                        price: 3,
+                        base_amount: 300,
+                    },
+                    MakerCurvePoint {
+                        price: 4,
+                        base_amount: 400,
+                    },
+                ],
+            }),
+            limit_price: 4,
+            amount: 1_000,
+            min_fill: 1,
+            time_in_force: TimeInForce::CurrentBatchOnly,
+            expiry_epoch: 7,
+            order_nonce: 99,
+            parent_order_commitment: "0x0".into(),
+            parent_child_index: 0,
+            parent_secret_commitment: "0x0".into(),
+            parent_cancel_authority: "0x0".into(),
+            parent_authorization_secret: "0x0".into(),
+            funding_note_ref: NoteCommitment("0x0".into()),
+            funding_nullifier: Nullifier("0x0".into()),
+            recipient_owner_public_key: "0xdead".into(),
+            recipient_spend_authority: "0xbeef".into(),
+            recipient_withdraw_authority: "0xcafe".into(),
+            recipient_residual_withdraw_authority: "0xbabe".into(),
+            auditor_view_allowed: false,
+        }
     }
 
     fn sample_p256_public_key() -> String {

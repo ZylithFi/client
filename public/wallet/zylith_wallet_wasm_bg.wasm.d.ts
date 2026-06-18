@@ -1,6 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const zylith_wallet_authorize_managed_maker_policy: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_build_delegated_private_order_submission: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_deposit_submission_plan: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_note_consolidation_draft: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_build_private_order_submission: (a: number, b: number) => [number, number, number, number];

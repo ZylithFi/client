@@ -159,7 +159,7 @@ describe("ZylithManagedMakerRunner", () => {
 
     const result = await runner.runOnce();
     expect(result.skipped).toContainEqual(expect.objectContaining({
-      reason: "delegated permission rejects all curves",
+      reason: "managed maker policy rejects all curves",
     }));
     expect(submitPrivateOrder).not.toHaveBeenCalled();
   });

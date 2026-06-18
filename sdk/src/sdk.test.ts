@@ -4,6 +4,9 @@ import {
   buildManagedCurvePlan,
   buildInventorySnapshot,
   configureAssetDecimals,
+  createPairScopedPriceSource,
+  createRatioPriceSource,
+  createStarknetOraclePriceSource,
   type ManagedRiskPolicy,
   type ManagedStrategyConfig,
   type OfflineRenewalPackage,
@@ -51,6 +54,62 @@ const risk: ManagedRiskPolicy = {
 };
 
 describe("@zylith/sdk common", () => {
+  it("derives a pair price from independently timestamped asset feeds", async () => {
+    const source = createRatioPriceSource({
+      id: "pragma-eth-usdc",
+      pair: "ETH/USDC",
+      numerator: {
+        id: "pragma-eth-usd",
+        observe: async () => ({ source: "pragma-eth-usd", pair: "ETH/USD", price: 2500, observedAt: 9_000 }),
+      },
+      denominator: {
+        id: "pragma-usdc-usd",
+        observe: async () => ({ source: "pragma-usdc-usd", pair: "USDC/USD", price: 1.001, observedAt: 8_000 }),
+      },
+    });
+
+    await expect(source.observe("ETH/USDC")).resolves.toMatchObject({
+      source: "pragma-eth-usdc",
+      pair: "ETH/USDC",
+      price: 2500 / 1.001,
+      observedAt: 8_000,
+    });
+    await expect(source.observe("STRK/USDC")).resolves.toBeNull();
+  });
+
+  it("rejects stale-quality oracle responses with too few publishers", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      result: ["0x5f5e100", "0x8", "0x64", "0x1", "0x0", "0x0"],
+    }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+    const source = createStarknetOraclePriceSource({
+      id: "pragma",
+      rpcUrl: "https://rpc.example",
+      contractAddress: "0xoracle",
+      entrypoint: "0xselector",
+      calldata: ["0x0", "0xpair"],
+      decimalsIndex: 1,
+      timestampIndex: 2,
+      sourceCountIndex: 3,
+      minSourceCount: 2,
+      fetchImpl,
+    });
+
+    await expect(source.observe("ETH/USDC")).resolves.toBeNull();
+  });
+
+  it("does not query pair-scoped sources for unrelated markets", async () => {
+    const observe = vi.fn(async (pairId: string) => ({
+      source: "coinbase",
+      pair: pairId,
+      price: 2500,
+      observedAt: 1,
+    }));
+    const source = createPairScopedPriceSource({ id: "coinbase", observe }, ["ETH/USDC"]);
+
+    await expect(source.observe("STRK/USDC")).resolves.toBeNull();
+    expect(observe).not.toHaveBeenCalled();
+  });
+
   it("keeps only the imbalance-reducing side for base-heavy inventory", () => {
     const fairPrice = { ok: true as const, pair: "ETH/USDC", price: 1000, observedAt: 1, sources: ["oracle"], maxDivergenceBps: 0 };
     const inventory = buildInventorySnapshot(pair, [
@@ -186,6 +245,79 @@ describe("@zylith/sdk maker", () => {
     expect(runner.telemetrySnapshot()).toMatchObject({ submitted: 1, skipped: 1, failed: 0 });
   });
 
+  it("does not submit funded strategies without quote-only authorization", async () => {
+    const runner = new ZylithManagedMakerRunner({
+      sdk: new ZylithMakerSdk(),
+      runtime: {
+        getBalances: () => [
+          { asset: "ETH", available: "5000000000000000000", locked: "0" },
+          { asset: "USDC", available: "5000000000", locked: "0" },
+        ],
+        getOrders: () => [],
+      },
+      marketData: marketDataFixture(),
+      strategies: [{ id: "managed", pair, strategy, risk }],
+      currentBatch: async () => batchFixture(),
+      now: () => 1_000,
+      requireQuoteOnlyAuthorization: true,
+    });
+
+    await expect(runner.runOnce()).resolves.toMatchObject({
+      submitted: [],
+      skipped: [expect.objectContaining({ reason: "missing managed maker quote-only authorization" })],
+    });
+  });
+
+  it("does not fall back to unrestricted wallet submission when a managed policy is configured", async () => {
+    const runner = new ZylithManagedMakerRunner({
+      sdk: new ZylithMakerSdk(),
+      runtime: {
+        getBalances: () => [
+          { asset: "ETH", available: "5000000000000000000", locked: "0" },
+          { asset: "USDC", available: "5000000000", locked: "0" },
+        ],
+        getOrders: () => [],
+      },
+      marketData: marketDataFixture(),
+      strategies: [{ id: "managed", pair, strategy, risk, managedMakerAuthorization: managedAuthorizationFixture() }],
+      currentBatch: async () => batchFixture(),
+      now: () => 1_000,
+      requireQuoteOnlyAuthorization: true,
+    });
+
+    await expect(runner.runOnce()).resolves.toMatchObject({
+      submitted: [],
+      skipped: [expect.objectContaining({ reason: "runtime cannot submit delegated managed maker orders" })],
+    });
+  });
+
+  it("uses delegated submission for policy-backed managed maker curves", async () => {
+    const submitDelegatedPrivateOrder = vi.fn(async () => ({ strategy_id: "strategy-1" }));
+    const auth = managedAuthorizationFixture();
+    const runner = new ZylithManagedMakerRunner({
+      sdk: new ZylithMakerSdk(),
+      runtime: {
+        submitDelegatedPrivateOrder,
+        getBalances: () => [
+          { asset: "ETH", available: "5000000000000000000", locked: "0" },
+          { asset: "USDC", available: "5000000000", locked: "0" },
+        ],
+        getOrders: () => [],
+      },
+      marketData: marketDataFixture(),
+      strategies: [{ id: "managed", pair, strategy, risk, managedMakerAuthorization: auth }],
+      currentBatch: async () => batchFixture(),
+      now: () => 1_000,
+      requireQuoteOnlyAuthorization: true,
+    });
+
+    await expect(runner.runOnce()).resolves.toMatchObject({
+      submitted: [expect.objectContaining({ batchId: "batch-1", curveCount: 2 })],
+    });
+    expect(submitDelegatedPrivateOrder).toHaveBeenCalledTimes(2);
+    expect(submitDelegatedPrivateOrder.mock.calls[0]?.[1]).toEqual(auth);
+  });
+
   it("marks relay outages after package creation as partial exposure", async () => {
     const relay = new ZylithRelaySdk({
       relayUrl: "https://relay.example",
@@ -264,5 +396,56 @@ function packageFixture(): OfflineRenewalPackage {
       max_submission_delay_ms: 0,
     },
     slots: [],
+  };
+}
+
+function batchFixture() {
+  return {
+    batch_id: "batch-1",
+    pair_id: "ETH/USDC",
+    epoch_id: 1,
+    close_time_unix_ms: 60_000,
+    status: "Open" as const,
+    order_count_bucket: "0-7",
+  };
+}
+
+function marketDataFixture() {
+  return new MarketDataEngine({
+    sources: [
+      { id: "a", observe: async (pairId) => ({ source: "a", pair: pairId, price: 1000, observedAt: 1 }) },
+      { id: "b", observe: async (pairId) => ({ source: "b", pair: pairId, price: 1001, observedAt: 1 }) },
+    ],
+    fairPricePolicy: { maxStalenessMs: 10_000, maxDivergenceBps: 50, minSources: 2 },
+    now: () => 1,
+  });
+}
+
+function managedAuthorizationFixture() {
+  return {
+    policy: {
+      version: 1,
+      delegate_public_key: "0x123",
+      pair_id: "ETH/USDC",
+      allow_buy: true,
+      allow_sell: true,
+      max_epoch_base: "2000000000000000000",
+      min_price: "900000000",
+      max_price: "1100000000",
+      valid_from_epoch: "1",
+      valid_until_epoch: "5",
+      relay_mode: "SelfRelay" as const,
+      parent_order_commitment: "0x0",
+      recipient_owner_public_key: "0xabc",
+      recipient_spend_authority: "0xdef",
+      recipient_withdraw_authority: "0x456",
+      recipient_residual_withdraw_authority: "0x456",
+      auditor_view_allowed: false,
+      policy_nonce: "1",
+    },
+    owner_authorization: {
+      signature_r: "0x1",
+      signature_s: "0x2",
+    },
   };
 }

@@ -3,6 +3,10 @@
 
 export function init(): void;
 
+export function zylith_wallet_authorize_managed_maker_policy(input_json: string): string;
+
+export function zylith_wallet_build_delegated_private_order_submission(input_json: string): string;
+
 export function zylith_wallet_build_deposit_submission_plan(input_json: string): string;
 
 export function zylith_wallet_build_note_consolidation_draft(input_json: string): string;
@@ -57,6 +61,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly zylith_wallet_authorize_managed_maker_policy: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_build_delegated_private_order_submission: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_deposit_submission_plan: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_note_consolidation_draft: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_private_order_submission: (a: number, b: number) => [number, number, number, number];

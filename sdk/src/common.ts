@@ -242,6 +242,37 @@ export type DelegatedMakerAuthorization =
   | { ok: true; curve: ManagedCurveDraft }
   | { ok: false; reason: string };
 
+export type SpendAuthorization = {
+  signature_r: string;
+  signature_s: string;
+};
+
+export type ManagedMakerPolicy = {
+  version: number;
+  delegate_public_key: string;
+  pair_id: string;
+  allow_buy: boolean;
+  allow_sell: boolean;
+  max_epoch_base: string;
+  min_price: string;
+  max_price: string;
+  valid_from_epoch: string;
+  valid_until_epoch: string;
+  relay_mode: RelayMode;
+  parent_order_commitment: string;
+  recipient_owner_public_key: string;
+  recipient_spend_authority: string;
+  recipient_withdraw_authority: string;
+  recipient_residual_withdraw_authority: string;
+  auditor_view_allowed: boolean;
+  policy_nonce: string;
+};
+
+export type ManagedMakerAuthorization = {
+  policy: ManagedMakerPolicy;
+  owner_authorization: SpendAuthorization;
+};
+
 export type MakerPnlSummary = {
   pair: string;
   filledChildren: number;
@@ -430,8 +461,11 @@ export type StarknetOraclePriceSourceOptions = {
   contractAddress: string;
   entrypoint: string;
   calldata: string[] | ((pair: string) => string[]);
-  priceScale: number;
+  priceScale?: number;
+  decimalsIndex?: number;
   timestampIndex?: number;
+  sourceCountIndex?: number;
+  minSourceCount?: number;
   fetchImpl?: typeof fetch;
 };
 
@@ -463,7 +497,21 @@ export function createStarknetOraclePriceSource(options: StarknetOraclePriceSour
       const body = await response.json() as { result?: string[]; error?: { message?: string } };
       if (body.error) throw new Error(body.error.message ?? `Oracle source ${options.id} failed`);
       const result = body.result ?? [];
-      const price = feltNumber(result[0]) / options.priceScale;
+      const decimals = options.decimalsIndex === undefined
+        ? undefined
+        : feltNumber(result[options.decimalsIndex]);
+      const priceScale = options.priceScale
+        ?? (Number.isSafeInteger(decimals) && decimals !== undefined && decimals >= 0
+          ? 10 ** decimals
+          : undefined);
+      if (!priceScale || !Number.isFinite(priceScale) || priceScale <= 0) {
+        throw new Error(`Oracle source ${options.id} did not return a valid price scale`);
+      }
+      if (options.sourceCountIndex !== undefined && options.minSourceCount !== undefined) {
+        const sourceCount = feltNumber(result[options.sourceCountIndex]);
+        if (!Number.isSafeInteger(sourceCount) || sourceCount < options.minSourceCount) return null;
+      }
+      const price = feltNumber(result[0]) / priceScale;
       if (!Number.isFinite(price) || price <= 0) return null;
       const timestampFelt = options.timestampIndex === undefined ? undefined : result[options.timestampIndex];
       return {
@@ -472,6 +520,50 @@ export function createStarknetOraclePriceSource(options: StarknetOraclePriceSour
         price,
         observedAt: normalizeTimestamp(timestampFelt === undefined ? undefined : feltNumber(timestampFelt)) ?? Date.now(),
       };
+    },
+  };
+}
+
+export type RatioPriceSourceOptions = {
+  id: string;
+  pair: string;
+  numerator: MarketDataSource;
+  denominator: MarketDataSource;
+};
+
+export function createRatioPriceSource(options: RatioPriceSourceOptions): MarketDataSource {
+  return {
+    id: options.id,
+    async observe(pair, requestOptions) {
+      if (normalizePair(pair) !== normalizePair(options.pair)) return null;
+      const [numerator, denominator] = await Promise.all([
+        options.numerator.observe(pair, requestOptions),
+        options.denominator.observe(pair, requestOptions),
+      ]);
+      if (!numerator || !denominator || denominator.price <= 0) return null;
+      const price = numerator.price / denominator.price;
+      if (!Number.isFinite(price) || price <= 0) return null;
+      return {
+        source: options.id,
+        pair,
+        price,
+        observedAt: Math.min(numerator.observedAt, denominator.observedAt),
+        confidenceBps: Math.max(numerator.confidenceBps ?? 0, denominator.confidenceBps ?? 0),
+      };
+    },
+  };
+}
+
+export function createPairScopedPriceSource(
+  source: MarketDataSource,
+  pairs: string[],
+): MarketDataSource {
+  const allowed = new Set(pairs.map(normalizePair));
+  return {
+    id: source.id,
+    observe(pair, options) {
+      if (!allowed.has(normalizePair(pair))) return Promise.resolve(null);
+      return source.observe(pair, options);
     },
   };
 }
@@ -680,6 +772,35 @@ export function authorizeDelegatedMakerCurve(
   if (curve.maxBaseAmount > permission.maxEpochBase) return { ok: false, reason: "curve exceeds delegated epoch size" };
   const worstDeviation = Math.max(...curve.points.map((point) => Math.abs(bps(point.price - fairPrice, fairPrice))));
   if (worstDeviation > permission.maxPriceDeviationBps) return { ok: false, reason: "curve price outside delegated band" };
+  return { ok: true, curve };
+}
+
+export function authorizeManagedMakerCurvePolicy(
+  curve: ManagedCurveDraft,
+  pair: PairConfig,
+  policy: ManagedMakerPolicy,
+  epochId: number
+): DelegatedMakerAuthorization {
+  if (policy.version !== 1) return { ok: false, reason: "unsupported managed maker policy version" };
+  if (policy.pair_id !== pair.pair_id || curve.pair !== pair.pair_id) return { ok: false, reason: "pair not authorized by managed maker policy" };
+  if (curve.side === "Buy" && !policy.allow_buy) return { ok: false, reason: "buy side not authorized by managed maker policy" };
+  if (curve.side === "Sell" && !policy.allow_sell) return { ok: false, reason: "sell side not authorized by managed maker policy" };
+  if (policy.relay_mode !== curve.relayMode) return { ok: false, reason: "relay mode not authorized by managed maker policy" };
+  const fromEpoch = bigintDecimal(policy.valid_from_epoch);
+  const untilEpoch = bigintDecimal(policy.valid_until_epoch);
+  const currentEpoch = BigInt(epochId);
+  if (currentEpoch < fromEpoch || currentEpoch > untilEpoch) return { ok: false, reason: "epoch outside managed maker policy window" };
+  const maxBase = bigintDecimal(policy.max_epoch_base);
+  const curveBase = BigInt(toAtomicStr(decimalString(curve.maxBaseAmount), pair.base_asset_id));
+  if (curveBase <= 0n || curveBase > maxBase) return { ok: false, reason: "curve exceeds managed maker policy size" };
+  const minPrice = bigintDecimal(policy.min_price);
+  const maxPrice = bigintDecimal(policy.max_price);
+  const reservationPrice = BigInt(toPriceAtomicStr(decimalString(curve.reservationPrice), pair.quote_asset_id));
+  if (reservationPrice < minPrice || reservationPrice > maxPrice) return { ok: false, reason: "reservation price outside managed maker policy band" };
+  for (const point of curve.points) {
+    const price = BigInt(toPriceAtomicStr(decimalString(point.price), pair.quote_asset_id));
+    if (price < minPrice || price > maxPrice) return { ok: false, reason: "curve point outside managed maker policy band" };
+  }
   return { ok: true, curve };
 }
 
@@ -1030,6 +1151,11 @@ function decimalString(value: number): string {
     useGrouping: false,
     maximumFractionDigits: 18,
   });
+}
+
+function bigintDecimal(value: string): bigint {
+  if (!/^\d+$/.test(String(value))) return 0n;
+  return BigInt(value);
 }
 
 function normalizePair(pair: string): string {
