@@ -2,6 +2,7 @@ import type {
   OfflineRenewalPackage,
   OfflineRenewalRelayResult,
 } from "../offlineRenewalOperator";
+import { localServiceUrl, normalizeUrl } from "./serviceUrls";
 
 type ManagedRelayPackageStatus = {
   package_id: string;
@@ -180,20 +181,4 @@ function relayAuthorizationHeaders(
 function requiredManagedRelayUrl() {
   if (managedRelayUrl) return managedRelayUrl;
   throw new Error("Zylith relay endpoint is not configured");
-}
-
-function localServiceUrl(port: number) {
-  if (typeof window === "undefined") return "";
-  if (!isLocalHost(window.location.hostname)) return "";
-  return `${window.location.protocol}//${window.location.hostname}:${port}`;
-}
-
-function normalizeUrl(value: string) {
-  return value.replace(/\/+$/, "");
-}
-
-function isLocalHost(hostname: string) {
-  return (
-    hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
-  );
 }

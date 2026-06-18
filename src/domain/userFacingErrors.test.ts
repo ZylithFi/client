@@ -35,8 +35,16 @@ describe("userFacingErrorMessage", () => {
       new Error("Failed while funding embedded signer from connected wallet: PaymasterV2Error: Paymaster error 156: An error occurred (TRANSACTION_EXECUTION_ERROR)"),
     );
 
-    expect(message).toBe("The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.");
+    expect(message).toBe("The connected wallet could not execute the funding transfer. Leave a small fee balance in the wallet and retry with a lower amount.");
     expect(message).not.toMatch(/PaymasterV2Error|TRANSACTION_EXECUTION_ERROR|embedded signer/i);
+  });
+
+  it("explains ETH deposit fee headroom before opening the wallet transfer", () => {
+    const message = userFacingErrorMessage(
+      new Error("Private deposit funding setup failed: ETH deposit amount leaves no room for the wallet transaction fee. Try a slightly smaller amount."),
+    );
+
+    expect(message).toBe("ETH deposit amount leaves no room for the wallet fee. Try a slightly smaller amount.");
   });
 
   it("explains inactive connected wallets during private deposits", () => {

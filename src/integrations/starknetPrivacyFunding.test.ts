@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS,
+  connectedWalletFundingShortfall,
   privacyBridgeDepositCalldata,
   privacyBridgeDepositInvokeCall,
   privacyBridgeStrk20ExitClaimCalldata,
@@ -7,6 +9,8 @@ import {
   STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS,
   type PrivacyBridgeDepositPlan,
 } from "./starknetPrivacyFunding";
+
+const STARKNET_ETH_TOKEN_ADDRESS = "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
 
 describe("starknet privacy proof delay schedule", () => {
   it("retries with monotonically older proof blocks", () => {
@@ -16,6 +20,34 @@ describe("starknet privacy proof delay schedule", () => {
         STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS[i - 1],
       );
     }
+  });
+});
+
+describe("connectedWalletFundingShortfall", () => {
+  it("requires ETH fee headroom before opening the wallet transfer", () => {
+    const transferAmount = 1_000_000_000_000_000_000n;
+
+    expect(connectedWalletFundingShortfall({
+      tokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
+      sourceBalance: transferAmount,
+      transferAmount,
+    })).toBe("ETH deposit amount leaves no room for the wallet transaction fee. Try a slightly smaller amount.");
+
+    expect(connectedWalletFundingShortfall({
+      tokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
+      sourceBalance: transferAmount + CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS,
+      transferAmount,
+    })).toBeNull();
+  });
+
+  it("does not reserve ETH fee headroom for non-ETH token transfers", () => {
+    const transferAmount = 1_000_000n;
+
+    expect(connectedWalletFundingShortfall({
+      tokenAddress: "0x1234",
+      sourceBalance: transferAmount,
+      transferAmount,
+    })).toBeNull();
   });
 });
 

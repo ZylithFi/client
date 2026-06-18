@@ -17,6 +17,26 @@ import {
   hash,
   type Call,
 } from "starknet";
+import {
+  ETH_DEPOSIT_FEE_HEADROOM_ERROR,
+} from "../domain/privateDepositErrors";
+import {
+  errorMessage,
+  isProofBlockTooRecent,
+  isProofProviderContractVisibilityLag,
+  isUserRejected,
+  isWalletCallShapeError,
+  isWalletRequestUnavailableError,
+  summarizeFundingError,
+} from "./starknetPrivacyErrors";
+import {
+  paymasterExecuteUrl,
+  paymasterPrivacySignerEnsureUrl,
+  paymasterPrivacySignerRelayUrl,
+  serviceBaseUrl,
+  transactionHashFromResult,
+} from "./starknetPrivacyTransport";
+import { runProofDelayRetryLoop } from "./starknetPrivacyProofRetry";
 
 type StarknetProviderLike = {
   account?: {
@@ -172,6 +192,8 @@ const STARK_FIELD_PRIME =
 const STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS = 10;
 export const STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS = [10, 16, 24, 32, 48] as const;
 const STARKNET_PRIVACY_REPLAY_GUARD_ATOMS = 1n;
+const STARKNET_ETH_TOKEN_ADDRESS = "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
+export const CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS = 5_000_000_000_000n;
 const STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT = (1n << 128n) - 1n;
 const STARKNET_PRIVACY_SETUP_READY_TIMEOUT_MS = 180_000;
 const STARKNET_PRIVACY_SETUP_READY_POLL_MS = 3_000;
@@ -276,10 +298,18 @@ export async function submitPrivacyBridgeDeposit(
     requireHealthyDiscovery(discoveryProvider)
   );
   const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
-  let lastRetryableError: unknown = null;
-  for (let attempt = 0; attempt < proofDelayScheduleBlocks.length; attempt += 1) {
-    try {
-      const proofDelayBlocks = proofDelayScheduleBlocks[attempt];
+  return runProofDelayRetryLoop({
+    proofDelayScheduleBlocks,
+    retryStagePrefix: "Private deposit",
+    fallbackErrorMessage: "Private deposit proof submission failed",
+    classifier: {
+      isProofBlockTooRecent,
+      isContractVisibilityLag: async (error) =>
+        isProofProviderContractVisibilityLag(error) &&
+        await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(() => false),
+    },
+    setStage: setFundingStage,
+    runAttempt: async (proofDelayBlocks) => {
       const provingBlockId = await runFundingStage(
         "Private deposit proof setup failed",
         () => provingBlock(rpcProvider, proofDelayBlocks),
@@ -357,25 +387,8 @@ export async function submitPrivacyBridgeDeposit(
         transactionHash,
         sdkRegistry: execution.registry,
       };
-    } catch (error) {
-      const retryableContractVisibilityLag =
-        isProofProviderContractVisibilityLag(error) &&
-        await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(() => false);
-      if (
-        attempt < proofDelayScheduleBlocks.length - 1 &&
-        (isProofBlockTooRecent(error) || retryableContractVisibilityLag)
-      ) {
-        lastRetryableError = error;
-        setFundingStage(
-          `Private deposit proof retrying with an older proof block (attempt ${attempt + 2} of ${proofDelayScheduleBlocks.length})`
-        );
-        await new Promise((resolve) => setTimeout(resolve, retryableContractVisibilityLag ? 15_000 : 5_000));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw lastRetryableError ?? new Error("Private deposit proof submission failed");
+    },
+  });
 }
 
 export async function submitPrivacyOpenNoteWithdrawal(
@@ -406,11 +419,19 @@ export async function submitPrivacyOpenNoteWithdrawal(
     requireHealthyDiscovery(discoveryProvider)
   );
   const sdkRegistry = input.sdkRegistry ?? createEmptyRegistry();
-  let lastRetryableError: unknown = null;
   let claimedOpenNoteId = "";
-  for (let attempt = 0; attempt < proofDelayScheduleBlocks.length; attempt += 1) {
-    try {
-      const proofDelayBlocks = proofDelayScheduleBlocks[attempt];
+  return runProofDelayRetryLoop({
+    proofDelayScheduleBlocks,
+    retryStagePrefix: "Private withdrawal",
+    fallbackErrorMessage: "Private withdrawal proof submission failed",
+    classifier: {
+      isProofBlockTooRecent,
+      isContractVisibilityLag: async (error) =>
+        isProofProviderContractVisibilityLag(error) &&
+        await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(() => false),
+    },
+    setStage: setFundingStage,
+    runAttempt: async (proofDelayBlocks) => {
       const provingBlockId = await runFundingStage(
         "Private withdrawal proof setup failed",
         () => provingBlock(rpcProvider, proofDelayBlocks),
@@ -492,25 +513,8 @@ export async function submitPrivacyOpenNoteWithdrawal(
         openNoteId: claimedOpenNoteId,
         sdkRegistry: execution.registry,
       };
-    } catch (error) {
-      const retryableContractVisibilityLag =
-        isProofProviderContractVisibilityLag(error) &&
-        await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(() => false);
-      if (
-        attempt < proofDelayScheduleBlocks.length - 1 &&
-        (isProofBlockTooRecent(error) || retryableContractVisibilityLag)
-      ) {
-        lastRetryableError = error;
-        setFundingStage(
-          `Private withdrawal proof retrying with an older proof block (attempt ${attempt + 2} of ${proofDelayScheduleBlocks.length})`
-        );
-        await new Promise((resolve) => setTimeout(resolve, retryableContractVisibilityLag ? 15_000 : 5_000));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw lastRetryableError ?? new Error("Private withdrawal proof submission failed");
+    },
+  });
 }
 
 async function requireHealthyDiscovery(discoveryProvider: IndexerDiscoveryProvider) {
@@ -542,101 +546,29 @@ async function runFundingStage<T>(stage: string, operation: () => Promise<T>): P
   }
 }
 
-function summarizeFundingError(error: unknown) {
-  const message = unwrapJsonErrorBody(sanitizeRpcMessage(errorMessage(error)));
-  if (!message) return "No error detail was returned.";
-  if (/^Failed while /i.test(message)) {
-    return message.slice(0, 360);
-  }
-  if (/does not match paymaster configuration|not allowlisted|not supported by paymaster/i.test(message)) {
-    return `Deposit relay rejected the request: ${message.slice(0, 200)}. The app deployment configuration does not match the relay.`;
-  }
-  if (/PaymasterV2Error|Paymaster error\s*\d+|TRANSACTION_EXECUTION_ERROR/i.test(message)) {
-    return "The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.";
-  }
-  if (/Transfer allowance exceeded/i.test(message)) {
-    return "Token approval was lower than the required privacy-pool deposit amount.";
-  }
-  if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow/i.test(message)) {
-    return "Connected wallet does not have enough token balance for this deposit.";
-  }
-  if (/max fee|fee.*exceed|insufficient.*fee|not enough.*fee|actual fee/i.test(message)) {
-    return "Connected wallet does not have enough STRK to pay the Starknet transaction fee.";
-  }
-  if (/privacy replay protection/i.test(message)) {
-    return message.slice(0, 280);
-  }
-  if (/entry point.*not found|entrypoint.*not found|invalid.*entrypoint/i.test(message)) {
-    return "Configured token contract does not expose the expected ERC-20 entrypoint.";
-  }
-  if (/contract.*not.*found|not deployed|ContractAddress.*not found/i.test(message)) {
-    return "Configured Starknet contract was not found on the selected network.";
-  }
-  if (/INVALID_SIG|INVALID_SIGNATURE/i.test(message)) {
-    return "The embedded Zylith wallet did not produce a valid privacy authorization signature.";
-  }
-  if (/NO_REPLAY_PROTECTION/i.test(message)) {
-    return "Private deposits require a one-unit surplus note for replay protection.";
-  }
-  if (/Discovery service is not healthy/i.test(message)) {
-    return "Private deposit service is unavailable.";
-  }
-  if (/Private deposit privacy warning|Starknet Privacy SDK privacy warning/i.test(message)) {
-    return message.slice(0, 280);
-  }
-  if (/Proving service error/i.test(message)) {
-    return message.slice(0, 280);
-  }
-  if (/Indexer API/i.test(message)) {
-    return message.slice(0, 280);
-  }
-  if (/proof block number .* too recent|maximum allowed block number/i.test(message)) {
-    return "The privacy proof block is not old enough for the Starknet verifier yet.";
-  }
-  if (/proof facts|proofFacts/i.test(message)) {
-    return "The proving service did not return valid proof facts.";
-  }
-  if (/failed to fetch|networkerror|network request failed|load failed/i.test(message)) {
-    return "A required network request failed.";
-  }
-  if (/HTTP\s+4\d\d/i.test(message)) {
-    return "A required service rejected the request.";
-  }
-  if (/HTTP\s+5\d\d/i.test(message)) {
-    return "A required service is unavailable.";
-  }
-  if (/RpcError|RPC:/i.test(message)) {
-    const reason = starknetRpcReason(message);
-    return reason
-      ? `Starknet network rejected the wallet transaction: ${reason}`
-      : "Starknet network rejected the wallet transaction during fee estimation.";
-  }
-  if (/paymaster/i.test(message) && /reject|invalid|mismatch|not allowed/i.test(message)) {
-    return "The deposit relay rejected the authorization.";
-  }
-  if (message.length <= 180 && !/^[\[{]/.test(message)) return message;
-  return "A required service returned an unreadable error.";
-}
-
-function unwrapJsonErrorBody(message: string) {
-  const trimmed = message.trim();
-  if (!/^\{/.test(trimmed)) return message;
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    for (const key of ["error", "message", "detail", "reason"]) {
-      const value = parsed[key];
-      if (typeof value === "string" && value.trim()) return value.trim();
-    }
-  } catch {}
-  return message;
-}
-
 function assertNoSdkPrivacyWarnings(warnings: Warning[]) {
   if (warnings.length === 0) return;
   const detail = warnings
     .map((warning) => `${warning.code}: ${warning.message}`)
     .join("; ");
   throw new Error(`Private deposit privacy warning: ${detail}`);
+}
+
+export function connectedWalletFundingShortfall(input: {
+  tokenAddress: string;
+  sourceBalance: bigint;
+  transferAmount: bigint;
+}): string | null {
+  const feeReserve = sameFelt(input.tokenAddress, STARKNET_ETH_TOKEN_ADDRESS)
+    ? CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS
+    : 0n;
+  if (input.sourceBalance < input.transferAmount) {
+    return "Connected wallet balance is below the requested deposit plus one smallest token unit required for replay protection.";
+  }
+  if (feeReserve > 0n && input.sourceBalance < input.transferAmount + feeReserve) {
+    return ETH_DEPOSIT_FEE_HEADROOM_ERROR;
+  }
+  return null;
 }
 
 async function ensureEmbeddedPrivacyAccountReady(input: {
@@ -676,11 +608,12 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
         activeSourceOwner,
       )
     );
-    if (sourceBalance < transferAmount) {
-      throw new Error(
-        `Connected wallet balance is below the requested deposit plus one smallest token unit required for replay protection.`,
-      );
-    }
+    const fundingShortfall = connectedWalletFundingShortfall({
+      tokenAddress: input.tokenAddress,
+      sourceBalance,
+      transferAmount,
+    });
+    if (fundingShortfall) throw new Error(fundingShortfall);
     const transferCall: Call = {
       contractAddress: input.tokenAddress,
       entrypoint: "transfer",
@@ -1327,207 +1260,4 @@ async function deriveFeltFromSeed(seedHex: string, label: string, modulus: bigin
     byte.toString(16).padStart(2, "0")
   ).join("");
   return (BigInt(`0x${hex}`) % (modulus - 1n)) + 1n;
-}
-
-function paymasterExecuteUrl(url: string) {
-  const trimmed = serviceBaseUrl(url);
-  return trimmed.endsWith("/execute-outside")
-    ? trimmed
-    : `${trimmed}/execute-outside`;
-}
-
-function paymasterPrivacySignerEnsureUrl(url: string) {
-  const trimmed = serviceBaseUrl(url);
-  return trimmed.endsWith("/execute-outside")
-    ? `${trimmed.slice(0, -"/execute-outside".length)}/privacy-signer/ensure`
-    : `${trimmed}/privacy-signer/ensure`;
-}
-
-function paymasterPrivacySignerRelayUrl(url: string) {
-  const trimmed = serviceBaseUrl(url);
-  return trimmed.endsWith("/execute-outside")
-    ? `${trimmed.slice(0, -"/execute-outside".length)}/privacy-signer/relay`
-    : `${trimmed}/privacy-signer/relay`;
-}
-
-function serviceBaseUrl(url: string) {
-  return url.replace(/\/+$/, "");
-}
-
-function transactionHashFromResult(result: unknown) {
-  if (typeof result === "string" && result.trim()) return result;
-  if (!result || typeof result !== "object") return null;
-  const record = result as Record<string, unknown>;
-  for (const key of ["transaction_hash", "transactionHash", "hash"]) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return null;
-}
-
-function isWalletCallShapeError(error: unknown) {
-  const message = errorMessage(error);
-  return /invalid_union|invalid input|contractAddress|contract_address|entrypoint|entry_point|array|calls/i
-    .test(message);
-}
-
-function isUserRejected(error: unknown) {
-  const message = errorMessage(error);
-  return /user rejected|user denied|user abort|rejected by user|cancelled by user|canceled by user/i
-    .test(message);
-}
-
-function isWalletRequestUnavailableError(error: unknown) {
-  const message = errorMessage(error);
-  return /method not found|not supported|unsupported|not implemented|unknown method|wallet_addInvokeTransaction/i
-    .test(message);
-}
-
-function isProofBlockTooRecent(error: unknown): boolean {
-  const message = errorMessage(error);
-  if (
-    /proof block number .* too recent|maximum allowed block number|proof block is not old enough/i
-      .test(message)
-  ) {
-    return true;
-  }
-  if (error instanceof Error && "cause" in error) {
-    return isProofBlockTooRecent((error as Error & { cause?: unknown }).cause);
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofBlockTooRecent((error as { cause?: unknown }).cause);
-  }
-  return false;
-}
-
-function isProofProviderContractVisibilityLag(error: unknown): boolean {
-  const message = errorMessage(error);
-  if (
-    /requested contract address .* is not deployed|contract.*not.*found|not deployed|class hash: 0x0{8,}/i
-      .test(message)
-  ) {
-    return true;
-  }
-  if (error instanceof Error && "cause" in error) {
-    return isProofProviderContractVisibilityLag((error as Error & { cause?: unknown }).cause);
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofProviderContractVisibilityLag((error as { cause?: unknown }).cause);
-  }
-  return false;
-}
-
-function errorMessage(error: unknown) {
-  const nested = nestedErrorMessages(error);
-  if (nested.length > 0) return nested.join(" ");
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
-function nestedErrorMessages(error: unknown, seen = new Set<unknown>()): string[] {
-  if (error === null || error === undefined || seen.has(error)) return [];
-  if (typeof error === "string") return [decodeMaybeHexString(error)];
-  if (typeof error === "number" || typeof error === "bigint" || typeof error === "boolean") {
-    return [String(error)];
-  }
-  if (error instanceof Error) {
-    seen.add(error);
-    return [
-      error.message,
-      ...nestedErrorMessages((error as Error & { cause?: unknown }).cause, seen),
-    ].filter(Boolean);
-  }
-  if (Array.isArray(error)) {
-    seen.add(error);
-    return error.flatMap((item) => nestedErrorMessages(item, seen));
-  }
-  if (typeof error !== "object") return [];
-
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  const messages: string[] = [];
-  for (const key of [
-    "message",
-    "error",
-    "execution_error",
-    "revert_error",
-    "failure_reason",
-    "data",
-    "details",
-    "cause",
-  ]) {
-    if (key in record) messages.push(...nestedErrorMessages(record[key], seen));
-  }
-  if (messages.length > 0) return dedupeMessages(messages);
-  try {
-    return [JSON.stringify(error)];
-  } catch {
-    return [String(error)];
-  }
-}
-
-function dedupeMessages(messages: string[]) {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const message of messages.map((entry) => entry.replace(/\s+/g, " ").trim()).filter(Boolean)) {
-    if (seen.has(message)) continue;
-    seen.add(message);
-    out.push(message);
-  }
-  return out;
-}
-
-function decodeMaybeHexString(value: string) {
-  const trimmed = value.trim();
-  if (!/^0x[0-9a-fA-F]+$/.test(trimmed) || trimmed.length < 8 || trimmed.length % 2 !== 0) {
-    return trimmed;
-  }
-  try {
-    const bytes = trimmed
-      .slice(2)
-      .match(/../g)
-      ?.map((chunk) => parseInt(chunk, 16)) ?? [];
-    if (bytes.length === 0 || bytes.some((byte) => byte < 32 || byte > 126)) return trimmed;
-    return `${trimmed} ('${String.fromCharCode(...bytes)}')`;
-  } catch {
-    return trimmed;
-  }
-}
-
-function decodeHexStringsInText(value: string) {
-  return value.replace(/0x[0-9a-fA-F]{8,}/g, (match) => decodeMaybeHexString(match));
-}
-
-function sanitizeRpcMessage(value: string) {
-  return decodeHexStringsInText(value)
-    .replace(/"calldata"\s*:\s*\[[^\]]*\]/g, '"calldata":[...]')
-    .replace(/"signature"\s*:\s*\[[^\]]*\]/g, '"signature":[...]')
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function starknetRpcReason(message: string) {
-  const quoted = message.match(/\('([^']{3,180})'\)/);
-  if (quoted?.[1]) return quoted[1];
-  const known = [
-    /transfer amount exceeds balance/i,
-    /insufficient balance/i,
-    /u256_sub overflow/i,
-    /transfer allowance exceeded/i,
-    /invalid signature/i,
-    /account validation failed/i,
-    /class hash .* not declared/i,
-    /contract .* not found/i,
-    /entry point .* not found/i,
-  ];
-  for (const pattern of known) {
-    const match = message.match(pattern);
-    if (match?.[0]) return match[0];
-  }
-  return null;
 }

@@ -1,10 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { formatClearingPrice, fromAtomicStr } from "../domain/assets";
+import { fromAtomicStr } from "../domain/assets";
 import type { BatchSummary, PublicSettlementTranscript } from "../domain/auctionEpoch";
 import type { CurvePoint } from "../domain/makerCurves";
 import { defaultCurveBands } from "../domain/makerCurves";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
-import { statusLabel, statusTone } from "../domain/orderLifecycle";
 import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/shieldedBalances";
 import { buildMakerOpsSnapshot } from "@zylith/sdk/common";
 import type {
@@ -12,8 +11,52 @@ import type {
   PairConfig,
   TicketSubmitIntent,
 } from "../components/OrderTicket";
+import {
+  activeCurveRecords,
+  activeStatuses,
+  assetListText,
+  averageCurveFillRate,
+  averageCurvePrice,
+  balanceAmount,
+  buildCurveRecords,
+  buildLiquidityEpochSeries,
+  committedDepth,
+  curveBaseAsset,
+  curveDisplayRef,
+  curveEpochOutcomes,
+  curveFillRate,
+  curveFundingAsset,
+  curveLockedCapital,
+  curveQuoteAsset,
+  curveStatusPillTone,
+  depthFilled,
+  displayedBandFill,
+  epochOutcomeWindow,
+  formatBps,
+  formatCompactHuman,
+  formatHuman,
+  formatPct,
+  fmtAddr,
+  fmtTime,
+  latestEpochOutcomes,
+  orderFilled,
+  orderFundingExposure,
+  orderQuoteNotional,
+  parseHuman,
+  renewalPackageStatus,
+  settlementConfirmed,
+  terminalFill,
+  visibleLiquidityEpochSeries,
+  weightedAverageClearing,
+  weightedMakerCaptureBps,
+  type CurveEpochOutcome,
+  type LiquidityAnalyticsChartMode,
+  type LiquidityAnalyticsEpoch,
+  type LiquidityCurveRecord,
+} from "../domain/liquidityRecords";
 import { runPrimaryActionOnEnter } from "../domain/primaryEnter";
 import { normalizeSelfRelayUrl } from "../domain/selfHostedRenewalRelay";
+import { localRemove, sessionGet, sessionRemove, sessionSet } from "../domain/safeSessionStorage";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 
 type CurveSide = "bid" | "ask";
@@ -38,49 +81,11 @@ const RENEWAL_DURATION_OPTIONS: Array<{ value: RenewalDurationPreset; label: str
   { value: "custom", label: "Custom", relayOnly: true },
 ];
 
-type LiquidityCurveRecord = {
-  id: string;
-  pair: string;
-  side: "Buy" | "Sell";
-  sideLabel: "Bid" | "Ask";
-  status: "Active" | "Pending" | "Paused" | "Expiring" | "Cancelled" | "Historical";
-  points: CurvePoint[];
-  submittedAt: number;
-  endEpoch?: number;
-  nextChildIndex?: number;
-  maxChildren?: number;
-  relatedOrders: LocalOrder[];
-  strategy?: PrivateStrategySummary;
-};
-
 function liquidityPageTitle(tab: LiquidityPageTab): string {
   if (tab === "orders") return "ORDERS";
   if (tab === "inventory") return "INVENTORY";
   if (tab === "analytics") return "ANALYTICS";
   return "LIQUIDITY";
-}
-
-function parseHuman(value?: string): number {
-  if (!value) return 0;
-  const parsed = Number(value.replace(/,/g, ""));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function formatHuman(value: number, suffix = ""): string {
-  if (!Number.isFinite(value) || value <= 0) return "—";
-  const formatted = value.toLocaleString("en-US", {
-    maximumFractionDigits: value >= 100 ? 2 : 6,
-  });
-  return suffix ? `${formatted} ${suffix}` : formatted;
-}
-
-function formatCompactHuman(value: number, suffix = ""): string {
-  if (!Number.isFinite(value) || value <= 0) return "—";
-  const formatted = new Intl.NumberFormat("en-US", {
-    notation: value >= 100_000 ? "compact" : "standard",
-    maximumFractionDigits: value >= 100_000 ? 2 : value >= 100 ? 1 : 6,
-  }).format(value);
-  return suffix ? `${formatted} ${suffix}` : formatted;
 }
 
 function renewalHoursForPreset(preset: RenewalDurationPreset, customDays: string): number {
@@ -113,434 +118,14 @@ function relayOperatorForMode(mode?: "SelfRelay" | "ZylithRelay"): RelayOperator
 }
 
 function loadSelfRelayEndpoint(): string {
-  try {
-    return sessionStorage.getItem(SELF_RELAY_ENDPOINT_KEY) ?? "";
-  } catch {
-    return "";
-  }
+  return sessionGet(SELF_RELAY_ENDPOINT_KEY, "");
 }
 
 function persistSelfRelayEndpoint(value: string): void {
-  try {
-    if (value.trim()) sessionStorage.setItem(SELF_RELAY_ENDPOINT_KEY, value.trim());
-    else sessionStorage.removeItem(SELF_RELAY_ENDPOINT_KEY);
-    localStorage.removeItem(SELF_RELAY_ENDPOINT_KEY);
-  } catch {
-    /* noop */
-  }
-}
-
-function formatPct(value: number): string {
-  if (!Number.isFinite(value)) return "—";
-  return `${value.toFixed(1)}%`;
-}
-
-function mean(values: number[]): number {
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : Number.NaN;
-}
-
-function formatBps(value: number): string {
-  if (!Number.isFinite(value)) return "—";
-  const formatted = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1);
-  return `${value > 0 ? "+" : ""}${formatted} bps`;
-}
-
-function fmtTime(ts: number): string {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
-
-function fmtAddr(value?: string): string {
-  if (!value) return "—";
-  if (value.length < 12) return value;
-  return `${value.slice(0, 8)}…${value.slice(-5)}`;
-}
-
-function activeStatuses(order: LocalOrder): boolean {
-  return ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status);
-}
-
-function terminalFill(order: LocalOrder): boolean {
-  return order.status === "filled" || order.status === "partial";
-}
-
-function settlementConfirmed(order: LocalOrder): boolean {
-  return order.status === "filled" || order.status === "partial" || order.status === "no_fill";
-}
-
-function orderDepth(order: LocalOrder): number {
-  return parseHuman(order.amount);
-}
-
-function orderFilled(order: LocalOrder): number {
-  if (!terminalFill(order)) return 0;
-  return parseHuman(order.filledAmount ?? order.amount);
-}
-
-function curveFillRate(orders: LocalOrder[]): number {
-  if (orders.length === 0) return 0;
-  return (orders.filter(terminalFill).length / orders.length) * 100;
-}
-
-function averageCurveFillRate(records: LiquidityCurveRecord[]): string {
-  const recordsWithOrders = records.filter(record => record.relatedOrders.length > 0);
-  if (recordsWithOrders.length === 0) return "—";
-  return formatPct(mean(recordsWithOrders.map(record => curveFillRate(record.relatedOrders))));
-}
-
-function depthFilled(orders: LocalOrder[]): number {
-  return orders.reduce((sum, order) => sum + orderFilled(order), 0);
-}
-
-function weightedAverageClearing(orders: LocalOrder[]): string {
-  let numerator = 0;
-  let denominator = 0;
-  for (const order of orders) {
-    const price = parseHuman(order.clearingPrice);
-    const size = orderFilled(order);
-    if (price <= 0 || size <= 0) continue;
-    numerator += price * size;
-    denominator += size;
-  }
-  if (denominator <= 0) return "—";
-  return (numerator / denominator).toLocaleString("en-US", { maximumFractionDigits: 8 });
-}
-
-function orderClearingPrice(order: LocalOrder, transcript?: PublicSettlementTranscript): number {
-  const local = parseHuman(order.clearingPrice);
-  if (local > 0) return local;
-  if (!transcript) return 0;
-  return parseHuman(formatClearingPrice({
-    batchId: transcript.batch_id,
-    epochId: transcript.batch_epoch,
-    clearingPrice: String(transcript.clearing_price),
-    priceBaseScale: transcript.price_base_scale ? String(transcript.price_base_scale) : undefined,
-  }, {
-    base_asset_id: order.pair.split("/")[0],
-    quote_asset_id: order.pair.split("/")[1],
-  }));
-}
-
-function orderQuoteNotional(order: LocalOrder, transcript?: PublicSettlementTranscript): number {
-  const filled = orderFilled(order);
-  const clearing = orderClearingPrice(order, transcript);
-  if (filled <= 0) return 0;
-  if (clearing > 0) return filled * clearing;
-  return 0;
-}
-
-function makerCaptureBps(order: LocalOrder): number | null {
-  if (!terminalFill(order)) return null;
-  const limit = parseHuman(order.limitPrice);
-  const clearing = parseHuman(order.clearingPrice);
-  if (limit <= 0 || clearing <= 0) return null;
-  return order.side === "Buy"
-    ? ((limit - clearing) / limit) * 10_000
-    : ((clearing - limit) / limit) * 10_000;
-}
-
-function weightedMakerCaptureBps(orders: LocalOrder[]): number {
-  let numerator = 0;
-  let denominator = 0;
-  for (const order of orders) {
-    const capture = makerCaptureBps(order);
-    const size = orderFilled(order);
-    if (capture === null || size <= 0) continue;
-    numerator += capture * size;
-    denominator += size;
-  }
-  return denominator > 0 ? numerator / denominator : Number.NaN;
-}
-
-function committedDepth(points: CurvePoint[], fallbackOrders: LocalOrder[]): number {
-  const pointDepth = points.reduce((sum, point) => sum + parseHuman(point.baseAmount), 0);
-  if (pointDepth > 0) return pointDepth;
-  return fallbackOrders.reduce((sum, order) => sum + orderDepth(order), 0);
-}
-
-function curveBaseAsset(record: LiquidityCurveRecord): string {
-  return record.pair.split("/")[0] ?? "";
-}
-
-function curveQuoteAsset(record: LiquidityCurveRecord): string {
-  return record.pair.split("/")[1] ?? "";
-}
-
-function curveFundingAsset(record: LiquidityCurveRecord): string {
-  return record.side === "Buy" ? curveQuoteAsset(record) : curveBaseAsset(record);
-}
-
-function balanceAmount(
-  balances: WalletBalance[],
-  asset: string,
-  field: "available" | "locked",
-): bigint {
-  const balance = balances.find(entry => entry.asset === asset);
-  if (!balance) return 0n;
-  try {
-    return BigInt(balance[field]);
-  } catch {
-    return 0n;
-  }
-}
-
-function assetListText(assets: string[]) {
-  if (assets.length <= 1) return assets[0] ?? "";
-  return `${assets.slice(0, -1).join(", ")} and ${assets.at(-1)}`;
-}
-
-function curveLockedCapital(record: LiquidityCurveRecord): number {
-  if (record.points.length === 0) {
-    return record.relatedOrders.reduce((sum, order) => sum + parseHuman(order.fundingAmount ?? order.amount), 0);
-  }
-  if (record.side === "Sell") return committedDepth(record.points, record.relatedOrders);
-  return record.points.reduce((sum, point) => sum + parseHuman(point.price) * parseHuman(point.baseAmount), 0);
-}
-
-function attributedBandFill(record: LiquidityCurveRecord, bandIndex: number): number | null {
-  let sawAttribution = false;
-  let filled = 0;
-  const baseAsset = curveBaseAsset(record);
-  for (const order of record.relatedOrders) {
-    const attribution = order.makerBandAttribution;
-    if (!attribution?.bands?.length) continue;
-    sawAttribution = true;
-    for (const band of attribution.bands) {
-      if (band.band_index === bandIndex) {
-        filled += parseHuman(fromAtomicStr(band.filled_base_amount, baseAsset));
-      }
-    }
-  }
-  return sawAttribution ? filled : null;
-}
-
-function displayedBandFill(record: LiquidityCurveRecord, bandIndex: number, fallbackRemaining: number): number {
-  const exact = attributedBandFill(record, bandIndex);
-  if (exact !== null) return exact;
-  const depth = parseHuman(record.points[bandIndex]?.baseAmount);
-  return Math.min(depth, fallbackRemaining);
-}
-
-function orderFundingExposure(order: LocalOrder, asset: string): number {
-  if (order.fundingAsset === asset && order.fundingAmount) return parseHuman(order.fundingAmount);
-  const [base, quote] = order.pair.split("/");
-  if (order.side === "Sell" && base === asset) return parseHuman(order.amount);
-  if (order.side === "Buy" && quote === asset) return parseHuman(order.amount) * parseHuman(order.limitPrice);
-  return 0;
-}
-
-function strategyPoints(strategy: PrivateStrategySummary, pair: PairConfig | undefined): CurvePoint[] {
-  if (!pair) return [];
-  return (strategy.maker_curve_points ?? []).map(point => ({
-    price: fromAtomicStr(point.price, pair.quote_asset_id),
-    baseAmount: fromAtomicStr(point.base_amount, pair.base_asset_id),
-  }));
-}
-
-function buildCurveRecords(
-  orders: LocalOrder[],
-  strategies: PrivateStrategySummary[],
-  pairs: PairConfig[],
-): LiquidityCurveRecord[] {
-  const records: LiquidityCurveRecord[] = [];
-  const consumedOrderRefs = new Set<string>();
-
-  for (const strategy of strategies.filter(strategy => strategy.mode === "Resting")) {
-    const pair = pairs.find(candidate => candidate.pair_id === strategy.pair);
-    const relatedOrders = orders.filter(order => order.strategyId === strategy.id && order.orderCommitment);
-    for (const order of relatedOrders) consumedOrderRefs.add(order.ordRef);
-    const active = strategy.status === "active" || strategy.status === "delegated" || strategy.status === "pending_relay";
-    const expiring = active && strategy.max_children - strategy.next_child_index + 1 <= 8;
-    records.push({
-      id: strategy.id,
-      pair: strategy.pair,
-      side: strategy.side ?? "Buy",
-      sideLabel: (strategy.side ?? "Buy") === "Buy" ? "Bid" : "Ask",
-      status: strategy.status === "cancelled"
-        ? "Cancelled"
-        : strategy.status === "paused"
-          ? "Paused"
-          : strategy.status === "pending_relay"
-            ? "Pending"
-            : expiring
-              ? "Expiring"
-              : active
-                ? "Active"
-                : "Historical",
-      points: strategyPoints(strategy, pair),
-      submittedAt: relatedOrders[0]?.submittedAt ?? Date.now(),
-      endEpoch: strategy.end_epoch,
-      nextChildIndex: strategy.next_child_index,
-      maxChildren: strategy.max_children,
-      relatedOrders,
-      strategy,
-    });
-  }
-
-  for (const order of orders) {
-    if (consumedOrderRefs.has(order.ordRef)) continue;
-    if (order.wireMode !== "Maker Curve" && order.wireMode !== "Resting") continue;
-    records.push({
-      id: order.ordRef,
-      pair: order.pair,
-      side: order.side,
-      sideLabel: order.side === "Buy" ? "Bid" : "Ask",
-      status: activeStatuses(order)
-        ? "Active"
-        : order.status === "cancelled"
-          ? "Cancelled"
-          : "Historical",
-      points: order.makerCurvePoints ?? [{
-        price: order.limitPrice || order.clearingPrice || "",
-        baseAmount: order.amount,
-      }],
-      submittedAt: order.submittedAt,
-      relatedOrders: [order],
-    });
-  }
-
-  return records.sort((a, b) => {
-    const statusRank = (record: LiquidityCurveRecord) => record.status === "Active" ? 0 : record.status === "Expiring" ? 1 : 2;
-    return statusRank(a) - statusRank(b) || b.submittedAt - a.submittedAt;
-  });
-}
-
-function activeCurveRecords(records: LiquidityCurveRecord[]): LiquidityCurveRecord[] {
-  return records.filter(record =>
-    record.status === "Active" ||
-    record.status === "Pending" ||
-    record.status === "Expiring" ||
-    record.status === "Paused",
-  );
-}
-
-function curveStatusPillTone(status: LiquidityCurveRecord["status"]): string {
-  if (status === "Active") return "good";
-  if (status === "Pending") return "info";
-  if (status === "Expiring") return "warn";
-  if (status === "Cancelled") return "danger";
-  return "muted";
-}
-
-function relayChildStatusDisplay(
-  child: { order_commitment?: string; relay_status?: string; relay_detail?: string },
-  fallback?: string,
-): { label: string; tone: string } {
-  switch (child.relay_status) {
-    case "submitted":
-    case "already_submitted":
-    case "not_due":
-      return { label: "Queued", tone: "info" };
-    case "awaiting_settlement":
-      return { label: "Awaiting settlement", tone: "info" };
-    case "awaiting_wallet_refresh":
-      return { label: "Refresh needed", tone: "warn" };
-    case "batch_not_open":
-      return { label: "Batch closed", tone: "warn" };
-    case "safety_buffer":
-      return { label: "Safety buffer", tone: "warn" };
-    case "missed":
-      return { label: "Missed", tone: "warn" };
-    case "failed":
-      return { label: "Relay failed", tone: "danger" };
-    default:
-      return { label: fallback ?? "Queued", tone: "info" };
-  }
-}
-
-type CurveEpochOutcome = {
-  key: string;
-  epoch: number;
-  submittedAt: number;
-  label: string;
-  tone: string;
-  detail: string;
-  clearingPrice?: string;
-  filledAmount?: string;
-};
-
-function curveEpochOutcomes(
-  record: LiquidityCurveRecord,
-  batchStatus: Map<string, BatchSummary["status"]>,
-): CurveEpochOutcome[] {
-  const children = record.strategy?.submitted_children ?? [];
-  if (children.length > 0) {
-    return children.map(child => {
-      const related = record.relatedOrders.find(order =>
-        order.batchId === child.batch_id || order.orderCommitment === child.order_commitment,
-      );
-      const relayStatus = relayChildStatusDisplay(child, batchStatus.get(child.batch_id));
-      const label = related ? statusLabel(related.status) : relayStatus.label;
-      return {
-        key: `${record.id}:child:${child.parent_child_index}`,
-        epoch: child.epoch_id,
-        submittedAt: child.submitted_at_unix_ms,
-        label,
-        tone: makerOutcomeTone(label, related ? statusTone(related.status) : relayStatus.tone),
-        detail: related?.batchId ? `Batch ${fmtAddr(related.batchId)}` : child.relay_detail || relayStatus.label,
-        clearingPrice: related?.clearingPrice,
-        filledAmount: related?.filledAmount,
-      };
-    });
-  }
-  return record.relatedOrders.map((order, index) => ({
-    key: `${record.id}:order:${order.ordRef || index}`,
-    epoch: order.epochId,
-    submittedAt: order.submittedAt,
-    label: statusLabel(order.status),
-    tone: makerOutcomeTone(statusLabel(order.status), statusTone(order.status)),
-    detail: `Batch ${fmtAddr(order.batchId)}`,
-    clearingPrice: order.clearingPrice,
-    filledAmount: order.filledAmount,
-  }));
-}
-
-function makerOutcomeTone(label: string, fallbackTone: string): string {
-  if (label === "Filled") return "good";
-  if (label === "Partial") return "info";
-  if (["In batch", "Proving", "Settling", "Queued"].includes(label)) return "warn";
-  if (label === "No fill") return "muted";
-  return fallbackTone;
-}
-
-function epochOutcomeWindow(outcomes: CurveEpochOutcome[], limit = 48): CurveEpochOutcome[] {
-  const sorted = [...outcomes].sort((a, b) => a.epoch - b.epoch);
-  if (sorted.length <= limit) return sorted;
-  return sorted.slice(sorted.length - limit);
-}
-
-function latestEpochOutcomes(outcomes: CurveEpochOutcome[], limit = 12): CurveEpochOutcome[] {
-  return [...outcomes]
-    .sort((a, b) => b.epoch - a.epoch)
-    .slice(0, limit)
-    .reverse();
-}
-
-function curveDisplayRef(record: LiquidityCurveRecord): string {
-  const source = record.strategy?.parent_order_commitment || record.id;
-  if (!source) return "CRV";
-  const compact = source
-    .replace(/^strategy[-:]?/i, "")
-    .replace(/^0x/i, "")
-    .replace(/^0+/, "")
-    .replace(/^demo[_-]?/i, "");
-  const readable = compact.split(/[_:-]+/).filter(Boolean).slice(-2).join("-");
-  if (/\b(parent|curve)\b/i.test(readable)) {
-    return `CRV-${curveBaseAsset(record).replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 8) || "MAKER"}`;
-  }
-  return `CRV-${(readable || compact).slice(0, 10).toUpperCase() || fmtAddr(source)}`;
-}
-
-function averageCurvePrice(record: LiquidityCurveRecord): string {
-  const settled = weightedAverageClearing(record.relatedOrders);
-  if (settled !== "—") return settled;
-  const prices = record.points.map(point => parseHuman(point.price)).filter(value => value > 0);
-  if (prices.length === 0) return "—";
-  return mean(prices).toLocaleString("en-US", { maximumFractionDigits: 8 });
+  const trimmed = value.trim();
+  if (trimmed) sessionSet(SELF_RELAY_ENDPOINT_KEY, trimmed);
+  else sessionRemove(SELF_RELAY_ENDPOINT_KEY);
+  localRemove(SELF_RELAY_ENDPOINT_KEY);
 }
 
 function CurveOutcomeCells({
@@ -575,46 +160,6 @@ function CurveOutcomeCells({
       {hidden > 0 && <span className="cor-strip-more">+{hidden}</span>}
     </span>
   );
-}
-
-function renewalPackageStatus(record: LiquidityCurveRecord): {
-  label: string;
-  tone: "info" | "warn" | "good";
-} {
-  const strategy = record.strategy;
-  const renewalPackage = strategy?.offline_package;
-  if (!strategy || !renewalPackage) {
-    return {
-      label: "Missing",
-      tone: "warn",
-    };
-  }
-  const packageChildren = strategy.submitted_children.filter(child =>
-    child.epoch_id >= renewalPackage.start_epoch && child.epoch_id <= renewalPackage.end_epoch,
-  );
-  const hasSubmittedChild = packageChildren.some(child => child.submitted_at_unix_ms > 0);
-  const hasSettledChild = packageChildren.some(child =>
-    record.relatedOrders.some(order =>
-      (order.orderCommitment === child.order_commitment || order.batchId === child.batch_id) &&
-      settlementConfirmed(order),
-    ),
-  );
-  if (hasSettledChild) {
-    return {
-      label: "Confirmed",
-      tone: "good",
-    };
-  }
-  if (hasSubmittedChild) {
-    return {
-      label: "Pending",
-      tone: "info",
-    };
-  }
-  return {
-    label: "Unconfirmed",
-    tone: "warn",
-  };
 }
 
 function CurveChildTimeline({
@@ -1693,60 +1238,6 @@ export function LiquidityInventoryScreen({
       </div>
     </div>
   );
-}
-
-type LiquidityAnalyticsEpoch = {
-  epoch: number;
-  barValue: number;
-  fillRate: number;
-  filled: number;
-  total: number;
-};
-
-type LiquidityAnalyticsChartMode = "notional" | "fills";
-
-function buildLiquidityEpochSeries(
-  rows: Array<{ order: LocalOrder; transcript?: PublicSettlementTranscript }>,
-  chartMode: LiquidityAnalyticsChartMode,
-): LiquidityAnalyticsEpoch[] {
-  const grouped = new Map<number, { barValue: number; filled: number; total: number }>();
-  for (const { order, transcript } of rows) {
-    const epoch = order.epochId || 0;
-    const current = grouped.get(epoch) ?? { barValue: 0, filled: 0, total: 0 };
-    const filled = terminalFill(order) ? 1 : 0;
-    current.barValue += chartMode === "notional" ? orderQuoteNotional(order, transcript) : filled;
-    current.filled += filled;
-    current.total += 1;
-    grouped.set(epoch, current);
-  }
-  return [...grouped.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([epoch, value]) => ({
-      epoch,
-      barValue: value.barValue,
-      filled: value.filled,
-      total: value.total,
-      fillRate: value.total > 0 ? (value.filled / value.total) * 100 : 0,
-    }));
-}
-
-function visibleLiquidityEpochSeries(series: LiquidityAnalyticsEpoch[], windowSize = 30): LiquidityAnalyticsEpoch[] {
-  if (series.length === 0) return [];
-  const byEpoch = new Map(series.map(point => [point.epoch, point]));
-  const end = series.at(-1)?.epoch ?? series[series.length - 1].epoch;
-  const first = series[0]?.epoch ?? end;
-  const start = Math.max(first, end - windowSize + 1);
-  const visible: LiquidityAnalyticsEpoch[] = [];
-  for (let epoch = start; epoch <= end; epoch += 1) {
-    visible.push(byEpoch.get(epoch) ?? {
-      epoch,
-      barValue: 0,
-      fillRate: 0,
-      filled: 0,
-      total: 0,
-    });
-  }
-  return visible;
 }
 
 function LiquidityEpochTrend({

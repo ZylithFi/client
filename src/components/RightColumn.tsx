@@ -14,6 +14,7 @@ import {
   sumByAsset,
 } from "../domain/noteLifecycle";
 import { batchState, msToCountdown } from "../domain/uiFormat";
+import { useNow } from "../hooks/useNow";
 
 function ClaimSection({
   notes,
@@ -26,12 +27,8 @@ function ClaimSection({
   claimDelaySeconds: number;
   onClaim: (note: WithdrawableNote) => void;
 }) {
-  const [now, setNow] = useState(Date.now());
+  const now = useNow(1000);
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   const eligibleNotes = activeSettlementOutputs(notes);
   const pendingNotes = pendingWithdrawalOutputs(notes);
@@ -150,11 +147,7 @@ export function RightColumn({
   onCancelOrder: (order: LocalOrder) => void;
   onClaimNote: (note: WithdrawableNote) => void;
 }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(t);
-  }, []);
+  const now = useNow(1000);
 
   const batchInfo = activeBatch ? batchState(activeBatch, now) : null;
   const msLeft = activeBatch ? activeBatch.close_time_unix_ms - now : 0;

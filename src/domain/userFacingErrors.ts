@@ -1,3 +1,5 @@
+import { privateDepositFundingFailureMessage } from "./privateDepositErrors";
+
 function rawErrorMessage(error: unknown): string {
   const structured = structuredErrorMessage(error);
   if (structured) return structured;
@@ -64,17 +66,13 @@ function privateDepositErrorMessage(message: string): string | null {
   if (/wallet must be deployed before depositing/i.test(message)) {
     return "Connected wallet could not execute the funding transfer. Activate it in your Starknet wallet and retry.";
   }
-  if (/PaymasterV2Error|Paymaster error\s*\d+|TRANSACTION_EXECUTION_ERROR/i.test(message)) {
-    return "The connected wallet could not execute the funding transfer. Keep enough STRK in the wallet for network fees and retry.";
-  }
+  const fundingFailure = privateDepositFundingFailureMessage(message);
+  if (fundingFailure) return fundingFailure;
   if (/does not match paymaster configuration|not allowlisted|not supported by paymaster/i.test(message)) {
     return "The app deployment configuration does not match the deposit relay. This deployment needs a configuration fix before deposits can work.";
   }
   if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow|Connected wallet balance is below/i.test(message)) {
     return "Connected wallet does not have enough balance for this deposit.";
-  }
-  if (/max fee|fee.*exceed|insufficient.*fee|not enough.*fee|actual fee/i.test(message)) {
-    return "Connected wallet does not have enough STRK for network fees.";
   }
   if (/Transfer allowance exceeded|approval|allowance/i.test(message)) {
     return "Deposit approval failed. Please retry later.";

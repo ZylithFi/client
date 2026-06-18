@@ -355,6 +355,55 @@ describe("ZylithMakerSdk", () => {
       { price: "1010000000", baseAmount: "340000000000000000" },
     ]);
   });
+
+  it("rejects underfilled raw maker curve intents before wallet submission", async () => {
+    const rawRuntime = {
+      submitPrivateOrder: vi.fn(async () => ({ strategy_id: "strategy-1" })),
+    };
+    const adapter = createMakerWalletRuntimeAdapter({
+      runtime: rawRuntime,
+      pairForIntent: () => ({
+        pair_id: "ETH/USDC",
+        base_asset_id: "ETH",
+        quote_asset_id: "USDC",
+        min_order_amount: "0.01",
+        enabled: true,
+      }),
+      currentBatch: async () => ({
+        batch_id: "batch-1",
+        pair_id: "ETH/USDC",
+        epoch_id: 1,
+        close_time_unix_ms: 60_000,
+        status: "Open",
+        order_count_bucket: "0-7",
+      }),
+      batchWindowMs: 90_000,
+    });
+
+    await expect(adapter.submitPrivateOrder({
+      pairId: "ETH/USDC",
+      side: "Buy",
+      shape: "curve",
+      stratKind: "Repeat",
+      resting: true,
+      amount: "1",
+      limitPrice: "",
+      minFill: "0",
+      fillOrKill: false,
+      curvePoints: [
+        { price: "990", baseAmount: "0.5" },
+        { price: "1010", baseAmount: "0.5" },
+      ],
+      inventoryCap: "1",
+      durationHours: "1",
+      childSize: "1",
+      priceLimit: "",
+      jitter: 0,
+      relayMode: "ZylithRelay",
+      relayOperator: "ZylithRelay",
+    })).rejects.toThrow(/at least 3 filled bands/i);
+    expect(rawRuntime.submitPrivateOrder).not.toHaveBeenCalled();
+  });
 });
 
 function intent() {

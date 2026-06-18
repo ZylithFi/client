@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { fromAtomicStr } from "../domain/assets";
 import type { PairConfig } from "../components/OrderTicket";
 import type { PublicSettlementTranscript } from "../domain/auctionEpoch";
@@ -18,6 +18,7 @@ import {
 } from "../domain/noteLifecycle";
 import { msToCountdown } from "../domain/uiFormat";
 import { noteConsolidationPlans, type NoteConsolidationPlan } from "../domain/noteConsolidation";
+import { useNow } from "../hooks/useNow";
 
 function fmtAddr(value?: string): string {
   if (!value) return "—";
@@ -131,13 +132,9 @@ export function AssetsScreen({
   onConsolidateNotes: (plan: NoteConsolidationPlan) => Promise<void>;
   onConnectWallet: () => void;
 }) {
-  const [now, setNow] = useState(Date.now());
+  const now = useNow(1000);
   const [consolidatingAsset, setConsolidatingAsset] = useState<string | null>(null);
   const [consolidationError, setConsolidationError] = useState<string | null>(null);
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   const pendingOrders = orders.filter(order =>
     ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status),

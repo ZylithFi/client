@@ -6,11 +6,14 @@ import {
   fmtAddr,
   walletRuntime,
 } from "../domain/browserWallet";
+import {
+  LIQUIDITY_TABS,
+  TAKER_TABS,
+  type AppTab,
+  type LiquidityTab,
+  type Workspace,
+} from "../domain/appRoutes";
 import type { WithdrawalRoutePreference } from "../domain/userPreferences";
-
-export type AppTab = "trade" | "orders" | "assets" | "reports";
-export type Workspace = "taker" | "liquidity";
-export type LiquidityTab = "curves" | "orders" | "inventory" | "analytics";
 
 export function TopNav({
   workspace,
@@ -106,7 +109,7 @@ export function TopNav({
 
       <div className="nav-tabs">
         {workspace === "liquidity"
-          ? (["curves", "orders", "inventory", "analytics"] as LiquidityTab[]).map(nextTab => (
+          ? LIQUIDITY_TABS.map(nextTab => (
               <button
                 key={nextTab}
                 className={`nav-tab ${liquidityTab === nextTab ? "on" : ""}`}
@@ -121,7 +124,7 @@ export function TopNav({
                         : "Analytics"}
               </button>
             ))
-          : (["trade", "orders", "assets", "reports"] as AppTab[]).map(nextTab => (
+          : TAKER_TABS.map(nextTab => (
               <button
                 key={nextTab}
                 className={`nav-tab ${tab === nextTab ? "on" : ""}`}

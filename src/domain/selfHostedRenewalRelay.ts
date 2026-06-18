@@ -2,6 +2,11 @@ import type {
   OfflineRenewalPackage,
   OfflineRenewalRelayResult,
 } from "../offlineRenewalOperator";
+import {
+  localRemove,
+  sessionGet,
+  sessionSet,
+} from "./safeSessionStorage";
 
 type RelayPackageStatus = {
   package_id: string;
@@ -44,21 +49,13 @@ export function storeSelfHostedRelayUrl(
 ): void {
   const normalized = normalizeSelfRelayUrl(endpointUrl);
   if (!packageId || !normalized) return;
-  try {
-    sessionStorage.setItem(selfRelayUrlKey(packageId), normalized);
-    localStorage.removeItem(selfRelayUrlKey(packageId));
-  } catch {
-    /* noop */
-  }
+  sessionSet(selfRelayUrlKey(packageId), normalized);
+  localRemove(selfRelayUrlKey(packageId));
 }
 
 export function readSelfHostedRelayUrl(packageId: string): string {
   if (!packageId) return "";
-  try {
-    return sessionStorage.getItem(selfRelayUrlKey(packageId)) ?? "";
-  } catch {
-    return "";
-  }
+  return sessionGet(selfRelayUrlKey(packageId), "");
 }
 
 export async function submitSelfHostedRenewalPackage(

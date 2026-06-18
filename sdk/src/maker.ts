@@ -625,12 +625,17 @@ function compileRawCurveIntent(intent: TicketSubmitIntent, pair: PairConfig) {
         ? sortedCurvePoints[sortedCurvePoints.length - 1].price
         : sortedCurvePoints[0].price
       : "0";
+  if (sortedCurvePoints.length < 3) {
+    throw new MakerCurveSubmissionError("Maker curves require at least 3 filled bands.", {
+      partial: false,
+    });
+  }
   const priceBaseScale = pair.price_base_scale ?? assetScale(pair.base_asset_id).toString();
   const atomicMakerInventoryCap = intent.inventoryCap.trim()
     ? toAtomicStr(intent.inventoryCap, pair.base_asset_id)
     : undefined;
   return {
-    atomicCurvePoints,
+    atomicCurvePoints: sortedCurvePoints,
     curveBaseTotal,
     curveEnvelopePrice,
     priceBaseScale,

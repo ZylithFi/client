@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { localServiceUrl } from "./serviceUrls";
 
 export const COORDINATOR_URL: string =
   (import.meta.env.VITE_ZYLITH_COORDINATOR_URL as string | undefined) ?? localServiceUrl(3000);
@@ -11,15 +12,6 @@ export const PROVER_URL: string =
 const BACKGROUND_FETCH_TIMEOUT_MS = 8_000;
 const BULK_BATCH_ID_PAGE_SIZE = 16;
 const BACKGROUND_BATCH_ID_POLL_LIMIT = 32;
-
-function localServiceUrl(port: number) {
-  if (typeof window === "undefined") return "";
-  const host = window.location.hostname;
-  if (host === "localhost" || host === "127.0.0.1") {
-    return `http://${host}:${port}`;
-  }
-  return "";
-}
 
 export type BatchSummary = {
   batch_id: string;
