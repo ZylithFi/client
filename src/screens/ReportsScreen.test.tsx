@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ReportsScreen } from "./ReportsScreen";
-import type { LocalOrder } from "../domain/orderLifecycle";
+import { csvCell, ReportsScreen } from "./ReportsScreen";
+import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 
 function order(overrides: Partial<LocalOrder>): LocalOrder {
   return {
@@ -23,6 +23,26 @@ function order(overrides: Partial<LocalOrder>): LocalOrder {
     arrivalReferencePrice: overrides.arrivalReferencePrice,
     arrivalReferenceSource: overrides.arrivalReferenceSource,
     filledAmount: "10",
+    strategyId: overrides.strategyId,
+  };
+}
+
+function strategy(overrides: Partial<PrivateStrategySummary> = {}): PrivateStrategySummary {
+  return {
+    id: "strategy-1",
+    mode: "TWAP",
+    pair: "STRK/USDC",
+    status: "active",
+    total_amount: "10",
+    remaining_amount: "0",
+    child_amount: "10",
+    limit_price: "100000000",
+    max_children: 1,
+    next_child_index: 2,
+    start_epoch: 1,
+    end_epoch: 1,
+    submitted_children: [],
+    ...overrides,
   };
 }
 
@@ -94,5 +114,31 @@ describe("ReportsScreen", () => {
     );
 
     expect(screen.getByText("Output reports pending. TCA appears after the private settlement report is available.")).toBeInTheDocument();
+  });
+
+  it("neutralizes spreadsheet formulas in CSV cells", () => {
+    expect(csvCell("=HYPERLINK(\"https://example.test\")")).toBe(
+      `"'=HYPERLINK(""https://example.test"")"`,
+    );
+    expect(csvCell(" +SUM(1,2)")).toBe(`"' +SUM(1,2)"`);
+    expect(csvCell(12)).toBe("12");
+  });
+
+  it("renders malformed strategy limit prices without crashing", () => {
+    render(
+      <ReportsScreen
+        walletReady
+        strategies={[strategy({ limit_price: "bad-price" })]}
+        orders={[order({
+          ordRef: "strategy-fill",
+          strategyId: "strategy-1",
+          wireMode: "TWAP",
+          limitPrice: "",
+        })]}
+      />,
+    );
+
+    expect(screen.getByText("Strategy analytics")).toBeInTheDocument();
+    expect(screen.getByText(/90.*-/)).toBeInTheDocument();
   });
 });

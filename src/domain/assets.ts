@@ -55,6 +55,19 @@ export function fromAtomicStr(atomic: string, assetId: string): string {
   return `${int}.${frac.toString().padStart(dec, "0").replace(/0+$/, "")}`;
 }
 
+export function safeFromAtomicStr(
+  atomic: string | bigint | number | undefined,
+  assetId: string,
+  fallback = "-",
+): string {
+  if (atomic === undefined) return fallback;
+  try {
+    return fromAtomicStr(String(atomic), assetId);
+  } catch {
+    return fallback;
+  }
+}
+
 export function assetScale(assetId: string): bigint {
   return 10n ** BigInt(assetDecimals(assetId));
 }
@@ -76,7 +89,7 @@ export function formatHeadroomBps(
   clearingPrice: string,
 ): string {
   const bps = headroomBpsValue(side, limitPrice, clearingPrice);
-  if (bps === null) return "—";
+  if (bps === null) return "-";
   const formatted = Math.abs(bps) >= 100
     ? bps.toFixed(0)
     : bps.toFixed(1);

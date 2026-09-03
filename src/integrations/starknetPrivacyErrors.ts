@@ -6,28 +6,55 @@ export function summarizeFundingError(error: unknown): string {
   if (/^Failed while /i.test(message)) {
     return message.slice(0, 360);
   }
-  if (/does not match paymaster configuration|not allowlisted|not supported by paymaster/i.test(message)) {
-    return `Deposit relay rejected the request: ${message.slice(0, 200)}. The app deployment configuration does not match the relay.`;
+  if (
+    /does not match paymaster configuration|not allowlisted|not supported by paymaster/i.test(
+      message
+    )
+  ) {
+    return `Deposit relay rejected the request: ${message.slice(
+      0,
+      200
+    )}. The app deployment configuration does not match the relay.`;
   }
   const fundingFailure = privateDepositFundingFailureMessage(message);
   if (fundingFailure) return fundingFailure;
+  if (
+    /Starknet RPC rejected proof-bearing invoke|Resources bounds/i.test(message) &&
+    /exceed(?:s|ed)? balance|insufficient.*balance|balance.*insufficient/i.test(
+      message
+    )
+  ) {
+    return "Deposit relay does not have enough STRK to submit the proof-bearing transaction.";
+  }
   if (/Transfer allowance exceeded/i.test(message)) {
     return "Token approval was lower than the required privacy-pool deposit amount.";
   }
-  if (/insufficient.*balance|balance.*insufficient|exceeds.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow/i.test(message)) {
+  if (
+    /insufficient.*balance|balance.*insufficient|exceed(?:s|ed)?.*balance|amount exceeds balance|not enough.*balance|u256_sub overflow/i.test(
+      message
+    )
+  ) {
     return "Connected wallet does not have enough token balance for this deposit.";
   }
   if (/privacy replay protection/i.test(message)) {
     return message.slice(0, 280);
   }
-  if (/entry point.*not found|entrypoint.*not found|invalid.*entrypoint/i.test(message)) {
+  if (
+    /entry point.*not found|entrypoint.*not found|invalid.*entrypoint/i.test(
+      message
+    )
+  ) {
     return "Configured token contract does not expose the expected ERC-20 entrypoint.";
   }
-  if (/contract.*not.*found|not deployed|ContractAddress.*not found/i.test(message)) {
+  if (
+    /contract.*not.*found|not deployed|ContractAddress.*not found/i.test(
+      message
+    )
+  ) {
     return "Configured Starknet contract was not found on the selected network.";
   }
   if (/INVALID_SIG|INVALID_SIGNATURE/i.test(message)) {
-    return "The embedded Zylith wallet did not produce a valid privacy authorization signature.";
+    return "Private trading did not produce a valid privacy authorization signature.";
   }
   if (/NO_REPLAY_PROTECTION/i.test(message)) {
     return "Private deposits require a one-unit surplus note for replay protection.";
@@ -35,7 +62,16 @@ export function summarizeFundingError(error: unknown): string {
   if (/Discovery service is not healthy/i.test(message)) {
     return "Private deposit service is unavailable.";
   }
-  if (/Private deposit privacy warning|Starknet Privacy SDK privacy warning/i.test(message)) {
+  if (
+    /SCREENING_REQUIRED|screening attestation|required screening/i.test(message)
+  ) {
+    return "Private deposit screening attestation is not configured.";
+  }
+  if (
+    /Private deposit privacy warning|Starknet Privacy SDK privacy warning/i.test(
+      message
+    )
+  ) {
     return message.slice(0, 280);
   }
   if (/Proving service error/i.test(message)) {
@@ -44,13 +80,43 @@ export function summarizeFundingError(error: unknown): string {
   if (/Indexer API/i.test(message)) {
     return message.slice(0, 280);
   }
-  if (/proof block number .* too recent|maximum allowed block number/i.test(message)) {
+  if (
+    /proof block number .* too recent|maximum allowed block number/i.test(
+      message
+    )
+  ) {
     return "The privacy proof block is not old enough for the Starknet verifier yet.";
+  }
+  if (/PROOF_EXPIRED|proof expired|proof.*expired/i.test(message)) {
+    return "The privacy proof expired before Starknet accepted it. Retrying with a fresher proof.";
+  }
+  if (
+    /proof version .* is not allowed under this protocol version/i.test(message)
+  ) {
+    return "The privacy prover is incompatible with the current Starknet protocol.";
+  }
+  if (
+    /service busy|service is busy|proving service is at capacity|prover.*capacity|-32005/i.test(
+      message
+    )
+  ) {
+    return "Private proving service is busy. Please retry shortly.";
   }
   if (/proof facts|proofFacts/i.test(message)) {
     return "The proving service did not return valid proof facts.";
   }
-  if (/failed to fetch|networkerror|network request failed|load failed/i.test(message)) {
+  if (
+    /signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted|request aborted/i.test(
+      message
+    )
+  ) {
+    return "A required service timed out. Please retry later.";
+  }
+  if (
+    /failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
+      message
+    )
+  ) {
     return "A required network request failed.";
   }
   if (/HTTP\s+4\d\d/i.test(message)) {
@@ -65,7 +131,10 @@ export function summarizeFundingError(error: unknown): string {
       ? `Starknet network rejected the wallet transaction: ${reason}`
       : "Starknet network rejected the wallet transaction during fee estimation.";
   }
-  if (/paymaster/i.test(message) && /reject|invalid|mismatch|not allowed/i.test(message)) {
+  if (
+    /paymaster/i.test(message) &&
+    /reject|invalid|mismatch|not allowed/i.test(message)
+  ) {
     return "The deposit relay rejected the authorization.";
   }
   if (message.length <= 180 && !/^[\[{]/.test(message)) return message;
@@ -87,27 +156,31 @@ export function unwrapJsonErrorBody(message: string): string {
 
 export function isWalletCallShapeError(error: unknown): boolean {
   const message = errorMessage(error);
-  return /invalid_union|invalid input|contractAddress|contract_address|entrypoint|entry_point|array|calls/i
-    .test(message);
+  return /invalid_union|invalid input|contractAddress|contract_address|entrypoint|entry_point|array|calls/i.test(
+    message
+  );
 }
 
 export function isUserRejected(error: unknown): boolean {
   const message = errorMessage(error);
-  return /user rejected|user denied|user abort|rejected by user|cancelled by user|canceled by user/i
-    .test(message);
+  return /user rejected|user denied|user abort|rejected by user|cancelled by user|canceled by user/i.test(
+    message
+  );
 }
 
 export function isWalletRequestUnavailableError(error: unknown): boolean {
   const message = errorMessage(error);
-  return /method not found|not supported|unsupported|not implemented|unknown method|wallet_addInvokeTransaction/i
-    .test(message);
+  return /method not found|not supported|unsupported|not implemented|unknown method|wallet_addInvokeTransaction/i.test(
+    message
+  );
 }
 
 export function isProofBlockTooRecent(error: unknown): boolean {
   const message = errorMessage(error);
   if (
-    /proof block number .* too recent|maximum allowed block number|proof block is not old enough/i
-      .test(message)
+    /proof block number .* too recent|maximum allowed block number|proof block is not old enough/i.test(
+      message
+    )
   ) {
     return true;
   }
@@ -120,19 +193,80 @@ export function isProofBlockTooRecent(error: unknown): boolean {
   return false;
 }
 
+export function isProofExpired(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (/PROOF_EXPIRED|proof expired|proof.*expired/i.test(message)) {
+    return true;
+  }
+  if (error instanceof Error && "cause" in error) {
+    return isProofExpired((error as Error & { cause?: unknown }).cause);
+  }
+  if (error && typeof error === "object" && "cause" in error) {
+    return isProofExpired((error as { cause?: unknown }).cause);
+  }
+  return false;
+}
+
 export function isProofProviderContractVisibilityLag(error: unknown): boolean {
   const message = errorMessage(error);
   if (
-    /requested contract address .* is not deployed|contract.*not.*found|not deployed|class hash: 0x0{8,}/i
-      .test(message)
+    /requested contract address .* is not deployed|contract.*not.*found|not deployed|class hash: 0x0{8,}/i.test(
+      message
+    )
   ) {
     return true;
   }
   if (error instanceof Error && "cause" in error) {
-    return isProofProviderContractVisibilityLag((error as Error & { cause?: unknown }).cause);
+    return isProofProviderContractVisibilityLag(
+      (error as Error & { cause?: unknown }).cause
+    );
   }
   if (error && typeof error === "object" && "cause" in error) {
-    return isProofProviderContractVisibilityLag((error as { cause?: unknown }).cause);
+    return isProofProviderContractVisibilityLag(
+      (error as { cause?: unknown }).cause
+    );
+  }
+  return false;
+}
+
+export function isProofProviderServiceBusy(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (
+    /service busy|service is busy|proving service is at capacity|prover.*capacity|-32005/i.test(
+      message
+    )
+  ) {
+    return true;
+  }
+  if (error instanceof Error && "cause" in error) {
+    return isProofProviderServiceBusy(
+      (error as Error & { cause?: unknown }).cause
+    );
+  }
+  if (error && typeof error === "object" && "cause" in error) {
+    return isProofProviderServiceBusy((error as { cause?: unknown }).cause);
+  }
+  return false;
+}
+
+export function isProofProviderTransientNetworkError(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (
+    /signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted|request aborted|failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
+      message
+    )
+  ) {
+    return true;
+  }
+  if (error instanceof Error && "cause" in error) {
+    return isProofProviderTransientNetworkError(
+      (error as Error & { cause?: unknown }).cause
+    );
+  }
+  if (error && typeof error === "object" && "cause" in error) {
+    return isProofProviderTransientNetworkError(
+      (error as { cause?: unknown }).cause
+    );
   }
   return false;
 }
@@ -149,17 +283,27 @@ export function errorMessage(error: unknown): string {
   }
 }
 
-function nestedErrorMessages(error: unknown, seen = new Set<unknown>()): string[] {
+function nestedErrorMessages(
+  error: unknown,
+  seen = new Set<unknown>()
+): string[] {
   if (error === null || error === undefined || seen.has(error)) return [];
   if (typeof error === "string") return [decodeMaybeHexString(error)];
-  if (typeof error === "number" || typeof error === "bigint" || typeof error === "boolean") {
+  if (
+    typeof error === "number" ||
+    typeof error === "bigint" ||
+    typeof error === "boolean"
+  ) {
     return [String(error)];
   }
   if (error instanceof Error) {
     seen.add(error);
     return [
       error.message,
-      ...nestedErrorMessages((error as Error & { cause?: unknown }).cause, seen),
+      ...nestedErrorMessages(
+        (error as Error & { cause?: unknown }).cause,
+        seen
+      ),
     ].filter(Boolean);
   }
   if (Array.isArray(error)) {
@@ -194,7 +338,9 @@ function nestedErrorMessages(error: unknown, seen = new Set<unknown>()): string[
 function dedupeMessages(messages: string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const message of messages.map((entry) => entry.replace(/\s+/g, " ").trim()).filter(Boolean)) {
+  for (const message of messages
+    .map((entry) => entry.replace(/\s+/g, " ").trim())
+    .filter(Boolean)) {
     if (seen.has(message)) continue;
     seen.add(message);
     out.push(message);
@@ -204,15 +350,21 @@ function dedupeMessages(messages: string[]): string[] {
 
 export function decodeMaybeHexString(value: string): string {
   const trimmed = value.trim();
-  if (!/^0x[0-9a-fA-F]+$/.test(trimmed) || trimmed.length < 8 || trimmed.length % 2 !== 0) {
+  if (
+    !/^0x[0-9a-fA-F]+$/.test(trimmed) ||
+    trimmed.length < 8 ||
+    trimmed.length % 2 !== 0
+  ) {
     return trimmed;
   }
   try {
-    const bytes = trimmed
-      .slice(2)
-      .match(/../g)
-      ?.map((chunk) => parseInt(chunk, 16)) ?? [];
-    if (bytes.length === 0 || bytes.some((byte) => byte < 32 || byte > 126)) return trimmed;
+    const bytes =
+      trimmed
+        .slice(2)
+        .match(/../g)
+        ?.map((chunk) => parseInt(chunk, 16)) ?? [];
+    if (bytes.length === 0 || bytes.some((byte) => byte < 32 || byte > 126))
+      return trimmed;
     return `${trimmed} ('${String.fromCharCode(...bytes)}')`;
   } catch {
     return trimmed;
@@ -220,13 +372,17 @@ export function decodeMaybeHexString(value: string): string {
 }
 
 function decodeHexStringsInText(value: string): string {
-  return value.replace(/0x[0-9a-fA-F]{8,}/g, (match) => decodeMaybeHexString(match));
+  return value.replace(/0x[0-9a-fA-F]{8,}/g, (match) =>
+    decodeMaybeHexString(match)
+  );
 }
 
 export function sanitizeRpcMessage(value: string): string {
   return decodeHexStringsInText(value)
     .replace(/"calldata"\s*:\s*\[[^\]]*\]/g, '"calldata":[...]')
     .replace(/"signature"\s*:\s*\[[^\]]*\]/g, '"signature":[...]')
+    .replace(/0x[0-9a-fA-F]{33,}/g, "<felt>")
+    .replace(/\b[0-9]{32,}\b/g, "<number>")
     .replace(/\s+/g, " ")
     .trim();
 }

@@ -14,8 +14,29 @@ export function normalizeFeltForComparison(
 }
 
 export function normalizeOptionalFelt(value: string | undefined | null) {
-  const normalized = normalizeFeltForComparison(value);
+  const normalized = normalizeStrictFelt(value);
   return normalized && normalized !== "0x0" ? normalized : null;
+}
+
+export const STARKNET_FIELD_PRIME =
+  3618502788666131213697322783095070105623107215331596699973092056135872020481n;
+
+export function normalizeStrictFelt(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = BigInt(trimmed);
+    if (parsed < 0n || parsed >= STARKNET_FIELD_PRIME) return "";
+    return `0x${parsed.toString(16)}`;
+  } catch {
+    return "";
+  }
+}
+
+export function normalizeConfiguredFelt(value: unknown): string {
+  const normalized = normalizeStrictFelt(value);
+  return normalized === "0x0" ? "" : normalized;
 }
 
 export function requiredString(value: unknown, label: string) {
@@ -28,10 +49,12 @@ export function requiredString(value: unknown, label: string) {
 
 export function requiredNonZeroFelt(value: unknown, label: string) {
   const felt = requiredString(value, label).trim();
-  const normalized =
-    felt.startsWith("0x") || felt.startsWith("0X") ? felt.slice(2) : felt;
-  if (/^0*$/i.test(normalized)) {
-    const field = label ? label[0].toUpperCase() + label.slice(1) : "Value";
+  const normalized = normalizeStrictFelt(felt);
+  const field = label ? label[0].toUpperCase() + label.slice(1) : "Value";
+  if (!normalized) {
+    throw new Error(`${field} must be a valid Starknet felt`);
+  }
+  if (normalized === "0x0") {
     throw new Error(`${field} must be configured`);
   }
   return felt;

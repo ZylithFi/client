@@ -22,7 +22,7 @@ export function PairList({
       <div className="pair-list-body">
         {pairs.length === 0 && (
           <div style={{ padding: "20px 16px", fontSize: 11, color: "var(--z-text-body)", letterSpacing: "0.08em" }}>
-            —
+            -
           </div>
         )}
         {pairs.map(pair => {
@@ -40,7 +40,7 @@ export function PairList({
                 <div className="pair-sub">{batch ? `Epoch ${batch.epoch_id} · ${batch.status}` : "Waiting for epoch"}</div>
               </div>
               <div className="pair-meta">
-                <div className="pair-price">{lastClearing ? formatClearingPrice(lastClearing, pair) : "—"}</div>
+                <div className="pair-price">{lastClearing ? formatClearingPrice(lastClearing, pair) : "-"}</div>
               </div>
             </button>
           );
@@ -66,7 +66,7 @@ export function PairHeader({
         </div>
         <div>
           <div className="pair-hd-price">
-            {lastClearing ? formatClearingPrice(lastClearing, pair) : "—"}
+            {lastClearing ? formatClearingPrice(lastClearing, pair) : "-"}
           </div>
         </div>
       </div>
@@ -100,10 +100,10 @@ export function ReportsStrip({
 
   const fillRate = orders.length > 0
     ? ((filled.length / orders.length) * 100).toFixed(1) + "%"
-    : "—";
+    : "-";
   const avgHeadroom = headroomValues.length > 0
     ? formatBps(headroomValues.reduce((sum, value) => sum + value, 0) / headroomValues.length)
-    : "—";
+    : "-";
 
   return (
     <div className="tc-section reports-strip">

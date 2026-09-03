@@ -1,7 +1,9 @@
 type RelayMode = "SelfRelay" | "ZylithRelay";
 
-const PRIVATE_SUBMISSION_MAX_DELAY_MS = 7_000;
-const MANAGED_RELAY_SUBMISSION_MAX_DELAY_MS = 0;
+const PRIVATE_SUBMISSION_MAX_DELAY_MS = 0;
+const HOSTED_RELAY_SUBMISSION_MAX_DELAY_MS = 0;
+const DEFAULT_BATCH_WINDOW_MS = 20_000;
+const HOSTED_RELAY_MIN_LEAD_MS = 120_000;
 const MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 5_000;
 const MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
 const BATCH_SUBMISSION_SAFETY_BUFFER_BPS = 2_000;
@@ -33,7 +35,9 @@ export function firstRenewalSlotEpoch(
   nowUnixMs = Date.now(),
   batchWindowMs?: number,
 ) {
-  if (relayMode === "ZylithRelay") return batch.epoch_id + 1;
+  if (relayMode === "ZylithRelay") {
+    return batch.epoch_id + hostedRelayLeadEpochs(batchWindowMs);
+  }
   return hasBatchSubmissionSafetyWindow(
     batch.close_time_unix_ms,
     nowUnixMs,
@@ -45,14 +49,24 @@ export function firstRenewalSlotEpoch(
 
 export function renewalPackageMaxSubmissionDelayMs(relayMode: RelayMode) {
   return relayMode === "ZylithRelay"
-    ? MANAGED_RELAY_SUBMISSION_MAX_DELAY_MS
+    ? HOSTED_RELAY_SUBMISSION_MAX_DELAY_MS
     : PRIVATE_SUBMISSION_MAX_DELAY_MS;
+}
+
+export function hostedRelayLeadEpochs(batchWindowMs?: number) {
+  const parsedWindow = Number(batchWindowMs);
+  const windowMs =
+    Number.isFinite(parsedWindow) && parsedWindow > 0
+      ? parsedWindow
+      : DEFAULT_BATCH_WINDOW_MS;
+  return Math.max(2, Math.ceil(HOSTED_RELAY_MIN_LEAD_MS / windowMs));
 }
 
 export function privateSubmissionDelayMs(
   closeTimeUnixMs?: number,
   submissionSafetyBufferMs = batchSubmissionSafetyBufferMs(),
 ) {
+  if (PRIVATE_SUBMISSION_MAX_DELAY_MS <= 0) return 0;
   if (!closeTimeUnixMs) return 0;
   const timeUntilClose = closeTimeUnixMs - Date.now();
   const maxDelay = Math.min(

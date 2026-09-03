@@ -17,6 +17,18 @@
       "destination": "https://api.zylith.fi/starknet-privacy-prover/:path*"
     },
     {
+      "source": "/starknet-privacy-prover-sepolia",
+      "destination": "https://api.zylith.fi/starknet-privacy-prover-sepolia"
+    },
+    {
+      "source": "/starknet-privacy-prover-sepolia/:path*",
+      "destination": "https://api.zylith.fi/starknet-privacy-prover-sepolia/:path*"
+    },
+    {
+      "source": "/paymaster/:path*",
+      "destination": "https://api.zylith.fi/paymaster/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

@@ -1,7 +1,7 @@
 const DEFAULT_MAX_DEPOSIT_NOTES = 8;
 const DEFAULT_SPLIT_WEIGHTS = [50n, 20n, 10n, 10n, 5n];
 
-const LAUNCH_DENOMINATION_TABLES: Record<string, readonly string[]> = {
+const DEPOSIT_DENOMINATION_TABLES: Record<string, readonly string[]> = {
   STRK: [
     "2", "5", "10", "25", "50", "100", "250", "500", "1000", "2500",
     "5000", "10000", "25000", "50000", "100000", "250000", "500000",
@@ -89,24 +89,9 @@ export function splitDepositAmount(
 }
 
 export function denominationTableForAsset(assetId: string, decimals: number): bigint[] {
-  const table = LAUNCH_DENOMINATION_TABLES[assetId];
-  if (!table) return fallbackDenominationTable(decimals);
+  const table = DEPOSIT_DENOMINATION_TABLES[assetId];
+  if (!table) throw new Error(`Deposit denominations are not configured for ${assetId}`);
   return dedupeSortedAscending(table.map(amount => parseHumanAmount(amount, decimals)));
-}
-
-function fallbackDenominationTable(decimals: number): bigint[] {
-  const scale = 10n ** BigInt(Math.max(0, decimals));
-  return dedupeSortedAscending([
-    scale,
-    scale * 5n,
-    scale * 10n,
-    scale * 50n,
-    scale * 100n,
-    scale * 500n,
-    scale * 1_000n,
-    scale * 5_000n,
-    scale * 10_000n,
-  ]);
 }
 
 function dedupeSortedAscending(values: bigint[]): bigint[] {

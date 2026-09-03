@@ -1,3 +1,11 @@
+import {
+  DEFAULT_SDK_ERROR_RESPONSE_MAX_BYTES,
+  fetchWithSdkTimeout,
+  normalizeSdkServiceUrl,
+  readSdkJsonResponse,
+  readSdkResponseText,
+  sanitizeSdkErrorMessage,
+} from "./common.js";
 import type { RelayMode } from "./common.js";
 
 export type OfflineRenewalRelayResult = {
@@ -27,6 +35,7 @@ export type OfflineRenewalPackage = {
     signature_r?: string;
     signature_s?: string;
   };
+  access_token?: string;
   relay_policy?: {
     prover_url?: string;
     coordinator_url?: string;
@@ -48,6 +57,7 @@ export type RelayPackageStatus = {
   submitted_slots: number;
   failed_slots: number;
   updated_at_unix_ms: number;
+  access_token?: string;
 };
 
 export type RelayPackageResults = {
@@ -63,9 +73,7 @@ export type RelaySdkOptions = {
 
 export type PackageAuthFields = {
   package_id: string;
-  package_commitment?: string;
-  parent_cancel_authority?: string;
-  relay_authorization?: OfflineRenewalPackage["relay_authorization"];
+  access_token?: string;
 };
 
 export type SelfHostedRelayExecutor = (
@@ -84,36 +92,40 @@ export class ZylithRelaySdk {
   private readonly fetcher: typeof fetch;
 
   constructor(options: RelaySdkOptions) {
-    this.relayUrl = stripTrailingSlash(options.relayUrl);
+    this.relayUrl = normalizeSdkServiceUrl(options.relayUrl, "relayUrl");
     this.fetcher = options.fetchImpl ?? defaultFetch();
   }
 
   async registerPackage(renewalPackage: OfflineRenewalPackage): Promise<RelayPackageStatus> {
-    return this.postJson<RelayPackageStatus>("/packages", renewalPackage);
+    const value = await this.postJson("/packages", renewalPackage);
+    return parseRelayPackageStatus(value, renewalPackage, true);
   }
 
   async packageStatus(renewalPackage: PackageAuthFields): Promise<RelayPackageStatus | null> {
-    return this.getJson<RelayPackageStatus>(
+    const value = await this.getJson(
       `/packages/${encodeURIComponent(renewalPackage.package_id)}`,
-      relayAuthorizationHeaders(renewalPackage)
+      relayAccessHeaders(renewalPackage)
     );
+    return value === null ? null : parseRelayPackageStatus(value, renewalPackage, false);
   }
 
   async packageResults(renewalPackage: PackageAuthFields): Promise<RelayPackageResults | null> {
-    return this.getJson<RelayPackageResults>(
+    const value = await this.getJson(
       `/packages/${encodeURIComponent(renewalPackage.package_id)}/results`,
-      relayAuthorizationHeaders(renewalPackage)
+      relayAccessHeaders(renewalPackage)
     );
+    return value === null ? null : parseRelayPackageResults(value, renewalPackage);
   }
 
   async tombstonePackage(renewalPackage: PackageAuthFields): Promise<boolean> {
-    const response = await this.fetcher(
+    const response = await fetchWithSdkTimeout(
+      this.fetcher,
       `${this.relayUrl}/packages/${encodeURIComponent(renewalPackage.package_id)}`,
       {
         method: "DELETE",
         headers: {
           accept: "application/json",
-          ...relayAuthorizationHeaders(renewalPackage),
+          ...relayAccessHeaders(renewalPackage),
         },
       }
     );
@@ -138,62 +150,153 @@ export class ZylithRelaySdk {
     });
   }
 
-  private async getJson<T>(path: string, headers: Record<string, string>): Promise<T | null> {
-    const response = await this.fetcher(`${this.relayUrl}${path}`, {
+  private async getJson(path: string, headers: Record<string, string>): Promise<unknown | null> {
+    const response = await fetchWithSdkTimeout(this.fetcher, `${this.relayUrl}${path}`, {
       headers: { accept: "application/json", ...headers },
     });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(await responseError(response));
-    return (await response.json()) as T;
+    return readSdkJsonResponse(response, { label: "Relay response" });
   }
 
-  private async postJson<T>(path: string, body: unknown): Promise<T> {
-    const response = await this.fetcher(`${this.relayUrl}${path}`, {
+  private async postJson(path: string, body: unknown): Promise<unknown> {
+    const response = await fetchWithSdkTimeout(this.fetcher, `${this.relayUrl}${path}`, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     if (!response.ok) throw new Error(await responseError(response));
-    return (await response.json()) as T;
+    return readSdkJsonResponse(response, { label: "Relay response" });
   }
 }
 
-export function relayAuthorizationHeaders(renewalPackage: PackageAuthFields): Record<string, string> {
-  const auth = renewalPackage.relay_authorization;
-  if (
-    !renewalPackage.package_commitment ||
-    !renewalPackage.parent_cancel_authority ||
-    !auth?.signer_public_key ||
-    !auth.signature_r ||
-    !auth.signature_s
-  ) {
-    return {};
+export function relayAccessHeaders(renewalPackage: PackageAuthFields): Record<string, string> {
+  const accessToken = renewalPackage.access_token?.trim();
+  if (!accessToken) {
+    throw new Error("Renewal relay package access token is missing");
   }
   return {
-    "x-zylith-relay-package-commitment": renewalPackage.package_commitment,
-    "x-zylith-relay-parent-cancel-authority": renewalPackage.parent_cancel_authority,
-    "x-zylith-relay-signer": auth.signer_public_key,
-    "x-zylith-relay-signature-r": auth.signature_r,
-    "x-zylith-relay-signature-s": auth.signature_s,
+    "x-zylith-relay-package-access-token": accessToken,
   };
 }
 
 async function responseError(response: Response): Promise<string> {
-  const text = await response.text().catch(() => "");
+  const text = await readSdkResponseText(response, {
+    maxBytes: DEFAULT_SDK_ERROR_RESPONSE_MAX_BYTES,
+    label: "Relay error response",
+  }).catch(() => "");
   if (!text.trim()) return `Relay request failed with HTTP ${response.status}`;
-  try {
-    const parsed = JSON.parse(text) as { error?: unknown; detail?: unknown; message?: unknown };
-    const detail = parsed.error ?? parsed.detail ?? parsed.message;
-    return typeof detail === "string" ? detail : text;
-  } catch {
-    return text;
-  }
-}
-
-function stripTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, "");
+  return sanitizeSdkErrorMessage(text, `Relay request failed with HTTP ${response.status}`);
 }
 
 function defaultFetch(): typeof fetch {
   return fetch.bind(globalThis);
+}
+
+function parseRelayPackageStatus(
+  value: unknown,
+  expected: { package_id: string; package_commitment?: string },
+  requireAccessToken: boolean
+): RelayPackageStatus {
+  const record = objectRecord(value, "Relay package status");
+  const packageId = requiredString(record.package_id, "relay package id");
+  const packageCommitment = requiredString(record.package_commitment, "relay package commitment");
+  if (packageId !== expected.package_id) throw new Error("Relay returned status for the wrong package");
+  if (expected.package_commitment && packageCommitment !== expected.package_commitment) {
+    throw new Error("Relay returned status for the wrong package commitment");
+  }
+  const relayMode = requiredString(record.relay_mode, "relay mode");
+  if (relayMode !== "SelfRelay" && relayMode !== "ZylithRelay") {
+    throw new Error("Relay returned an invalid relay mode");
+  }
+  const accessToken = optionalString(record.access_token, "relay package access token");
+  if (requireAccessToken && !accessToken) {
+    throw new Error("Relay registration response omitted the package access token");
+  }
+  const slotCount = nonNegativeSafeInteger(record.slot_count, "relay slot count");
+  const pendingSlots = boundedCount(record.pending_slots, "pending relay slots", slotCount);
+  const submittedSlots = boundedCount(record.submitted_slots, "submitted relay slots", slotCount);
+  const failedSlots = boundedCount(record.failed_slots, "failed relay slots", slotCount);
+  if (submittedSlots + failedSlots > slotCount) {
+    throw new Error("Relay package status contains impossible slot counts");
+  }
+  return {
+    package_id: packageId,
+    package_commitment: packageCommitment,
+    pair: requiredString(record.pair, "relay package pair"),
+    start_epoch: nonNegativeSafeInteger(record.start_epoch, "relay start epoch"),
+    end_epoch: nonNegativeSafeInteger(record.end_epoch, "relay end epoch"),
+    slot_count: slotCount,
+    relay_mode: relayMode,
+    pending_slots: pendingSlots,
+    submitted_slots: submittedSlots,
+    failed_slots: failedSlots,
+    updated_at_unix_ms: nonNegativeSafeInteger(record.updated_at_unix_ms, "relay update time"),
+    access_token: accessToken,
+  };
+}
+
+function parseRelayPackageResults(
+  value: unknown,
+  expected: { package_id: string; package_commitment?: string }
+): RelayPackageResults {
+  const record = objectRecord(value, "Relay package results");
+  const packageId = requiredString(record.package_id, "relay package id");
+  const packageCommitment = requiredString(record.package_commitment, "relay package commitment");
+  if (packageId !== expected.package_id) throw new Error("Relay returned results for the wrong package");
+  if (expected.package_commitment && packageCommitment !== expected.package_commitment) {
+    throw new Error("Relay returned results for the wrong package commitment");
+  }
+  if (!Array.isArray(record.results)) throw new Error("Relay package results must be an array");
+  return {
+    package_id: packageId,
+    package_commitment: packageCommitment,
+    results: record.results.map((entry, index) => parseRelayResult(entry, index)),
+  };
+}
+
+function parseRelayResult(value: unknown, index: number): OfflineRenewalRelayResult {
+  const record = objectRecord(value, `Relay result ${index}`);
+  return {
+    package_id: optionalString(record.package_id, "relay result package id"),
+    slot_index: optionalNonNegativeSafeInteger(record.slot_index, "relay result slot index"),
+    order_commitment: optionalString(record.order_commitment, "relay result order commitment"),
+    batch_id: optionalString(record.batch_id, "relay result batch id"),
+    epoch_id: optionalNonNegativeSafeInteger(record.epoch_id, "relay result epoch"),
+    status: optionalString(record.status, "relay result status"),
+    detail: optionalString(record.detail, "relay result detail"),
+  };
+}
+
+function objectRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
+function optionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
+function nonNegativeSafeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`Invalid ${label}`);
+  return value as number;
+}
+
+function optionalNonNegativeSafeInteger(value: unknown, label: string): number | undefined {
+  return value === undefined || value === null ? undefined : nonNegativeSafeInteger(value, label);
+}
+
+function boundedCount(value: unknown, label: string, maximum: number): number {
+  const count = nonNegativeSafeInteger(value, label);
+  if (count > maximum) throw new Error(`Invalid ${label}`);
+  return count;
 }

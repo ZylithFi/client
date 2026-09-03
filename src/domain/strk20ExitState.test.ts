@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyStrk20ExitClaimReceipt,
+  applyStrk20ExitStagingReceipt,
   isRetryableStrk20ExitClaim,
   isSpendableLocalNote,
   isWithdrawableNoteLocked,
@@ -13,6 +14,22 @@ describe("strk20ExitState", () => {
     expect(
       isSpendableLocalNote({ source: "deposit", deposit_confirmed: true })
     ).toBe(true);
+  });
+
+  it("never treats spent notes as spendable", () => {
+    expect(
+      isSpendableLocalNote({
+        source: "settlement_output",
+        spent: true,
+      })
+    ).toBe(false);
+    expect(
+      isSpendableLocalNote({
+        source: "deposit",
+        deposit_confirmed: true,
+        spent: true,
+      })
+    ).toBe(false);
   });
 
   it("treats staged exits without a claim tx as retryable", () => {
@@ -32,6 +49,18 @@ describe("strk20ExitState", () => {
       pending_strk20_open_note_tx: "0xclaim",
       strk20_exit_commitment: "0xexit",
     };
+    expect(isRetryableStrk20ExitClaim(record)).toBe(false);
+    expect(isWithdrawableNoteLocked(record)).toBe(true);
+  });
+
+  it("does not treat spent STRK20 exits as retryable", () => {
+    const record: LocalNoteSpendState = {
+      source: "settlement_output",
+      spent: true,
+      pending_withdrawal_tx: "0xstage",
+      strk20_exit_commitment: "0xexit",
+    };
+
     expect(isRetryableStrk20ExitClaim(record)).toBe(false);
     expect(isWithdrawableNoteLocked(record)).toBe(true);
   });
@@ -97,5 +126,47 @@ describe("strk20ExitState", () => {
       })
     ).toBe(false);
     expect(record.pending_strk20_open_note_tx).toBe("0xclaim");
+  });
+
+  it("clears failed staging state so an output can be restaged", () => {
+    const record: LocalNoteSpendState = {
+      locked_by_order: "withdrawal:0xexit",
+      pending_withdrawal_tx: "0xstage",
+      strk20_exit_commitment: "0xexit",
+      withdrawal_requested_at_unix_ms: 123,
+    };
+
+    expect(
+      applyStrk20ExitStagingReceipt(record, {
+        failed: true,
+        notFound: false,
+        confirmed: true,
+        reason: "reverted",
+      })
+    ).toBe(true);
+    expect(record.spent).toBeUndefined();
+    expect(record.locked_by_order).toBeUndefined();
+    expect(record.pending_withdrawal_tx).toBeUndefined();
+    expect(record.strk20_exit_commitment).toBeUndefined();
+    expect(record.withdrawal_requested_at_unix_ms).toBeUndefined();
+  });
+
+  it("keeps successful staged exits retryable for STRK20 claim", () => {
+    const record: LocalNoteSpendState = {
+      source: "settlement_output",
+      pending_withdrawal_tx: "0xstage",
+      strk20_exit_commitment: "0xexit",
+    };
+
+    expect(
+      applyStrk20ExitStagingReceipt(record, {
+        failed: false,
+        notFound: false,
+        confirmed: true,
+      })
+    ).toBe(false);
+    expect(record.pending_withdrawal_tx).toBe("0xstage");
+    expect(record.strk20_exit_commitment).toBe("0xexit");
+    expect(isRetryableStrk20ExitClaim(record)).toBe(true);
   });
 });

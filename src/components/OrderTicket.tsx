@@ -1,12 +1,13 @@
 import { useReducer } from "react";
-import { assetScale, fromAtomicStr, toPriceAtomicStr } from "../domain/assets";
-import type { CurvePoint } from "../domain/makerCurves";
+import { assetScale, safeFromAtomicStr, toPriceAtomicStr } from "../domain/assets";
+import { safeAtomicAmount } from "../domain/noteLifecycle";
 import { runPrimaryActionOnEnter } from "../domain/primaryEnter";
 import type { WalletBalance } from "../domain/shieldedBalances";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 
-export type TicketShape = "limit" | "strategy" | "curve";
+export type TicketShape = "limit" | "strategy";
 export type StratKind = "TWAP" | "VWAP" | "Repeat";
+export type ExecutionPreference = "PrivateOnly" | "PrivateThenExternal";
 
 export type PairConfig = {
   pair_id: string;
@@ -15,8 +16,6 @@ export type PairConfig = {
   min_order_amount: string;
   price_base_scale?: string;
   taker_fee_bps?: number;
-  maker_fee_bps?: number;
-  relay_fee_bps?: number;
   enabled: boolean;
 };
 
@@ -25,19 +24,19 @@ export type TicketSubmitIntent = {
   side: "Buy" | "Sell";
   shape: TicketShape;
   stratKind: StratKind;
-  resting: boolean;
   amount: string;
   limitPrice: string;
   minFill: string;
   fillOrKill: boolean;
-  curvePoints: CurvePoint[];
-  inventoryCap: string;
   durationHours: string;
   childSize: string;
   priceLimit: string;
   jitter: number;
+  executionPreference: ExecutionPreference;
+  keepTryingPrivate: boolean;
+  retryHours: string;
   relayMode?: "SelfRelay" | "ZylithRelay";
-  relayOperator?: "ZylithRelay" | "SelfHostedRelay" | "LocalBrowser";
+  relayOperator?: "ZylithRelay" | "SelfHostedRelay";
   selfRelayUrl?: string;
 };
 
@@ -66,13 +65,15 @@ type OrderTicketState = {
   childSize: string;
   priceLimit: string;
   jitter: number;
+  executionPreference: ExecutionPreference;
+  keepTryingPrivate: boolean;
+  retryHours: string;
   showAdv: boolean;
 };
 
 type TicketAction =
   | { type: "patch"; patch: Partial<OrderTicketState> }
-  | { type: "resetAfterSubmit" }
-  | { type: "forceShape"; shape: TicketShape };
+  | { type: "resetAfterSubmit" };
 
 const initialTicketState: OrderTicketState = {
   side: "Buy",
@@ -86,12 +87,14 @@ const initialTicketState: OrderTicketState = {
   childSize: "",
   priceLimit: "",
   jitter: 12,
+  executionPreference: "PrivateThenExternal",
+  keepTryingPrivate: false,
+  retryHours: "4",
   showAdv: false,
 };
 
 function ticketReducer(state: OrderTicketState, action: TicketAction): OrderTicketState {
   if (action.type === "patch") return { ...state, ...action.patch };
-  if (action.type === "forceShape") return { ...state, shape: action.shape };
   return {
     ...state,
     amount: "",
@@ -100,6 +103,9 @@ function ticketReducer(state: OrderTicketState, action: TicketAction): OrderTick
     fillOrKill: false,
     childSize: "",
     priceLimit: "",
+    executionPreference: "PrivateThenExternal",
+    keepTryingPrivate: false,
+    retryHours: "4",
   };
 }
 
@@ -111,19 +117,17 @@ function submitLabel(state: OrderTicketState, submitting: boolean) {
 
 function ShapeTab({
   active,
-  gated,
   title,
   onClick,
 }: {
   active: boolean;
-  gated?: boolean;
   title: string;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
-      className={`shape-tab ${active ? "on" : ""} ${gated ? "maker-gated" : ""}`}
+      className={`shape-tab ${active ? "on" : ""}`}
       onClick={onClick}
     >
       <span className="shape-tab-title">{title}</span>
@@ -173,13 +177,13 @@ export function OrderTicket({
   const priceBaseScaleValue = pair.price_base_scale ?? assetScale(baseAsset).toString();
   const fundingAsset = state.side === "Buy" ? quoteAsset : baseAsset;
   const fundingBal = balances.find(b => b.asset === fundingAsset);
-  const fundingAvailable = fundingBal ? BigInt(fundingBal.available) : 0n;
-  const fundingLocked = fundingBal ? BigInt(fundingBal.locked) : 0n;
+  const fundingAvailable = fundingBal ? safeAtomicAmount(fundingBal.available) : 0n;
+  const fundingLocked = fundingBal ? safeAtomicAmount(fundingBal.locked) : 0n;
   const availableDisplay = fundingBal && walletReady
-    ? fromAtomicStr(fundingBal.available, fundingAsset)
+    ? safeFromAtomicStr(fundingBal.available, fundingAsset)
     : null;
   const lockedDisplay = fundingBal && walletReady && fundingLocked > 0n
-    ? fromAtomicStr(fundingBal.locked, fundingAsset)
+    ? safeFromAtomicStr(fundingBal.locked, fundingAsset)
     : null;
 
   if (!walletReady) {
@@ -187,7 +191,7 @@ export function OrderTicket({
       <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Connect wallet to start.</div>
-          <div className="gate-body">Choose a Starknet wallet, then unlock the local Zylith wallet.</div>
+          <div className="gate-body">Choose a Starknet wallet to enable private trading.</div>
           <button className="btn-accent gate-primary" onClick={onOpenWallet}>
             Connect wallet
           </button>
@@ -201,7 +205,7 @@ export function OrderTicket({
       <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Deposit before trading.</div>
-          <div className="gate-body">Add funds to your Zylith wallet before placing an order.</div>
+          <div className="gate-body">Add private funds before placing an order.</div>
           <button className="btn-accent gate-primary" onClick={onDeposit}>
             Deposit
           </button>
@@ -212,17 +216,19 @@ export function OrderTicket({
 
   function quickFill(pct: number) {
     if (!fundingBal || !walletReady) return;
-    const portion = BigInt(fundingBal.available) * BigInt(pct) / 100n;
+    const portion = fundingAvailable * BigInt(pct) / 100n;
+    if (portion <= 0n) return;
     if (state.side === "Sell") {
-      dispatch({ type: "patch", patch: { amount: fromAtomicStr(portion.toString(), baseAsset) } });
+      dispatch({ type: "patch", patch: { amount: safeFromAtomicStr(portion, baseAsset, "0") } });
       return;
     }
     const priceInput = state.shape === "strategy" ? state.priceLimit : state.limitPrice;
     const price = BigInt(toPriceAtomicStr(priceInput, quoteAsset));
     if (price <= 0n) return;
-    const priceBaseScale = BigInt(priceBaseScaleValue);
+    const priceBaseScale = safeAtomicAmount(priceBaseScaleValue);
+    if (priceBaseScale <= 0n) return;
     const baseAtomic = (portion * priceBaseScale) / price;
-    dispatch({ type: "patch", patch: { amount: fromAtomicStr(baseAtomic.toString(), baseAsset) } });
+    dispatch({ type: "patch", patch: { amount: safeFromAtomicStr(baseAtomic, baseAsset, "0") } });
   }
 
   const canQuickFill = Boolean(
@@ -238,6 +244,11 @@ export function OrderTicket({
     { label: "4h", value: "4" },
     { label: "12h", value: "12" },
     { label: "24h", value: "24" },
+  ];
+  const retryOptions = [
+    { label: "1h", value: "1" },
+    { label: "4h", value: "4" },
+    { label: "12h", value: "12" },
   ];
   const batchTimingReady = batchWindowMs > 0;
   const strategyChildCount = batchTimingReady
@@ -257,26 +268,16 @@ export function OrderTicket({
   })();
 
   async function submitStandard() {
-    const ok = await onSubmit({
-      ...state,
-      resting: false,
-      curvePoints: [],
-      inventoryCap: "",
-    });
+    const ok = await onSubmit(state);
     if (ok !== false) dispatch({ type: "resetAfterSubmit" });
   }
 
   const summaryPrice = state.shape === "limit" ? state.limitPrice : state.priceLimit;
   const showSummary = state.amount.trim() !== "" && summaryPrice.trim() !== "";
-  const previewIntent: TicketSubmitIntent = {
-    ...state,
-    resting: false,
-    curvePoints: [],
-    inventoryCap: "",
-  };
+  const previewIntent: TicketSubmitIntent = state;
   let fundingPreview: FundingPreview | null = null;
   let fundingPreviewError: string | null = null;
-  if (showSummary && state.shape !== "curve" && onPreviewFunding) {
+  if (showSummary && onPreviewFunding) {
     try {
       fundingPreview = onPreviewFunding(previewIntent);
     } catch (error) {
@@ -309,44 +310,41 @@ export function OrderTicket({
           </button>
         </div>
 
-        {state.shape !== "curve" && (
-          <div className="f-row">
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-              <label className="f-label" style={{ marginBottom: 0 }}>Amount</label>
-              <span className="avail-meta">
-                {walletReady && availableDisplay !== null
-                  ? `${availableDisplay} ${fundingAsset} available`
-                  : "-"}
-              </span>
-            </div>
-            <div className="amount-side-row">
-              <div className="f-input-box">
-                <input
-                  className="f-input"
-                  type="text"
-                  inputMode="decimal"
-                  placeholder="0"
-                  value={state.amount}
-                  onChange={e => dispatch({ type: "patch", patch: { amount: e.target.value } })}
-                  disabled={!walletReady}
-                />
-                <span className="amount-quick-actions">
-                  <button type="button" className="quick-fill-btn" disabled={!canQuickFill} onClick={() => quickFill(25)}>25%</button>
-                  <button type="button" className="quick-fill-btn" disabled={!canQuickFill} onClick={() => quickFill(50)}>50%</button>
-                  <button type="button" className="quick-fill-btn" disabled={!canQuickFill} onClick={() => quickFill(100)}>Max</button>
-                </span>
-                <span className="f-unit">{baseAsset}</span>
-              </div>
-            </div>
-            {walletReady && fundingAvailable <= 0n && (
-              <div className="field-note warn">
-                No available {fundingAsset} note for this {state.side.toLowerCase()}.
-                {lockedDisplay ? ` ${lockedDisplay} ${fundingAsset} is locked in active orders.` : " Switch side or deposit this asset."}
-              </div>
-            )}
+        <div className="f-row">
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+            <label className="f-label" style={{ marginBottom: 0 }}>Amount</label>
+            <span className="avail-meta">
+              {walletReady && availableDisplay !== null
+                ? `${availableDisplay} ${fundingAsset} available`
+                : "-"}
+            </span>
           </div>
-        )}
-
+          <div className="amount-side-row">
+            <div className="f-input-box">
+              <input
+                className="f-input"
+                type="text"
+                inputMode="decimal"
+                placeholder="0"
+                value={state.amount}
+                onChange={e => dispatch({ type: "patch", patch: { amount: e.target.value } })}
+                disabled={!walletReady}
+              />
+              <span className="amount-quick-actions">
+                <button type="button" className="quick-fill-btn" disabled={!canQuickFill} onClick={() => quickFill(25)}>25%</button>
+                <button type="button" className="quick-fill-btn" disabled={!canQuickFill} onClick={() => quickFill(50)}>50%</button>
+                <button type="button" className="quick-fill-btn" disabled={!canQuickFill} onClick={() => quickFill(100)}>Max</button>
+              </span>
+              <span className="f-unit">{baseAsset}</span>
+            </div>
+          </div>
+          {walletReady && fundingAvailable <= 0n && (
+            <div className="field-note warn">
+              No available {fundingAsset} note for this {state.side.toLowerCase()}.
+              {lockedDisplay ? ` ${lockedDisplay} ${fundingAsset} is locked in active orders.` : " Switch side or deposit this asset."}
+            </div>
+          )}
+        </div>
         <div
           className="ticket-shape-row"
           style={{ gridTemplateColumns: "1fr 1fr" }}
@@ -373,6 +371,67 @@ export function OrderTicket({
                 <span className="f-unit">{quoteAsset}</span>
               </div>
             </div>
+            <div className="f-row">
+              <label className="f-label">Completion</label>
+              <div className="f-select-row" style={{ height: 36 }}>
+                <button
+                  type="button"
+                  className={`f-select-opt ${state.executionPreference === "PrivateThenExternal" ? "on" : ""}`}
+                  onClick={() => dispatch({
+                    type: "patch",
+                    patch: {
+                      executionPreference: "PrivateThenExternal",
+                      keepTryingPrivate: false,
+                    },
+                  })}
+                >
+                  Complete
+                </button>
+                <button
+                  type="button"
+                  className={`f-select-opt ${state.executionPreference === "PrivateOnly" ? "on" : ""}`}
+                  onClick={() => dispatch({
+                    type: "patch",
+                    patch: { executionPreference: "PrivateOnly" },
+                  })}
+                >
+                  Private only
+                </button>
+              </div>
+            </div>
+            {state.executionPreference === "PrivateOnly" && (
+              <div className="f-row">
+                <label className="f-check" style={{ marginBottom: 10 }}>
+                  <input
+                    type="checkbox"
+                    aria-label="Keep trying privately"
+                    checked={state.keepTryingPrivate}
+                    onChange={e => dispatch({
+                      type: "patch",
+                      patch: { keepTryingPrivate: e.target.checked },
+                    })}
+                  />
+                  Keep trying privately
+                </label>
+                {state.keepTryingPrivate && (
+                  <div className="f-select-row" style={{ height: 34 }}>
+                    {retryOptions.map(opt => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        className={`f-select-opt ${state.retryHours === opt.value ? "on" : ""}`}
+                        onClick={() => dispatch({
+                          type: "patch",
+                          patch: { retryHours: opt.value },
+                        })}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <button className="adv-toggle" onClick={() => dispatch({ type: "patch", patch: { showAdv: !state.showAdv } })}>
               <span>Advanced</span>
               <strong>{state.showAdv ? "⌃" : "⌄"}</strong>
@@ -449,10 +508,9 @@ export function OrderTicket({
           </>
         )}
 
-        {state.shape !== "curve" && (
-          <>
-            {showSummary && (
-              <div className="worst-case">
+        <>
+          {showSummary && (
+            <div className="worst-case">
                 <div className="wc-eyebrow">Order summary</div>
                 <div className="wc-row">
                   <span className="l">Amount</span>
@@ -465,6 +523,16 @@ export function OrderTicket({
                 <div className="wc-row">
                   <span className="l">Side</span>
                   <span className="r">{state.side}</span>
+                </div>
+                <div className="wc-row">
+                  <span className="l">Completion</span>
+                  <span className="r">
+                    {state.executionPreference === "PrivateOnly"
+                      ? state.keepTryingPrivate
+                        ? `${state.retryHours}h private`
+                        : "Private only"
+                      : "Private + AVNU"}
+                  </span>
                 </div>
                 <div className="wc-divider" />
                 <div className="wc-row">
@@ -481,17 +549,17 @@ export function OrderTicket({
                       {fundingPreview.notes.map(note => (
                         <div key={note.note_commitment} className="funding-preview-row">
                           <span>{note.note_commitment.slice(0, 8)}…{note.note_commitment.slice(-4)}</span>
-                          <strong>{fromAtomicStr(note.amount, note.asset)} {note.asset}</strong>
+                          <strong>{safeFromAtomicStr(note.amount, note.asset)} {note.asset}</strong>
                         </div>
                       ))}
                     </div>
                     <div className="wc-row">
                       <span className="l">Locked capital</span>
-                      <span className="r">{fromAtomicStr(fundingPreview.selected_total, fundingPreview.asset)} {fundingPreview.asset}</span>
+                      <span className="r">{safeFromAtomicStr(fundingPreview.selected_total, fundingPreview.asset)} {fundingPreview.asset}</span>
                     </div>
                     <div className="wc-row">
                       <span className="l">Expected change</span>
-                      <span className="r">{fromAtomicStr(fundingPreview.expected_change, fundingPreview.asset)} {fundingPreview.asset}</span>
+                      <span className="r">{safeFromAtomicStr(fundingPreview.expected_change, fundingPreview.asset)} {fundingPreview.asset}</span>
                     </div>
                     {state.shape === "strategy" && (
                       <div className="wc-note">
@@ -507,23 +575,22 @@ export function OrderTicket({
                   <span className="l">Settlement</span>
                   <span className="r">Clears automatically</span>
                 </div>
-              </div>
-            )}
+            </div>
+          )}
 
-            {submitError && (
-              <div style={{ fontSize: 11, color: "var(--z-status-danger)", marginBottom: 8, lineHeight: 1.45 }}>
-                {submitError}
-              </div>
-            )}
-            <button
-              className={`submit-btn ${state.side === "Sell" ? "sell-mode" : "buy-mode"}`}
-              disabled={!canSubmit}
-              onClick={() => { void submitStandard(); }}
-            >
-              {submitLabel(state, submitting)}
-            </button>
-          </>
-        )}
+          {submitError && (
+            <div style={{ fontSize: 11, color: "var(--z-status-danger)", marginBottom: 8, lineHeight: 1.45 }}>
+              {submitError}
+            </div>
+          )}
+          <button
+            className={`submit-btn ${state.side === "Sell" ? "sell-mode" : "buy-mode"}`}
+            disabled={!canSubmit}
+            onClick={() => { void submitStandard(); }}
+          >
+            {submitLabel(state, submitting)}
+          </button>
+        </>
       </div>
     </div>
   );

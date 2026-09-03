@@ -1,29 +1,12 @@
 import { useState } from "react";
 import {
   formatHeadroomBps,
-  fromAtomicStr,
   headroomBpsValue,
+  safeFromAtomicStr,
 } from "../domain/assets";
-import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
+import { type LocalOrder, type PrivateStrategySummary } from "../domain/orderLifecycle";
 
 type Period = "all" | "7d" | "30d";
-
-type MakerBandRow = {
-  key: string;
-  pair: string;
-  side: LocalOrder["side"];
-  band: string;
-  submittedOrders: number;
-  filledOrders: number;
-  depth: number;
-  filledDepth: number;
-  epochs: Map<number, { depth: number; filledDepth: number }>;
-  renewalSubmitted: number;
-  renewalFilled: number;
-  headroom: number[];
-  inventoryDelta: number;
-  clearingPrices: string[];
-};
 
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString("en-US", {
@@ -33,8 +16,12 @@ function fmtTime(ts: number): string {
   });
 }
 
-function csvCell(value: string | number | undefined): string {
-  const raw = String(value ?? "");
+export function csvCell(value: string | number | undefined): string {
+  const source = String(value ?? "");
+  const raw =
+    typeof value === "string" && /^[\t\r\n ]*[=+\-@]/.test(source)
+      ? `'${source}`
+      : source;
   return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
 }
 
@@ -45,173 +32,28 @@ function parseHuman(value: string | undefined): number {
 }
 
 function formatHuman(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "—";
+  if (!Number.isFinite(value) || value <= 0) return "-";
   return value.toLocaleString("en-US", {
     maximumFractionDigits: value >= 100 ? 2 : 6,
   });
 }
 
 function formatPct(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "-";
   return `${value.toFixed(1)}%`;
 }
 
-function formatSignedNumber(value: number, suffix = ""): string {
-  if (!Number.isFinite(value)) return "—";
-  const abs = Math.abs(value);
-  const formatted = abs >= 100
-    ? abs.toLocaleString("en-US", { maximumFractionDigits: 2 })
-    : abs.toLocaleString("en-US", { maximumFractionDigits: 6 });
-  return `${value > 0 ? "+" : value < 0 ? "-" : ""}${formatted}${suffix}`;
-}
-
 function formatPricePath(values: string[]): string {
-  if (values.length === 0) return "—";
+  if (values.length === 0) return "-";
   const recent = values.slice(-4);
   return recent.join(" · ");
 }
 
 function formatStrategyLimitPrice(strategy: PrivateStrategySummary): string {
-  if (!strategy.limit_price) return "—";
+  if (!strategy.limit_price) return "-";
   const quote = strategy.pair.split("/")[1];
   if (!quote) return strategy.limit_price;
-  return fromAtomicStr(strategy.limit_price, quote);
-}
-
-function allocateMakerFill(order: LocalOrder, points: Array<{ price: string; baseAmount: string }>): number[] {
-  const allocation = points.map(() => 0);
-  let remaining = parseHuman(order.filledAmount);
-  if (remaining <= 0) return allocation;
-
-  const clearing = parseHuman(order.clearingPrice);
-  const ranked = points
-    .map((point, index) => ({
-      index,
-      price: parseHuman(point.price),
-      depth: parseHuman(point.baseAmount),
-    }))
-    .filter(point => point.depth > 0)
-    .filter(point => {
-      if (clearing <= 0 || point.price <= 0) return true;
-      return order.side === "Sell" ? point.price <= clearing : point.price >= clearing;
-    })
-    .sort((a, b) => {
-      if (order.side === "Sell") return a.price - b.price;
-      return b.price - a.price;
-    });
-
-  for (const point of ranked) {
-    if (remaining <= 0) break;
-    const fill = Math.min(point.depth, remaining);
-    allocation[point.index] = fill;
-    remaining -= fill;
-  }
-  return allocation;
-}
-
-function fromAtomicOrRaw(value: string, asset?: string): string {
-  if (!asset) return value;
-  try {
-    return fromAtomicStr(value, asset);
-  } catch {
-    return value;
-  }
-}
-
-function fallbackMakerPoints(order: LocalOrder): Array<{ price: string; baseAmount: string; bandIndex?: number }> {
-  if (order.makerCurvePoints && order.makerCurvePoints.length > 0) return order.makerCurvePoints;
-  return [{
-    price: order.limitPrice || order.clearingPrice || "Curve",
-    baseAmount: order.amount,
-  }];
-}
-
-function makerPointsWithFill(
-  order: LocalOrder,
-): {
-  points: Array<{ price: string; baseAmount: string; bandIndex?: number }>;
-  fillAllocation: number[];
-} {
-  const attribution = order.makerBandAttribution;
-  if (attribution?.bands?.length) {
-    const [baseAsset, quoteAsset] = order.pair.split("/");
-    const sortedBands = [...attribution.bands].sort((a, b) => a.band_index - b.band_index);
-    return {
-      points: sortedBands.map(band => ({
-        price: fromAtomicOrRaw(band.band_price, quoteAsset),
-        baseAmount: fromAtomicOrRaw(band.band_base_amount, baseAsset),
-        bandIndex: band.band_index,
-      })),
-      fillAllocation: sortedBands.map(band => parseHuman(fromAtomicOrRaw(band.filled_base_amount, baseAsset))),
-    };
-  }
-  const points = fallbackMakerPoints(order);
-  return { points, fillAllocation: allocateMakerFill(order, points) };
-}
-
-function makerBandRows(orders: LocalOrder[]): MakerBandRow[] {
-  const rows = new Map<string, MakerBandRow>();
-  for (const order of orders) {
-    const { points, fillAllocation } = makerPointsWithFill(order);
-    const orderFilled = order.status === "filled" || order.status === "partial";
-    const headroom = headroomBpsValue(order.side, order.limitPrice, order.clearingPrice ?? "");
-
-    points.forEach((point, index) => {
-      const band = point.price || "Curve";
-      const key = `${order.pair}:${order.side}:${point.bandIndex ?? band}`;
-      const row = rows.get(key) ?? {
-        key,
-        pair: order.pair,
-        side: order.side,
-        band,
-        submittedOrders: 0,
-        filledOrders: 0,
-        depth: 0,
-        filledDepth: 0,
-        epochs: new Map<number, { depth: number; filledDepth: number }>(),
-        renewalSubmitted: 0,
-        renewalFilled: 0,
-        headroom: [],
-        inventoryDelta: 0,
-        clearingPrices: [],
-      };
-      const depth = parseHuman(point.baseAmount);
-      const filledDepth = fillAllocation[index] ?? 0;
-      row.submittedOrders += 1;
-      row.depth += depth;
-      row.filledDepth += filledDepth;
-      if (filledDepth > 0) row.filledOrders += 1;
-      if (order.wireMode === "Resting") {
-        row.renewalSubmitted += 1;
-        if (orderFilled) row.renewalFilled += 1;
-      }
-      if (headroom !== null && filledDepth > 0) row.headroom.push(headroom);
-      if (filledDepth > 0) {
-        if (order.clearingPrice) row.clearingPrices.push(order.clearingPrice);
-        row.inventoryDelta += order.side === "Buy" ? filledDepth : -filledDepth;
-      }
-      const epoch = row.epochs.get(order.epochId) ?? { depth: 0, filledDepth: 0 };
-      epoch.depth += depth;
-      epoch.filledDepth += filledDepth;
-      row.epochs.set(order.epochId, epoch);
-      rows.set(key, row);
-    });
-  }
-  return Array.from(rows.values()).sort((a, b) => a.pair.localeCompare(b.pair) || a.band.localeCompare(b.band));
-}
-
-function epochUtilization(row: MakerBandRow): string {
-  const epochs = Array.from(row.epochs.entries())
-    .sort(([a], [b]) => b - a)
-    .slice(0, 4)
-    .reverse();
-  if (epochs.length === 0) return "—";
-  return epochs
-    .map(([epoch, stats]) => {
-      const pct = stats.depth > 0 ? (stats.filledDepth / stats.depth) * 100 : 0;
-      return `#${epoch} ${pct.toFixed(0)}%`;
-    })
-    .join(" · ");
+  return safeFromAtomicStr(strategy.limit_price, quote);
 }
 
 function weightedAverageClearing(orders: LocalOrder[]): string {
@@ -224,8 +66,12 @@ function weightedAverageClearing(orders: LocalOrder[]): string {
     numerator += price * size;
     denominator += size;
   }
-  if (denominator <= 0) return "—";
+  if (denominator <= 0) return "-";
   return (numerator / denominator).toLocaleString("en-US", { maximumFractionDigits: 8 });
+}
+
+function displayMode(mode: LocalOrder["wireMode"] | PrivateStrategySummary["mode"]): string {
+  return mode;
 }
 
 function formatNextChild(
@@ -234,7 +80,7 @@ function formatNextChild(
   batchWindowMs: number | null,
 ): string {
   if (strategy.status === "completed" || strategy.status === "cancelled" || strategy.next_child_index > strategy.max_children) {
-    return "—";
+    return "-";
   }
   const nextEpoch = strategy.start_epoch + strategy.next_child_index - 1;
   if (activeEpochId === null || !batchWindowMs) return `Epoch ${nextEpoch}`;
@@ -270,15 +116,13 @@ export function ReportsScreen({
     .filter((value): value is number => value !== null);
   const avgHeadroom = headroomValues.length > 0
     ? formatBps(mean(headroomValues))
-    : "—";
+    : "-";
   const bestFill = headroomValues.length > 0
     ? formatBps(Math.max(...headroomValues))
-    : "—";
+    : "-";
   const fillRate = periodOrders.length > 0
     ? formatPct((filled.length / periodOrders.length) * 100)
-    : "—";
-  const makerOrders = periodOrders.filter(order => order.wireMode === "Maker Curve" || order.wireMode === "Resting");
-  const makerRows = makerBandRows(makerOrders);
+    : "-";
   const strategyRows = strategies.map(strategy => {
     const related = periodOrders.filter(order => order.strategyId === strategy.id);
     const fills = related.filter(order => order.status === "filled" || order.status === "partial");
@@ -296,7 +140,7 @@ export function ReportsScreen({
     const scheduleAdherence = expectedChildren > 0 ? (submittedChildren / expectedChildren) * 100 : 100;
     const targetPrice = related.find(order => order.limitPrice)?.limitPrice ??
       formatStrategyLimitPrice(strategy);
-    const displayMode = related.find(order => order.wireMode !== "Limit" && order.wireMode !== "Maker Curve")?.wireMode ?? strategy.mode;
+    const displayMode = related.find(order => order.wireMode !== "Limit")?.wireMode ?? strategy.mode;
     const displayPair = related.find(order => order.pair)?.pair ?? strategy.pair;
     const vwap = weightedAverageClearing(fills);
     const fillRate = related.length > 0 ? (fills.length / related.length) * 100 : 0;
@@ -334,11 +178,6 @@ export function ReportsScreen({
         "clearing_price",
         "headroom_bps",
         "submitted_at",
-        "band",
-        "total_depth",
-        "filled_depth",
-        "utilization_pct",
-        "inventory_delta",
         "clearing_path",
         "strategy_id",
         "children",
@@ -359,30 +198,8 @@ export function ReportsScreen({
         order.clearingPrice ?? "",
         formatHeadroomBps(order.side, order.limitPrice, order.clearingPrice ?? ""),
         new Date(order.submittedAt).toISOString(),
-        "", "", "", "", "", "", "", "", "", "", "", "", "",
+        "", "", "", "", "", "", "", "",
       ]),
-      ...makerRows.map(row => {
-        const utilization = row.depth > 0 ? (row.filledDepth / row.depth) * 100 : 0;
-        return [
-          "maker_band",
-          row.pair,
-          row.side,
-          "Maker Curve",
-          "",
-          "",
-          "",
-          row.headroom.length > 0 ? formatBps(mean(row.headroom)) : "",
-          "",
-          "",
-          row.band,
-          formatHuman(row.depth),
-          formatHuman(row.filledDepth),
-          utilization.toFixed(1),
-          formatSignedNumber(row.inventoryDelta),
-          formatPricePath(row.clearingPrices),
-          "", "", "", "", "", "", "",
-        ];
-      }),
       ...strategyRows.map(row => [
         "strategy",
         row.displayPair,
@@ -393,7 +210,7 @@ export function ReportsScreen({
         "",
         "",
         "",
-        "", "", "", "", "", "",
+        "",
         row.clearingPath,
         row.strategy.id,
         `${row.submittedChildren}/${row.strategy.max_children}`,
@@ -430,14 +247,14 @@ export function ReportsScreen({
       {!walletReady ? (
         <div className="table-zone">
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Sign in to view TCA.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Connect wallet to view TCA.</div>
           </div>
         </div>
       ) : allFilled.length === 0 ? (
         <div className="table-zone">
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
+            <div className="empty-mark">-</div>
             <div className="empty-body">
               {allOutputPending.length > 0
                 ? "Output reports pending. TCA appears after the private settlement report is available."
@@ -488,7 +305,7 @@ export function ReportsScreen({
           {filled.length === 0 ? (
             <div className="table-zone tca-table-zone">
               <div className="empty-zone">
-                <div className="empty-mark">—</div>
+                <div className="empty-mark">-</div>
                 <div className="empty-body">
                   {periodOutputPending.length > 0
                     ? "Output reports pending for the selected period."
@@ -520,70 +337,16 @@ export function ReportsScreen({
                           {order.side}
                         </span>
                       </td>
-                      <td>{order.wireMode}</td>
+                      <td>{displayMode(order.wireMode)}</td>
                       <td className="num">{order.filledAmount ?? order.amount}</td>
-                      <td className="num">{order.limitPrice || "—"}</td>
-                      <td className="num">{order.clearingPrice ?? "—"}</td>
+                      <td className="num">{order.limitPrice || "-"}</td>
+                      <td className="num">{order.clearingPrice ?? "-"}</td>
                       <td className="num">{formatHeadroomBps(order.side, order.limitPrice, order.clearingPrice ?? "")}</td>
                       <td>{fmtTime(order.submittedAt)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
-          )}
-
-          {makerRows.length > 0 && (
-            <div className="tca-section">
-              <div className="tca-section-hd">
-                <span>Maker analytics</span>
-                <em>Per-band depth, utilization, clearing path, and renewal effectiveness from locally recognized fills.</em>
-              </div>
-              <div className="table-zone compact-table">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Pair</th>
-                      <th>Band</th>
-                      <th>Curves</th>
-                      <th>Total depth</th>
-                      <th>Filled depth</th>
-                      <th>Utilization</th>
-                      <th>Epochs</th>
-                      <th>Renewal</th>
-                      <th>Clearing path</th>
-                      <th>Inventory Δ</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {makerRows.map(row => {
-                      const utilization = row.depth > 0 ? (row.filledDepth / row.depth) * 100 : 0;
-                      const renewal = row.renewalSubmitted > 0
-                        ? `${row.renewalFilled}/${row.renewalSubmitted}`
-                        : "—";
-                      return (
-                        <tr key={row.key}>
-                          <td>{row.pair}</td>
-                          <td className="num">
-                            <span className={`side ${row.side === "Buy" ? "buy" : "sell"}`}>
-                              {row.side === "Buy" ? "Bid" : "Ask"}
-                            </span>{" "}
-                            {row.band}
-                          </td>
-                          <td className="num">{row.filledOrders}/{row.submittedOrders}</td>
-                          <td className="num">{formatHuman(row.depth)}</td>
-                          <td className="num">{formatHuman(row.filledDepth)}</td>
-                          <td className="num">{formatPct(utilization)}</td>
-                          <td className="num tca-muted-cell">{epochUtilization(row)}</td>
-                          <td className="num">{renewal}</td>
-                          <td className="num tca-muted-cell">{formatPricePath(row.clearingPrices)}</td>
-                          <td className="num">{formatSignedNumber(row.inventoryDelta)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
             </div>
           )}
 
@@ -612,7 +375,7 @@ export function ReportsScreen({
                   <tbody>
                     {strategyRows.map(row => (
                       <tr key={row.strategy.id}>
-                        <td>{row.displayMode}</td>
+                        <td>{displayMode(row.displayMode)}</td>
                         <td>{row.displayPair}</td>
                         <td>{row.strategy.status}</td>
                         <td className="num">

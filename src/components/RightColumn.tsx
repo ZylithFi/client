@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fromAtomicStr } from "../domain/assets";
+import { safeFromAtomicStr } from "../domain/assets";
 import { fmtAddr } from "../domain/browserWallet";
 import type { BatchSummary, PublicSettlementTranscript } from "../domain/auctionEpoch";
 import { type LocalOrder, statusLabel, statusTone } from "../domain/orderLifecycle";
@@ -9,6 +9,7 @@ import {
   activeSettlementOutputs,
   pendingDepositTotals,
   pendingWithdrawalOutputs,
+  safeAtomicAmount,
   settlementBasisMs,
   settlementReadyAtMs,
   sumByAsset,
@@ -81,7 +82,7 @@ function ClaimSection({
                 <div key={row.note.note_commitment} className={`claim-row ${disabled ? "" : "ready"}`}>
                   <div className="claim-asset">{row.note.asset}</div>
                   <div>
-                    <div className="claim-amount z-amt">{fromAtomicStr(row.note.amount, row.note.asset)}</div>
+                    <div className="claim-amount z-amt">{safeFromAtomicStr(row.note.amount, row.note.asset)}</div>
                     <div className="claim-delay">
                       {row.readyAt === null
                         ? "Waiting for settlement record"
@@ -108,6 +109,7 @@ function ClaimSection({
 export function RightColumn({
   activeBatch,
   activePairId,
+  batchWindowMs,
   settlementTranscripts,
   online,
   allAssets,
@@ -126,6 +128,7 @@ export function RightColumn({
 }: {
   activeBatch: BatchSummary | null;
   activePairId: string;
+  batchWindowMs?: number | null;
   settlementTranscripts: Record<string, PublicSettlementTranscript>;
   online: boolean | null;
   allAssets: string[];
@@ -142,14 +145,14 @@ export function RightColumn({
   walletReady: boolean;
   starknetAddress: string | null;
   activeOrders: LocalOrder[];
-  setOpenSlide: (v: "wallet" | "deposit" | "withdraw" | "recovery" | null) => void;
+  setOpenSlide: (v: "wallet" | "deposit" | "withdraw" | null) => void;
   allOrders: LocalOrder[];
   onCancelOrder: (order: LocalOrder) => void;
   onClaimNote: (note: WithdrawableNote) => void;
 }) {
   const now = useNow(1000);
 
-  const batchInfo = activeBatch ? batchState(activeBatch, now) : null;
+  const batchInfo = activeBatch ? batchState(activeBatch, now, batchWindowMs) : null;
   const msLeft = activeBatch ? activeBatch.close_time_unix_ms - now : 0;
   const batchOrders = activeBatch
     ? allOrders.filter(order => order.batchId === activeBatch.batch_id)
@@ -181,8 +184,8 @@ export function RightColumn({
     : allAssets;
   const visibleAssets = candidateAssets.filter(asset => {
     const balance = balances.find(entry => entry.asset === asset);
-    const available = balance ? BigInt(balance.available) : 0n;
-    const locked = balance ? BigInt(balance.locked) : 0n;
+    const available = balance ? safeAtomicAmount(balance.available) : 0n;
+    const locked = balance ? safeAtomicAmount(balance.locked) : 0n;
     return available > 0n ||
       locked > 0n ||
       (activeOrderTotals.get(asset) ?? 0n) > 0n ||
@@ -206,18 +209,18 @@ export function RightColumn({
               {batchInfo.label}
             </span>
           ) : (
-            <span className="z-amt">—</span>
+            <span className="z-amt">-</span>
           )}
         </div>
         <div className="rb-row">
           <span>Next clearing</span>
           <span className="z-amt">
-            {activeBatch?.status === "Open" ? msToCountdown(msLeft) : "—"}
+            {activeBatch?.status === "Open" ? msToCountdown(msLeft) : "-"}
           </span>
         </div>
         <div className="rb-row">
           <span>Your orders</span>
-          <span className="z-amt">{activeBatch ? batchOrders.length : "—"}</span>
+          <span className="z-amt">{activeBatch ? batchOrders.length : "-"}</span>
         </div>
       </div>
 
@@ -227,8 +230,9 @@ export function RightColumn({
         </div>
         {visibleAssets.map(asset => {
           const balance = balances.find(entry => entry.asset === asset);
-          const available = balance && walletReady ? fromAtomicStr(balance.available, asset) : "—";
-          const locked = balance && walletReady ? fromAtomicStr(balance.locked, asset) : "—";
+          const available = balance && walletReady ? safeFromAtomicStr(balance.available, asset) : "-";
+          const locked = balance && walletReady ? safeFromAtomicStr(balance.locked, asset) : "-";
+          const lockedAtomic = balance ? safeAtomicAmount(balance.locked) : 0n;
           const activeOrderAmount = activeOrderTotals.get(asset) ?? 0n;
           const pendingDeposit = depositTotals.get(asset) ?? 0n;
           const failedDeposit = failedDepositTotals.get(asset) ?? 0n;
@@ -243,10 +247,10 @@ export function RightColumn({
               {activeOrderAmount > 0n && (
                 <div className="rb-detail-row">
                   <span>Active order size</span>
-                  <strong>{fromAtomicStr(activeOrderAmount.toString(), asset)}</strong>
+                  <strong>{safeFromAtomicStr(activeOrderAmount, asset)}</strong>
                 </div>
               )}
-              {balance && BigInt(balance.locked) > 0n && (
+              {lockedAtomic > 0n && (
                 <div className="rb-detail-row">
                   <span>Locked note capital</span>
                   <strong>{locked}</strong>
@@ -255,13 +259,13 @@ export function RightColumn({
               {pendingDeposit > 0n && (
                 <div className="rb-detail-row">
                   <span>Pending deposit</span>
-                  <strong>{fromAtomicStr(pendingDeposit.toString(), asset)}</strong>
+                  <strong>{safeFromAtomicStr(pendingDeposit, asset)}</strong>
                 </div>
               )}
               {failedDeposit > 0n && (
                 <div className="rb-detail-row danger" title={failedReason}>
                   <span>Failed deposit</span>
-                  <strong>{fromAtomicStr(failedDeposit.toString(), asset)}</strong>
+                  <strong>{safeFromAtomicStr(failedDeposit, asset)}</strong>
                 </div>
               )}
             </div>
@@ -275,11 +279,11 @@ export function RightColumn({
         <div className="right-assets-actions">
           <button
             className="btn-ghost"
-            onClick={() => setOpenSlide(walletReady && starknetAddress ? "deposit" : "wallet")}
+            onClick={() => setOpenSlide(starknetAddress ? "deposit" : "wallet")}
           >Deposit</button>
           <button
             className="btn-ghost"
-            onClick={() => setOpenSlide(walletReady ? "withdraw" : "wallet")}
+            onClick={() => setOpenSlide(starknetAddress ? "withdraw" : "wallet")}
           >Withdraw</button>
         </div>
       </div>

@@ -2,8 +2,10 @@ import {
   AddressMap,
   Channel,
   Witness,
-  type Note,
-  type PrivateRegistry,
+} from "@starkware-libs/starknet-privacy-sdk/browser";
+import type {
+  Note,
+  PrivateRegistry,
 } from "@starkware-libs/starknet-privacy-sdk";
 import { describe, expect, it } from "vitest";
 import {

@@ -3,8 +3,10 @@ import {
   Channel,
   Witness,
   createEmptyRegistry,
-  type Note,
-  type PrivateRegistry,
+} from "@starkware-libs/starknet-privacy-sdk/browser";
+import type {
+  Note,
+  PrivateRegistry,
 } from "@starkware-libs/starknet-privacy-sdk";
 
 type SerializedAddressMapEntry<T> = [string, T];

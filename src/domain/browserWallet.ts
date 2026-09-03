@@ -1,11 +1,18 @@
 import {
-  localRemove,
   sessionGetNullable,
   sessionRemove,
   sessionSet,
 } from "./safeSessionStorage";
+import { normalizeConfiguredFelt } from "./felt";
+import type { WalletRuntime } from "../zylithWalletRuntime";
 
 export type RuntimeStatus = "loading" | "ready" | "error";
+
+let privateAccountRuntime: WalletRuntime | null = null;
+let privateAccountRuntimeLoadError: string | undefined;
+let selectedProvider: StarknetProvider | null = null;
+let selectedAddress: string | null = null;
+const runtimeListeners = new Set<() => void>();
 
 export function fmtAddr(s: string): string {
   if (!s || s.length < 10) return s;
@@ -13,16 +20,39 @@ export function fmtAddr(s: string): string {
 }
 
 export function walletRuntime() {
-  return window.zylithWallet ?? null;
+  return privateAccountRuntime;
 }
 
 export function walletRuntimeStatus(): RuntimeStatus {
-  if (window.zylithWallet) return "ready";
-  if (window.zylithWalletLoadError) return "error";
+  if (privateAccountRuntime) return "ready";
+  if (privateAccountRuntimeLoadError) return "error";
   return "loading";
 }
 
+export function walletRuntimeLoadError() {
+  return privateAccountRuntimeLoadError;
+}
+
+export function setWalletRuntime(runtime: WalletRuntime | null, loadError?: string) {
+  privateAccountRuntime = runtime;
+  privateAccountRuntimeLoadError = loadError;
+  notifyWalletRuntimeChanged();
+}
+
+export function notifyWalletRuntimeChanged() {
+  for (const listener of runtimeListeners) listener();
+}
+
+export function subscribeWalletRuntime(listener: () => void) {
+  runtimeListeners.add(listener);
+  return () => {
+    runtimeListeners.delete(listener);
+  };
+}
+
 export type StarknetProvider = NonNullable<typeof window.starknet>;
+type StarknetProviderRequest = NonNullable<StarknetProvider["request"]>;
+type StarknetProviderRequestInput = Parameters<StarknetProviderRequest>[0];
 
 export type StarknetWalletOption = {
   id: string;
@@ -35,20 +65,11 @@ type StarknetProviderWithMeta = StarknetProvider & {
   name?: string;
 };
 
-type WindowWithSelectedWallet = Window & {
-  zylithSelectedStarknetProvider?: StarknetProvider;
-  zylithSelectedStarknetAddress?: string;
-};
-
 const SELECTED_STARKNET_WALLET_STORAGE_KEY = "zylith:selected-starknet-wallet";
 const CONNECTED_STARKNET_ADDRESS_STORAGE_KEY = "zylith:connected-starknet-address";
-const READY_PROVIDER_ALIAS = ["arg", "ent"].join("");
-const LEGACY_READY_PROVIDER_KEYS = [
-  `starknet_${READY_PROVIDER_ALIAS}X`,
-  `${READY_PROVIDER_ALIAS}X`,
-  `starknet_${READY_PROVIDER_ALIAS}`,
-  READY_PROVIDER_ALIAS,
-];
+const WALLET_SILENT_REQUEST_TIMEOUT_MS = 2_000;
+const WALLET_INTERACTIVE_REQUEST_TIMEOUT_MS = 60_000;
+const WALLET_DISCONNECT_REQUEST_TIMEOUT_MS = 2_000;
 const KNOWN_STARKNET_PROVIDER_KEYS = [
   "starknet_ready",
   "readyWallet",
@@ -56,7 +77,6 @@ const KNOWN_STARKNET_PROVIDER_KEYS = [
   "starknet_xverse",
   "xverseStarknet",
   "xverse",
-  ...LEGACY_READY_PROVIDER_KEYS,
 ];
 
 type WalletCandidate = {
@@ -68,7 +88,7 @@ type WalletCandidate = {
 function isStarknetProvider(value: unknown): value is StarknetProvider {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<StarknetProvider>;
-  return typeof candidate.request === "function" || typeof candidate.enable === "function";
+  return typeof candidate.request === "function";
 }
 
 function providerSearchText(key: string, provider: StarknetProviderWithMeta): string {
@@ -77,7 +97,7 @@ function providerSearchText(key: string, provider: StarknetProviderWithMeta): st
 
 function walletNameFor(key: string, provider: StarknetProviderWithMeta): string {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return "Ready X";
+  if (normalized.includes("ready")) return "Ready X";
   if (normalized.includes("xverse")) return "Xverse";
   if (provider.name?.trim()) return provider.name.trim();
   if (key === "starknet") return "Starknet wallet";
@@ -86,14 +106,14 @@ function walletNameFor(key: string, provider: StarknetProviderWithMeta): string 
 
 function walletIdFor(key: string, provider: StarknetProviderWithMeta): string {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return "ready";
+  if (normalized.includes("ready")) return "ready";
   if (normalized.includes("xverse")) return "xverse";
   return provider.id?.trim() || key;
 }
 
 function walletPriorityFor(key: string, provider: StarknetProviderWithMeta): number {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return 0;
+  if (normalized.includes("ready")) return 0;
   if (normalized.includes("xverse")) return 1;
   if (key === "starknet") return 4;
   return 2;
@@ -101,9 +121,7 @@ function walletPriorityFor(key: string, provider: StarknetProviderWithMeta): num
 
 function isSupportedWalletCandidate(key: string, provider: StarknetProviderWithMeta): boolean {
   const normalized = providerSearchText(key, provider);
-  return normalized.includes("ready") ||
-    normalized.includes(READY_PROVIDER_ALIAS) ||
-    normalized.includes("xverse");
+  return normalized.includes("ready") || normalized.includes("xverse");
 }
 
 function collectWindowWalletCandidates(): WalletCandidate[] {
@@ -161,8 +179,7 @@ function collectWindowWalletCandidates(): WalletCandidate[] {
       (
         key.startsWith("starknet") ||
         normalizedKey.includes("ready") ||
-        normalizedKey.includes("xverse") ||
-        normalizedKey.includes(READY_PROVIDER_ALIAS)
+        normalizedKey.includes("xverse")
       ) &&
       !candidates.some(candidate => candidate.key === key)
     ) {
@@ -218,19 +235,18 @@ export function injectedStarknet(): StarknetProvider | null {
 }
 
 export function selectedStarknetProvider(): StarknetProvider | null {
-  const selected = (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider;
-  if (selected) return selected;
+  if (selectedProvider) return selectedProvider;
   const storedId = sessionGetNullable(SELECTED_STARKNET_WALLET_STORAGE_KEY);
   const wallets = discoverStarknetWallets();
   const wallet = wallets.find(option => option.id === storedId) ?? null;
   if (wallet) {
-    (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider = wallet.provider;
+    selectedProvider = wallet.provider;
   }
   return wallet?.provider ?? null;
 }
 
 function addressFromUnknown(value: unknown): string | null {
-  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "string") return normalizeConfiguredFelt(value) || null;
   if (Array.isArray(value)) {
     for (const item of value) {
       const address = addressFromUnknown(item);
@@ -264,19 +280,19 @@ function addressFromProviderResult(
 }
 
 function rememberSelectedProvider(provider: StarknetProvider, walletId?: string, address?: string) {
-  (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider = provider;
-  if (address) (window as WindowWithSelectedWallet).zylithSelectedStarknetAddress = address;
-  if (walletId) sessionSet(SELECTED_STARKNET_WALLET_STORAGE_KEY, walletId);
+  selectedProvider = provider;
+  if (address) selectedAddress = address;
+  if (walletId && walletId !== "selected") {
+    sessionSet(SELECTED_STARKNET_WALLET_STORAGE_KEY, walletId);
+  }
   if (address) sessionSet(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY, address);
-  localRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
-  localRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
 }
 
 export function connectedStarknetAddress(): string | null {
   const provider = selectedStarknetProvider();
   if (!provider) return null;
   return addressFromProviderResult(null, provider)
-    ?? (window as WindowWithSelectedWallet).zylithSelectedStarknetAddress
+    ?? selectedAddress
     ?? null;
 }
 
@@ -292,7 +308,7 @@ export async function restoreConnectedStarknetWallet(): Promise<string | null> {
     if (!wallet) return null;
     provider = wallet.provider;
     walletId = wallet.id;
-    (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider = provider;
+    selectedProvider = provider;
   }
 
   const exposedAddress = addressFromProviderResult(null, provider);
@@ -302,15 +318,16 @@ export async function restoreConnectedStarknetWallet(): Promise<string | null> {
   }
 
   if (provider.request) {
-    const silentAttempts = [
+    const silentAttempts: StarknetProviderRequestInput[] = [
       { type: "wallet_requestAccounts", params: { silent_mode: true } },
-      { type: "wallet_requestAccounts", params: { silentMode: true } },
-      { method: "wallet_requestAccounts", params: [{ silent_mode: true }] },
-      { method: "starknet_requestAccounts", params: [{ silent_mode: true }] },
     ];
     for (const request of silentAttempts) {
       try {
-        const result = await provider.request(request);
+        const result = await requestWalletProvider(
+          provider,
+          request,
+          WALLET_SILENT_REQUEST_TIMEOUT_MS,
+        );
         const address = addressFromProviderResult(result, provider);
         if (address) {
           rememberSelectedProvider(provider, walletId, address);
@@ -334,10 +351,8 @@ export function clearSelectedStarknetProvider({
   if (disconnectWallet) {
     void disconnectProviderSession(provider);
   }
-  (window as WindowWithSelectedWallet).zylithSelectedStarknetProvider = undefined;
-  (window as WindowWithSelectedWallet).zylithSelectedStarknetAddress = undefined;
-  localRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
-  localRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
+  selectedProvider = null;
+  selectedAddress = null;
   sessionRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
   sessionRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
 }
@@ -355,16 +370,16 @@ export async function connectStarknetProvider(
   let lastError: unknown = null;
 
   if (provider.request) {
-    const attempts = [
+    const attempts: StarknetProviderRequestInput[] = [
       { type: "wallet_requestAccounts", params: { silent_mode: false } },
-      { type: "wallet_requestAccounts", params: { silentMode: false } },
-      { type: "wallet_requestAccounts" },
-      { method: "wallet_requestAccounts", params: [] },
-      { method: "starknet_requestAccounts", params: [] },
     ];
     for (const request of attempts) {
       try {
-        const result = await provider.request(request);
+        const result = await requestWalletProvider(
+          provider,
+          request,
+          WALLET_INTERACTIVE_REQUEST_TIMEOUT_MS,
+        );
         const address = addressFromProviderResult(result, provider);
         if (address) {
           rememberSelectedProvider(provider, walletId, address);
@@ -373,21 +388,8 @@ export async function connectStarknetProvider(
       } catch (error) {
         lastError = error;
         if (isUserRejectedRequest(error)) throw error;
+        if (isWalletRequestTimeout(error)) throw error;
       }
-    }
-  }
-
-  if (provider.enable) {
-    try {
-      const result = await (provider.enable as ((o?: unknown) => Promise<unknown>))();
-      const address = addressFromProviderResult(result, provider);
-      if (address) {
-        rememberSelectedProvider(provider, walletId, address);
-        return address;
-      }
-    } catch (error) {
-      lastError = error;
-      if (isUserRejectedRequest(error)) throw error;
     }
   }
 
@@ -414,6 +416,10 @@ function isUserRejectedRequest(error: unknown): boolean {
   return /user rejected|user denied|user abort|rejected by user|cancelled by user|canceled by user/i.test(message);
 }
 
+function isWalletRequestTimeout(error: unknown): boolean {
+  return error instanceof Error && /Starknet wallet request timed out/i.test(error.message);
+}
+
 async function disconnectProviderSession(
   provider: (StarknetProvider & { disconnect?: () => Promise<unknown> | unknown }) | null,
 ) {
@@ -427,14 +433,41 @@ async function disconnectProviderSession(
     // Wallet disconnect is best-effort. Zylith still clears its selected provider state locally.
   }
   if (provider.request) {
-    const attempts = [
+    const attempts: StarknetProviderRequestInput[] = [
       { type: "wallet_disconnect" },
-      { method: "wallet_disconnect" },
-      { type: "wallet_requestAccounts", params: { silent_mode: true, disconnect: true } },
-      { method: "wallet_revokePermissions", params: [{ starknet_accounts: {} }] },
     ];
     for (const request of attempts) {
-      await provider.request(request).catch(() => undefined);
+      await requestWalletProvider(
+        provider,
+        request,
+        WALLET_DISCONNECT_REQUEST_TIMEOUT_MS,
+      ).catch(() => undefined);
     }
+  }
+}
+
+function requestWalletProvider(
+  provider: StarknetProvider,
+  request: StarknetProviderRequestInput,
+  timeoutMs: number,
+) {
+  if (!provider.request) return Promise.resolve(null);
+  return withWalletProviderTimeout(provider.request.call(provider, request), timeoutMs);
+}
+
+async function withWalletProviderTimeout<T>(
+  request: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error("Starknet wallet request timed out. Unlock your wallet and retry."));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
   }
 }

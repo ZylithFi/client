@@ -5,7 +5,11 @@
   "private": false,
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist/common.*",
+    "dist/index.*",
+    "dist/relay.*",
+    "dist/trader.*",
+    "dist/wallet.*"
   ],
   "exports": {
     ".": {
@@ -24,10 +28,6 @@
       "types": "./dist/trader.d.ts",
       "import": "./dist/trader.js"
     },
-    "./maker": {
-      "types": "./dist/maker.d.ts",
-      "import": "./dist/maker.js"
-    },
     "./relay": {
       "types": "./dist/relay.d.ts",
       "import": "./dist/relay.js"
@@ -35,6 +35,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "test": "vitest run"
   },
   "devDependencies": {

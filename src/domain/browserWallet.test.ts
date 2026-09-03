@@ -8,6 +8,8 @@ import {
   discoverStarknetWalletsAsync,
   restoreConnectedStarknetWallet,
   selectedStarknetProvider,
+  setWalletRuntime,
+  subscribeWalletRuntime,
 } from "./browserWallet";
 
 const selectedWalletKey = "zylith:selected-starknet-wallet";
@@ -47,6 +49,7 @@ describe("browser wallet selection", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     clearSelectedStarknetProvider();
     window.localStorage.removeItem(selectedWalletKey);
     window.localStorage.removeItem(connectedAddressKey);
@@ -55,8 +58,6 @@ describe("browser wallet selection", () => {
       starknet?: unknown;
       starknet_ready?: unknown;
       starknet_xverse?: unknown;
-      zylithSelectedStarknetProvider?: unknown;
-      zylithSelectedStarknetAddress?: unknown;
       ready?: unknown;
       xverse?: unknown;
     }).starknet = undefined;
@@ -65,8 +66,6 @@ describe("browser wallet selection", () => {
     (window as typeof window & { starknet_xverse?: unknown }).starknet_xverse = undefined;
     (window as typeof window & { ready?: unknown }).ready = undefined;
     (window as typeof window & { xverse?: unknown }).xverse = undefined;
-    (window as typeof window & { zylithSelectedStarknetProvider?: unknown }).zylithSelectedStarknetProvider = undefined;
-    (window as typeof window & { zylithSelectedStarknetAddress?: unknown }).zylithSelectedStarknetAddress = undefined;
     delete (window as unknown as { starknet_hidden_ready?: unknown }).starknet_hidden_ready;
   });
 
@@ -78,6 +77,8 @@ describe("browser wallet selection", () => {
     expect(address).toBe("0xabc");
     expect(selectedStarknetProvider()).toBe(wallet);
     expect(connectedStarknetAddress()).toBe("0xabc");
+    expect("zylithSelectedStarknetProvider" in window).toBe(false);
+    expect("zylithSelectedStarknetAddress" in window).toBe(false);
 
     clearSelectedStarknetProvider();
 
@@ -103,18 +104,78 @@ describe("browser wallet selection", () => {
     wallet.name = "Ready X";
     (window as typeof window & { starknet?: unknown }).starknet = wallet;
     window.sessionStorage.setItem(selectedWalletKey, wallet.id);
-    window.sessionStorage.setItem(connectedAddressKey, "0xstale");
+    window.sessionStorage.setItem(connectedAddressKey, "0x123");
 
     expect(selectedStarknetProvider()).toBe(wallet);
     expect(connectedStarknetAddress()).toBeNull();
     await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBeNull();
   });
 
+  it("rejects malformed wallet account addresses", async () => {
+    const wallet = provider("not-a-felt");
+
+    await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBeNull();
+    expect(connectedStarknetAddress()).toBeNull();
+  });
+
+  it("times out stalled interactive wallet requests", async () => {
+    vi.useFakeTimers();
+    const wallet = {
+      id: "ready",
+      name: "Ready X",
+      request: vi.fn(() => new Promise(() => undefined)),
+    };
+
+    const attempt = expect(
+      connectStarknetProvider(wallet as never, wallet.id),
+    ).rejects.toThrow(
+      "Starknet wallet request timed out. Unlock your wallet and retry.",
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    await attempt;
+    vi.useRealTimers();
+  });
+
+  it("preserves provider request context for injected wallets", async () => {
+    const wallet = {
+      id: "ready",
+      name: "Ready X",
+      account: { address: "0xabc" },
+      request(this: { account?: { address?: string } }, rawRequest: { type?: string }) {
+        if (rawRequest.type === "wallet_requestAccounts") {
+          return Promise.resolve([{ address: this.account?.address }]);
+        }
+        return Promise.resolve(null);
+      },
+    };
+    const requestSpy = vi.spyOn(wallet, "request");
+
+    await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBe("0xabc");
+
+    expect(requestSpy).toHaveBeenCalledWith({
+      type: "wallet_requestAccounts",
+      params: { silent_mode: false },
+    });
+  });
+
+  it("does not persist the runtime selected-provider sentinel as a wallet id", async () => {
+    const wallet = provider("0xabc");
+    wallet.id = "ready";
+    wallet.name = "Ready X";
+
+    await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBe("0xabc");
+    expect(window.sessionStorage.getItem(selectedWalletKey)).toBe("ready");
+
+    await expect(connectStarknetProvider(wallet as never, "selected")).resolves.toBe("0xabc");
+    expect(window.sessionStorage.getItem(selectedWalletKey)).toBe("ready");
+  });
+
   it("restores an already-authorized wallet session without opening a connect prompt", async () => {
     const request = vi.fn(async (rawRequest: { type?: string; params?: unknown }) => {
       const params = rawRequest.params as { silent_mode?: boolean } | undefined;
       if (rawRequest.type === "wallet_requestAccounts" && params?.silent_mode === true) {
-        return [{ address: "0xrestored" }];
+        return [{ address: "0x456" }];
       }
       throw new Error("interactive prompt should not be used");
     });
@@ -126,9 +187,9 @@ describe("browser wallet selection", () => {
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = wallet;
     window.sessionStorage.setItem(selectedWalletKey, wallet.id);
 
-    await expect(restoreConnectedStarknetWallet()).resolves.toBe("0xrestored");
+    await expect(restoreConnectedStarknetWallet()).resolves.toBe("0x456");
 
-    expect(connectedStarknetAddress()).toBe("0xrestored");
+    expect(connectedStarknetAddress()).toBe("0x456");
     expect(request).toHaveBeenCalledWith({
       type: "wallet_requestAccounts",
       params: { silent_mode: true },
@@ -187,7 +248,7 @@ describe("browser wallet selection", () => {
     expect(wallets[0]?.id).toBe("xverse");
   });
 
-  it("discovers Ready X from nested wallet registries returned by async discovery fallback", async () => {
+  it("discovers Ready X from nested wallet registries returned by async discovery", async () => {
     const readyProvider = {
       id: "wallet-provider",
       name: "Starknet wallet",
@@ -223,10 +284,10 @@ describe("browser wallet selection", () => {
     expect(wallets[0]?.id).toBe("ready");
   });
 
-  it("does not show unsupported legacy wallets in the Zylith Starknet wallet list", () => {
+  it("does not show unsupported wallets in the Zylith Starknet wallet list", () => {
     const unsupported = {
-      id: "legacy-extension",
-      name: "Legacy Starknet Wallet",
+      id: "unsupported-extension",
+      name: "Unsupported Starknet Wallet",
       request: vi.fn(async () => null),
     };
     const ready = {
@@ -235,7 +296,7 @@ describe("browser wallet selection", () => {
       request: vi.fn(async () => null),
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
-      legacy: { provider: unsupported },
+      unsupported: { provider: unsupported },
       ready: { provider: ready },
     };
 
@@ -263,5 +324,28 @@ describe("browser wallet selection", () => {
     const wallets = discoverStarknetWallets();
 
     expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X"]);
+  });
+
+  it("does not discover enable-only wallet injections", () => {
+    const enableOnlyReady = {
+      id: "ready",
+      name: "Ready X",
+      enable: vi.fn(async () => ["0xabc"]),
+    };
+    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = enableOnlyReady;
+
+    expect(discoverStarknetWallets()).toEqual([]);
+  });
+
+  it("notifies runtime subscribers without using browser events", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeWalletRuntime(listener);
+
+    setWalletRuntime({ isReady: () => true } as never);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    setWalletRuntime(null);
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });

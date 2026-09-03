@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { fromAtomicStr } from "../domain/assets";
+import { fromAtomicStr, safeFromAtomicStr } from "../domain/assets";
 import type { PairConfig } from "../components/OrderTicket";
 import type { PublicSettlementTranscript } from "../domain/auctionEpoch";
 import type { LocalOrder } from "../domain/orderLifecycle";
@@ -12,6 +12,7 @@ import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/
 import {
   activeSettlementOutputs,
   pendingDepositTotals,
+  safeAtomicAmount,
   settlementBasisMs,
   settlementReadyAtMs,
   sumByAsset,
@@ -21,7 +22,7 @@ import { noteConsolidationPlans, type NoteConsolidationPlan } from "../domain/no
 import { useNow } from "../hooks/useNow";
 
 function fmtAddr(value?: string): string {
-  if (!value) return "—";
+  if (!value) return "-";
   if (value.length < 12) return value;
   return `${value.slice(0, 8)}…${value.slice(-5)}`;
 }
@@ -50,7 +51,8 @@ function noteState(
 }
 
 function amountOrDash(amount: string | bigint, asset: string) {
-  return BigInt(amount) > 0n ? fromAtomicStr(amount.toString(), asset) : "—";
+  const atomic = safeAtomicAmount(amount);
+  return atomic > 0n ? safeFromAtomicStr(atomic, asset) : "-";
 }
 
 type DepositPipelineRow = PendingDeposit & {
@@ -73,7 +75,7 @@ function aggregateDepositRows(deposits: PendingDeposit[]): DepositPipelineRow[] 
       groups.set(key, { ...deposit, count: 1, rowKey: key });
       continue;
     }
-    existing.amount = (BigInt(existing.amount) + BigInt(deposit.amount)).toString();
+    existing.amount = (safeAtomicAmount(existing.amount) + safeAtomicAmount(deposit.amount)).toString();
     existing.count += 1;
     existing.requested_at_unix_ms = Math.min(
       existing.requested_at_unix_ms ?? Number.MAX_SAFE_INTEGER,
@@ -190,8 +192,8 @@ export function AssetsScreen({
         </div>
         <div className="table-zone">
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Sign in to view assets.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Connect wallet to view assets.</div>
           </div>
         </div>
       </div>
@@ -228,19 +230,21 @@ export function AssetsScreen({
               const balance = balances.find(entry => entry.asset === asset);
               const available = balance?.available ?? "0";
               const locked = balance?.locked ?? "0";
+              const availableAtomic = safeAtomicAmount(available);
+              const lockedAtomic = safeAtomicAmount(locked);
               const activeOrderAmount = activeOrderTotals.get(asset) ?? 0n;
               const pendingDeposit = depositTotals.get(asset) ?? 0n;
               const failedDeposit = failedDepositTotals.get(asset) ?? 0n;
               return (
                 <tr key={asset}>
                   <td className="ref">{asset}</td>
-                  <td className={`num ${BigInt(available) === 0n ? "is-empty" : ""}`}>
+                  <td className={`num ${availableAtomic === 0n ? "is-empty" : ""}`}>
                     {amountOrDash(available, asset)}
                   </td>
                   <td className={`num ${activeOrderAmount === 0n ? "is-empty" : ""}`}>
                     {amountOrDash(activeOrderAmount, asset)}
                   </td>
-                  <td className={`num ${BigInt(locked) === 0n ? "is-empty" : ""}`}>
+                  <td className={`num ${lockedAtomic === 0n ? "is-empty" : ""}`}>
                     {amountOrDash(locked, asset)}
                   </td>
                   <td className={`num ${pendingDeposit === 0n ? "is-empty" : ""}`}>
@@ -283,7 +287,7 @@ export function AssetsScreen({
                     </span>
                   </td>
                   <td>{deposit.asset}</td>
-                  <td className="num">{fromAtomicStr(deposit.amount, deposit.asset)}</td>
+                  <td className="num">{safeFromAtomicStr(deposit.amount, deposit.asset)}</td>
                   <td className="ref">{fmtAddr(deposit.transaction_hash ?? deposit.request_id ?? deposit.note_commitment)}</td>
                   <td>{depositAvailabilityText(deposit)}</td>
                   <td />
@@ -316,7 +320,7 @@ export function AssetsScreen({
                       </span>
                     </td>
                     <td>{note.asset}</td>
-                    <td className="num">{fromAtomicStr(note.amount, note.asset)}</td>
+                    <td className="num">{safeFromAtomicStr(note.amount, note.asset)}</td>
                     <td className="ref">{note.batch_id ?? fmtAddr(note.note_commitment)}</td>
                     <td>{state.delay}</td>
                     <td>
@@ -352,7 +356,7 @@ export function AssetsScreen({
             <span>{consolidationPlans.length} merge {consolidationPlans.length === 1 ? "plan" : "plans"}</span>
           </div>
           <p className="asset-disclosure">
-            Hosted consolidation sends selected note preimages to the private service to build a
+            Note consolidation sends selected note preimages to the private service to build a
             maintenance proof. Use it only when you accept that service-side linkage.
           </p>
 

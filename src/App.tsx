@@ -12,13 +12,10 @@ import {
   type LocalOrder,
   type LocalOrderStatus,
   type PrivateStrategySummary,
-  isMakerLiquidityOrder,
-  loadOrders,
+  normalizeLocalOrder,
   ordersChanged,
   reconcileOrderLifecycle,
-  deleteOrders,
 } from "./domain/orderLifecycle";
-import { retainedLocalNoteLockRefs } from "./domain/localNoteLocks";
 import {
   type PendingDeposit,
   type WalletBalance,
@@ -49,6 +46,7 @@ import {
   type BatchSummary,
   type DeploymentConfig,
   type PublicSettlementTranscript,
+  apiSubmittablePairBatch,
   lastClearingByPair,
   useBatches,
   useCoordinatorStatus,
@@ -56,52 +54,34 @@ import {
   usePublicProofJobStatuses,
   usePublicSettlementTranscripts,
 } from "./domain/auctionEpoch";
+import { hasBatchSubmissionSafetyWindow } from "./domain/batchSubmission";
 import { PairHeader, PairList, ReportsStrip } from "./components/MarketPanels";
 import { RightColumn } from "./components/RightColumn";
-import {
-  liquidityPath,
-  liquidityTabFromPath,
-  takerPath,
-  takerTabFromPath,
-  type AppTab,
-  type LiquidityTab,
-  type Workspace,
-} from "./domain/appRoutes";
+import { takerPath, takerTabFromPath, type AppTab } from "./domain/appRoutes";
 import {
   TopNav,
 } from "./components/TopNav";
 import {
   DepositSlide,
-  RecoverySlide,
   WalletSlide,
   WithdrawSlide,
 } from "./components/WalletSlides";
 import { AssetsScreen } from "./screens/AssetsScreen";
 import { OrdersScreen } from "./screens/OrdersScreen";
-import {
-  loadUserPreferences,
-  saveUserPreferences,
-  type UserPreferences,
-  type WithdrawalRoutePreference,
-} from "./domain/userPreferences";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import { sessionGet, sessionSet } from "./domain/safeSessionStorage";
 import {
   normalizeFeltForComparison,
   privateReportOrderSyncKey,
 } from "./domain/privateReportSync";
-import {
-  buildDemoOrdersFixture,
-  demoOrdersFixtureEnabled,
-} from "./domain/demoOrdersFixture";
+import { subscribePrivateSettlementReports } from "./domain/privateSettlementReportEvents";
 import { claimableOutputs } from "./domain/noteLifecycle";
 import { useWalletState } from "./hooks/useWalletState";
-import { OFFLINE_RENEWAL_RELAY_RESULTS_EVENT } from "./offlineRenewalOperator";
 import {
-  deleteManagedRenewalPackage,
-  fetchManagedRenewalPackageResults,
-  submitManagedRenewalPackage,
-} from "./domain/managedRenewalRelay";
+  deleteZylithRenewalPackage,
+  fetchZylithRenewalPackageResults,
+  submitZylithRenewalPackage,
+} from "./domain/zylithRenewalRelay";
 import {
   deleteSelfHostedRenewalPackage,
   fetchSelfHostedRenewalPackageResults,
@@ -116,11 +96,6 @@ const ReportsScreen = lazy(() =>
     default: module.ReportsScreen,
   }))
 );
-const LiquidityWorkspace = lazy(() =>
-  import("./screens/LiquidityScreens").then((module) => ({
-    default: module.LiquidityWorkspace,
-  }))
-);
 
 function genRef(): string {
   return `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -132,11 +107,9 @@ function ceilDivBigInt(numerator: bigint, denominator: bigint): bigint {
 
 function wireMode(
   shape: TicketShape,
-  resting: boolean,
   stratKind: StratKind
 ): LocalOrder["wireMode"] {
   if (shape === "limit") return "Limit";
-  if (shape === "curve") return resting ? "Resting" : "Maker Curve";
   return stratKind;
 }
 
@@ -151,15 +124,6 @@ function walletOrderOwnerKey(
 ): string | null {
   const accountId = walletRuntime()?.getPublicConfig?.()?.account_id ?? null;
   return accountId ? `${accountId}:${deploymentOrderScope(deployment)}` : null;
-}
-
-function hasAuthoritativeNoFillProof(
-  status:
-    | { state?: string; reuse_state?: string; matched_order_count?: number }
-    | undefined
-): boolean {
-  if (status?.state !== "confirmed-onchain") return false;
-  return status.reuse_state === "no_fill";
 }
 
 const ACTIVE_ORDER_STATUSES = new Set<LocalOrderStatus>([
@@ -192,9 +156,7 @@ const PRIVATE_REPORT_READY_STATUSES = new Set<LocalOrderStatus>([
   "filled",
   "partial",
 ]);
-const PRIVATE_SETTLEMENT_REPORTS_EVENT = "zylith-private-settlement-reports";
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
-const LAST_LIQUIDITY_ROUTE_KEY = "zylith.nav.last_liquidity_route";
 
 type ArrivalReferenceSnapshot = {
   price?: string;
@@ -206,15 +168,18 @@ type PrivateExecutionReportForApp = {
   batch_id: string;
   pair_id: string;
   order_commitment: string;
-  funding_note_commitment?: string;
   funding_note_commitments?: string[];
   filled_amount: string;
   unfilled_amount: string;
   execution_price?: string | null;
+  residual_note_commitment?: string | null;
+  residual_asset_id?: string | null;
+  residual_amount?: string;
 };
 
 type PrivateSettlementReportForApp = {
   batch_id: string;
+  settlement_id?: string | null;
   pair_id: string;
   batch_epoch: number;
   settled_at_unix_ms?: number;
@@ -241,6 +206,44 @@ function lastClearingReference(
   };
 }
 
+function displayBatchForPair(
+  current: BatchSummary | undefined,
+  candidate: BatchSummary,
+) {
+  if (!current) return candidate;
+  const currentOpen = current.status === "Open";
+  const candidateOpen = candidate.status === "Open";
+  if (currentOpen && candidateOpen) {
+    return candidate.epoch_id < current.epoch_id ? candidate : current;
+  }
+  if (candidateOpen !== currentOpen) return candidateOpen ? candidate : current;
+  return candidate.epoch_id > current.epoch_id ? candidate : current;
+}
+
+async function resolveTicketSubmissionBatch(
+  pair: PairConfig,
+  displayedBatch: BatchSummary | null | undefined,
+  batchWindowMs?: number,
+): Promise<BatchSummary> {
+  if (
+    displayedBatch?.status === "Open" &&
+    hasBatchSubmissionSafetyWindow(
+      displayedBatch.close_time_unix_ms,
+      Date.now(),
+      batchWindowMs,
+    )
+  ) {
+    return displayedBatch;
+  }
+  const [base, quote] = pair.pair_id.split("/");
+  if (!base || !quote) throw new Error(`Invalid pair ${pair.pair_id}`);
+  const submittable = await apiSubmittablePairBatch(base, quote);
+  if (submittable.status !== "Open") {
+    throw new Error("This pair is not accepting orders right now.");
+  }
+  return submittable;
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -248,7 +251,6 @@ export default function App() {
   const coordinatorStatus = useCoordinatorStatus();
   const { batches, online } = useBatches();
   const recentSettlementTranscripts = usePublicSettlementTranscripts(batches);
-  const { runtimeStatus, walletReady, hasVault } = useWalletState();
 
   const pairs = useMemo(
     () =>
@@ -271,60 +273,27 @@ export default function App() {
     [allAssets, deployment]
   );
   const batchByPair = batches.reduce<Record<string, BatchSummary>>((acc, b) => {
-    const current = acc[b.pair_id];
-    if (!current || b.epoch_id > current.epoch_id) {
-      acc[b.pair_id] = b;
-    }
+    acc[b.pair_id] = displayBatchForPair(acc[b.pair_id], b);
     return acc;
   }, {});
   useEffect(() => {
     configureAssetDecimals(deployment);
   }, [deployment]);
 
-  // Workspace-aware URL routing
-  const initialWorkspace: Workspace = window.location.pathname.startsWith(
-    "/liquidity"
-  )
-    ? "liquidity"
-    : "taker";
-  const [workspace, setWorkspace] = useState<Workspace>(initialWorkspace);
   const [tab, setTab] = useState<AppTab>(() => {
     return takerTabFromPath(window.location.pathname);
   });
-  const [liquidityTab, setLiquidityTabState] = useState<LiquidityTab>(() =>
-    liquidityTabFromPath(window.location.pathname)
-  );
 
   const changeTab = useCallback((t: AppTab) => {
     const path = takerPath(t);
-    setWorkspace("taker");
     setTab(t);
     sessionSet(LAST_TAKER_ROUTE_KEY, path);
     window.history.pushState(null, "", path);
   }, []);
 
-  const changeLiquidityTab = useCallback((t: LiquidityTab) => {
-    const path = liquidityPath(t);
-    setWorkspace("liquidity");
-    setLiquidityTabState(t);
-    sessionSet(LAST_LIQUIDITY_ROUTE_KEY, path);
-    window.history.pushState(null, "", path);
-  }, []);
-
   const navigatePath = useCallback((path: string, replace = false) => {
-    if (path.startsWith("/liquidity")) {
-      const nextLiquidityTab = liquidityTabFromPath(path);
-      const normalizedPath = liquidityPath(nextLiquidityTab);
-      setWorkspace("liquidity");
-      setLiquidityTabState(nextLiquidityTab);
-      sessionSet(LAST_LIQUIDITY_ROUTE_KEY, normalizedPath);
-      if (replace) window.history.replaceState(null, "", normalizedPath);
-      else window.history.pushState(null, "", normalizedPath);
-      return;
-    }
     const nextTab = takerTabFromPath(path);
     const normalizedPath = takerPath(nextTab);
-    setWorkspace("taker");
     setTab(nextTab);
     sessionSet(LAST_TAKER_ROUTE_KEY, normalizedPath);
     if (replace) window.history.replaceState(null, "", normalizedPath);
@@ -334,27 +303,12 @@ export default function App() {
   useEffect(() => {
     if (window.location.pathname === "/" || window.location.pathname === "") {
       window.history.replaceState(null, "", "/trade");
-    } else if (window.location.pathname.startsWith("/liquidity")) {
-      const normalizedPath = liquidityPath(
-        liquidityTabFromPath(window.location.pathname)
-      );
-      if (window.location.pathname !== normalizedPath) {
-        window.history.replaceState(null, "", normalizedPath);
-      }
     }
     const onPop = () => {
       const p = window.location.pathname;
-      if (p.startsWith("/liquidity")) {
-        const nextLiquidityTab = liquidityTabFromPath(p);
-        setWorkspace("liquidity");
-        setLiquidityTabState(nextLiquidityTab);
-        sessionSet(LAST_LIQUIDITY_ROUTE_KEY, liquidityPath(nextLiquidityTab));
-      } else {
-        const nextTab = takerTabFromPath(p);
-        setWorkspace("taker");
-        setTab(nextTab);
-        sessionSet(LAST_TAKER_ROUTE_KEY, takerPath(nextTab));
-      }
+      const nextTab = takerTabFromPath(p);
+      setTab(nextTab);
+      sessionSet(LAST_TAKER_ROUTE_KEY, takerPath(nextTab));
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -362,33 +316,21 @@ export default function App() {
 
   // Trade state
   const [activePairId, setActivePairId] = useState("STRK/USDC");
-  const [liquidityPairId, setLiquidityPairId] = useState("STRK/USDC");
   const activePair =
     pairs.find((p) => p.pair_id === activePairId) ?? pairs[0] ?? null;
   const activeBatch = activePair
     ? batchByPair[activePair.pair_id] ?? null
     : null;
 
-  const [userPreferences, setUserPreferences] = useState<UserPreferences>(() =>
-    loadUserPreferences()
-  );
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-
-  const updateWithdrawalRoute = useCallback(
-    (value: WithdrawalRoutePreference) => {
-      setUserPreferences((previous) => {
-        const next = { ...previous, withdrawalRoute: value };
-        saveUserPreferences(next);
-        return next;
-      });
-    },
-    []
+  const [externalCompletionBusy, setExternalCompletionBusy] = useState<string | null>(
+    null
   );
 
   // UI state
   const [openSlide, setOpenSlide] = useState<
-    "wallet" | "deposit" | "withdraw" | "recovery" | null
+    "wallet" | "deposit" | "withdraw" | null
   >(null);
   const [slideAsset, setSlideAsset] = useState("STRK");
   const [claimNoteCommitment, setClaimNoteCommitment] = useState<string | null>(
@@ -397,13 +339,28 @@ export default function App() {
   const [starknetAddress, setStarknetAddress] = useState<string | null>(() => {
     return connectedStarknetAddress();
   });
+  const { runtimeStatus, walletReady, hasVault } =
+    useWalletState(starknetAddress);
+
+  function reconcileConnectedStarknetAddress(
+    previous: string | null,
+    next: string | null
+  ) {
+    if (previous === next) return previous;
+    if (previous) walletRuntime()?.lock();
+    return next;
+  }
 
   useEffect(() => {
     let cancelled = false;
     const restore = () => {
       void restoreConnectedStarknetWallet()
         .then((address) => {
-          if (!cancelled && address) setStarknetAddress(address);
+          if (!cancelled) {
+            setStarknetAddress((previous) =>
+              reconcileConnectedStarknetAddress(previous, address)
+            );
+          }
         })
         .catch(() => undefined);
     };
@@ -421,37 +378,11 @@ export default function App() {
     const interval = setInterval(() => {
       const next = connectedStarknetAddress();
       setStarknetAddress((previous) => {
-        if (!next) return previous;
-        return previous === next ? previous : next;
+        return reconcileConnectedStarknetAddress(previous, next);
       });
     }, 1500);
     return () => clearInterval(interval);
   }, []);
-
-  useEffect(() => {
-    if (walletReady || !hasVault) return;
-    let cancelled = false;
-    const requestUnlock = () => {
-      void walletRuntime()
-        ?.requestSessionUnlock?.()
-        .then((unlocked) => {
-          if (!cancelled && unlocked) {
-            window.dispatchEvent(
-              new CustomEvent("zylith-wallet-runtime-ready")
-            );
-          }
-        })
-        .catch(() => undefined);
-    };
-    requestUnlock();
-    const interval = window.setInterval(requestUnlock, 2500);
-    window.addEventListener("focus", requestUnlock);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("focus", requestUnlock);
-    };
-  }, [walletReady, hasVault]);
 
   // Orders
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() =>
@@ -463,7 +394,7 @@ export default function App() {
   useEffect(() => {
     ordersRef.current = orders;
   }, [orders]);
-  const orderBatchIds = useMemo(
+  const proofTrackedBatchIds = useMemo(
     () =>
       Array.from(
         new Set(
@@ -477,7 +408,7 @@ export default function App() {
   );
   const orderSettlementTranscripts = usePublicSettlementTranscripts(
     [],
-    orderBatchIds
+    proofTrackedBatchIds
   );
   const publicSettlementTranscripts = useMemo(
     () => ({ ...recentSettlementTranscripts, ...orderSettlementTranscripts }),
@@ -489,20 +420,11 @@ export default function App() {
     () => ({ ...privateSettlementTranscripts, ...publicSettlementTranscripts }),
     [privateSettlementTranscripts, publicSettlementTranscripts]
   );
-  const lastClearingPrices = lastClearingByPair(settlementTranscripts);
-  const activeProofBatchIds = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          orders
-            .filter((order) => PROOF_TRACKED_ORDER_STATUSES.has(order.status))
-            .map((order) => order.batchId)
-            .filter(Boolean)
-        )
-      ),
-    [orders]
+  const lastClearingPrices = useMemo(
+    () => lastClearingByPair(settlementTranscripts),
+    [settlementTranscripts]
   );
-  const proofStatuses = usePublicProofJobStatuses(activeProofBatchIds);
+  const proofStatuses = usePublicProofJobStatuses(proofTrackedBatchIds);
   const privateReportRequestsInFlight = useRef<Set<string>>(new Set());
   const privateReportSyncedOrders = useRef<Set<string>>(new Set());
   const privateReportLastAttemptAt = useRef<Map<string, number>>(new Map());
@@ -547,6 +469,7 @@ export default function App() {
             batch_epoch: report.batch_epoch,
             clearing_price: report.clearing_price,
             price_base_scale: report.price_base_scale,
+            multi_pair_commitment: "0x0",
             settled_at_unix_ms: report.settled_at_unix_ms,
             loaded_at_unix_ms: Date.now(),
           };
@@ -612,9 +535,8 @@ export default function App() {
         );
         const reportFundingCommitments = [
           ...(matched.execution.funding_note_commitments ?? []),
-          matched.execution.funding_note_commitment,
         ].filter((value): value is string => Boolean(value));
-        const fundingFallback = {
+        const settlementFunding = {
           asset: order.fundingAsset,
           amount: order.fundingAmount,
           batchId: order.batchId,
@@ -623,6 +545,49 @@ export default function App() {
               ? reportFundingCommitments
               : order.fundingNoteCommitments,
         };
+        const residualAmount = BigInt(
+          matched.execution.residual_amount || "0"
+        );
+        const residualNoteCommitment = normalizeFeltForComparison(
+          matched.execution.residual_note_commitment
+        );
+        const previousExternal = order.externalCompletion;
+        const sameResidual =
+          Boolean(previousExternal) &&
+          previousExternal?.residualNoteCommitment === residualNoteCommitment;
+        const externalCompletion =
+          order.executionPreference === "PrivateThenExternal" &&
+          residualAmount > 0n &&
+          residualNoteCommitment
+            ? {
+                status: sameResidual
+                  ? previousExternal!.status
+                  : ("available" as const),
+                residualNoteCommitment,
+                residualAssetId:
+                  matched.execution.residual_asset_id ||
+                  previousExternal?.residualAssetId ||
+                  order.fundingAsset ||
+                  "",
+                residualAmount: residualAmount.toString(),
+                conversionTransactionHash: sameResidual
+                  ? previousExternal?.conversionTransactionHash
+                  : undefined,
+                inputOpenNoteId: sameResidual
+                  ? previousExternal?.inputOpenNoteId
+                  : undefined,
+                transactionHash: sameResidual
+                  ? previousExternal?.transactionHash
+                  : undefined,
+                outputOpenNoteId: sameResidual
+                  ? previousExternal?.outputOpenNoteId
+                  : undefined,
+                quoteCommitment: sameResidual
+                  ? previousExternal?.quoteCommitment
+                  : undefined,
+                lastError: sameResidual ? previousExternal?.lastError : undefined,
+              }
+            : undefined;
         if (filledAtomic <= 0n) {
           if (syncKey) successfulOrderKeys.add(syncKey);
           if (walletForLockUpdates?.settlePrivateOrderLock) {
@@ -631,14 +596,16 @@ export default function App() {
                 .settlePrivateOrderLock(
                   order.orderCommitment,
                   "released",
-                  fundingFallback
+                  settlementFunding
                 )
                 .catch(() => false)
             );
           }
           if (
             order.status === "no_fill" &&
-            order.clearingPrice === clearingPrice
+            order.clearingPrice === clearingPrice &&
+            JSON.stringify(order.externalCompletion ?? null) ===
+              JSON.stringify(externalCompletion ?? null)
           )
             return order;
           changed = true;
@@ -646,6 +613,7 @@ export default function App() {
             ...order,
             status: "no_fill" as LocalOrderStatus,
             clearingPrice,
+            externalCompletion,
           };
         }
         const nextStatus: LocalOrderStatus =
@@ -661,7 +629,7 @@ export default function App() {
               .settlePrivateOrderLock(
                 order.orderCommitment,
                 "spent",
-                fundingFallback
+                settlementFunding
               )
               .catch(() => false)
           );
@@ -669,7 +637,9 @@ export default function App() {
         if (
           order.status === nextStatus &&
           order.clearingPrice === clearingPrice &&
-          order.filledAmount === filledAmount
+          order.filledAmount === filledAmount &&
+          JSON.stringify(order.externalCompletion ?? null) ===
+            JSON.stringify(externalCompletion ?? null)
         ) {
           return order;
         }
@@ -679,6 +649,7 @@ export default function App() {
           status: nextStatus,
           clearingPrice,
           filledAmount,
+          externalCompletion,
         };
       });
       successfulOrderKeys.forEach((syncKey) =>
@@ -708,26 +679,14 @@ export default function App() {
     async function loadWalletOrders() {
       const activeDeploymentScope = deploymentOrderScope(deployment);
       const w = walletRuntime();
-      const encryptedOrders =
-        w?.isReady() && w.loadLocalOrders
-          ? await w.loadLocalOrders().catch(() => [] as LocalOrder[])
-          : [];
-      const legacyOrders = loadOrders(nextOwnerKey).filter(
-        (order) => order.deployment_scope === activeDeploymentScope
-      );
       const loadedOrders =
-        encryptedOrders.length > 0 ? encryptedOrders : legacyOrders;
-      if (
-        encryptedOrders.length === 0 &&
-        legacyOrders.length > 0 &&
-        w?.isReady() &&
-        w.saveLocalOrders
-      ) {
-        await w.saveLocalOrders(loadedOrders).catch(() => undefined);
-        deleteOrders(nextOwnerKey);
-      } else if (encryptedOrders.length > 0 && legacyOrders.length > 0) {
-        deleteOrders(nextOwnerKey);
-      }
+        w?.isReady() && w.loadLocalOrders
+          ? (await w.loadLocalOrders().catch(() => [] as LocalOrder[]))
+              .map(normalizeLocalOrder)
+              .filter(
+                (order) => order.deployment_scope === activeDeploymentScope
+              )
+          : [];
       if (cancelled) return;
       ordersRef.current = loadedOrders;
       setOrders(loadedOrders);
@@ -760,7 +719,6 @@ export default function App() {
           string,
           {
             batch_id: string;
-            order_commitments: string[];
             orders: Array<{
               order_commitment: string;
               cancellation_secret: string;
@@ -796,24 +754,17 @@ export default function App() {
           Boolean(settlementTranscripts[order.batchId]) ||
           PRIVATE_REPORT_READY_STATUSES.has(order.status);
         if (!hasSettlementSignal) return acc;
-        if (
-          proofStatus?.state === "confirmed-onchain" &&
-          proofStatus.reuse_state === "no_fill"
-        )
-          return acc;
         const existing = acc[order.batchId] ?? {
           batch_id: order.batchId,
-          order_commitments: [],
           orders: [],
         };
         if (
-          !existing.order_commitments.some(
-            (commitment) =>
-              normalizeFeltForComparison(commitment) ===
+          !existing.orders.some(
+            (entry) =>
+              normalizeFeltForComparison(entry.order_commitment) ===
               normalizeFeltForComparison(order.orderCommitment)
           )
         ) {
-          existing.order_commitments.push(order.orderCommitment);
           existing.orders.push({
             order_commitment: order.orderCommitment,
             cancellation_secret: order.cancellationSecret,
@@ -826,8 +777,11 @@ export default function App() {
     if (requests.length === 0) return;
     requests.forEach((request) => {
       privateReportRequestsInFlight.current.add(request.batch_id);
-      request.order_commitments.forEach((commitment) => {
-        const syncKey = privateReportOrderSyncKey(request.batch_id, commitment);
+      request.orders.forEach((order) => {
+        const syncKey = privateReportOrderSyncKey(
+          request.batch_id,
+          order.order_commitment
+        );
         if (syncKey)
           privateReportLastAttemptAt.current.set(syncKey, reportAttemptNow);
       });
@@ -860,20 +814,9 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    const onPrivateSettlementReports = (event: Event) => {
-      const count =
-        (event as CustomEvent<{ count?: number }>).detail?.count ?? 0;
+    return subscribePrivateSettlementReports((count) => {
       if (count > 0) setPrivateReportRetryTick((value) => value + 1);
-    };
-    window.addEventListener(
-      PRIVATE_SETTLEMENT_REPORTS_EVENT,
-      onPrivateSettlementReports
-    );
-    return () =>
-      window.removeEventListener(
-        PRIVATE_SETTLEMENT_REPORTS_EVENT,
-        onPrivateSettlementReports
-      );
+    });
   }, []);
 
   useEffect(() => {
@@ -967,15 +910,12 @@ export default function App() {
     ? wallet?.getWithdrawableNotes() ?? []
     : [];
   const noteConsolidationAvailable = walletReady
-    ? wallet?.hostedNoteConsolidationAvailable?.() ?? false
+    ? wallet?.noteConsolidationAvailable?.() ?? false
     : false;
   const strategies: PrivateStrategySummary[] = walletReady
     ? wallet?.getPrivateStrategies?.() ?? []
     : [];
-  const claimDelaySeconds =
-    deployment?.proof?.output_claim_delay_seconds ??
-    deployment?.proof_config?.output_claim_delay_seconds ??
-    0;
+  const claimDelaySeconds = deployment?.proof?.output_claim_delay_seconds ?? 0;
 
   // Status updates from batch state changes
   useEffect(() => {
@@ -989,30 +929,12 @@ export default function App() {
       pairs,
       formatClearingPrice: (price, pair) =>
         formatClearingPrice(price, pair as PairConfig),
-      noFillFallbackEpochs: 10,
+      noFillDisplayAfterEpochs: 10,
       toAtomicStr,
       fromAtomicStr,
       assetScale,
     });
     if (ordersChanged(orders, updated)) {
-      const w = walletRuntime();
-      for (const next of updated) {
-        const previous = orders.find((order) => order.ordRef === next.ordRef);
-        if (
-          !previous ||
-          previous.status === next.status ||
-          !next.orderCommitment
-        )
-          continue;
-        if (
-          next.status === "no_fill" &&
-          hasAuthoritativeNoFillProof(proofStatuses[next.batchId])
-        ) {
-          void w
-            ?.settlePrivateOrderLock?.(next.orderCommitment, "released")
-            .finally(() => setBalanceTick((v) => v + 1));
-        }
-      }
       saveAndSet(updated);
     }
   }, [
@@ -1027,82 +949,6 @@ export default function App() {
     walletReady,
     withdrawableNotes,
   ]);
-
-  useEffect(() => {
-    if (!walletReady || !ordersHydratedForOwner) return;
-    const w = walletRuntime();
-    if (!w?.isReady()) return;
-    const terminalOrders = orders.filter(
-      (order) =>
-        order.orderCommitment &&
-        order.status === "no_fill" &&
-        hasAuthoritativeNoFillProof(proofStatuses[order.batchId])
-    );
-    if (terminalOrders.length === 0) return;
-
-    let cancelled = false;
-    async function reconcileLocks() {
-      let changed = false;
-      for (const order of terminalOrders) {
-        changed =
-          (await w!
-            .settlePrivateOrderLock(order.orderCommitment, "released", {
-              asset: order.fundingAsset,
-              amount: order.fundingAmount,
-              batchId: order.batchId,
-              noteCommitments: order.fundingNoteCommitments,
-            })
-            .catch(() => false)) || changed;
-      }
-      if (!cancelled && changed) setBalanceTick((v) => v + 1);
-    }
-    void reconcileLocks();
-    return () => {
-      cancelled = true;
-    };
-  }, [balanceTick, orders, ordersHydratedForOwner, proofStatuses, walletReady]);
-
-  useEffect(() => {
-    if (!walletReady || !ordersHydratedForOwner) return;
-    const onRelayResults = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          package_id?: string;
-          results?: Array<{
-            slot_id?: string;
-            order_commitment?: string;
-            batch_id?: string;
-            epoch_id?: number;
-            status?: string;
-            accepted?: {
-              order_commitment?: string;
-              batch_id?: string;
-              accepted_at_unix_ms?: number;
-            };
-          }>;
-        }>
-      ).detail;
-      if (!detail?.package_id || !Array.isArray(detail.results)) return;
-      const w = walletRuntime();
-      void w
-        ?.recordOfflineRenewalRelayResults?.(detail.package_id, detail.results)
-        .then((changed: boolean | undefined) => {
-          if (changed) setBalanceTick((value) => value + 1);
-        })
-        .catch((error: unknown) => {
-          setSubmitError(userFacingErrorMessage(error));
-        });
-    };
-    window.addEventListener(
-      OFFLINE_RENEWAL_RELAY_RESULTS_EVENT,
-      onRelayResults
-    );
-    return () =>
-      window.removeEventListener(
-        OFFLINE_RENEWAL_RELAY_RESULTS_EVENT,
-        onRelayResults
-      );
-  }, [ordersHydratedForOwner, walletReady]);
 
   useEffect(() => {
     if (!walletReady || !ordersHydratedForOwner) return;
@@ -1127,13 +973,13 @@ export default function App() {
     if (renewalPackages.length === 0) return;
     let cancelled = false;
     let timer: number | null = null;
-    async function syncManagedRelayResults() {
+    async function syncZylithRenewalRelayResults() {
       const w = walletRuntime();
       if (!w?.isReady()) return;
       let changed = false;
       for (const renewalPackage of renewalPackages) {
         const response = await (renewalPackage.relay_mode === "ZylithRelay"
-          ? fetchManagedRenewalPackageResults(renewalPackage)
+          ? fetchZylithRenewalPackageResults(renewalPackage)
           : fetchSelfHostedRenewalPackageResults(
               readSelfHostedRelayUrl(renewalPackage.package_id),
               renewalPackage
@@ -1160,7 +1006,7 @@ export default function App() {
       const baseDelay = initial ? 2_000 : 18_000;
       const jitter = Math.floor(Math.random() * 9_000);
       timer = window.setTimeout(() => {
-        void syncManagedRelayResults().finally(() =>
+        void syncZylithRenewalRelayResults().finally(() =>
           scheduleNextRelayPoll(false)
         );
       }, baseDelay + jitter);
@@ -1172,55 +1018,19 @@ export default function App() {
     };
   }, [walletReady, ordersHydratedForOwner, strategies]);
 
-  const [demoOrdersMode] = useState(() => import.meta.env.DEV && demoOrdersFixtureEnabled());
-  const demoOrdersFixture = useMemo(
-    () => (import.meta.env.DEV && demoOrdersMode ? buildDemoOrdersFixture() : null),
-    [demoOrdersMode]
-  );
-  const renderOrders = demoOrdersFixture?.orders ?? orders;
-  const renderStrategies = demoOrdersFixture?.strategies ?? strategies;
-  const renderMakerOrders = useMemo(
-    () => renderOrders.filter(isMakerLiquidityOrder),
-    [renderOrders]
-  );
-  const renderTakerOrders = useMemo(
-    () => renderOrders.filter((order) => !isMakerLiquidityOrder(order)),
-    [renderOrders]
-  );
-  const renderBatches = useMemo(() => {
-    if (!demoOrdersFixture) return batches;
-    const byId = new Map<string, BatchSummary>();
-    for (const candidate of [...demoOrdersFixture.batches, ...batches]) {
-      byId.set(candidate.batch_id, candidate);
-    }
-    return Array.from(byId.values()).sort(
-      (a, b) => b.epoch_id - a.epoch_id
-    );
-  }, [batches, demoOrdersFixture]);
-  const renderSettlementTranscripts = useMemo(
-    () =>
-      demoOrdersFixture
-        ? {
-            ...settlementTranscripts,
-            ...demoOrdersFixture.settlementTranscripts,
-          }
-        : settlementTranscripts,
-    [demoOrdersFixture, settlementTranscripts]
-  );
-  const renderBalances = demoOrdersFixture?.balances ?? balances;
-  const renderPendingDeposits =
-    demoOrdersFixture?.pendingDeposits ?? pendingDeposits;
-  const renderWithdrawableNotes =
-    demoOrdersFixture?.withdrawableNotes ?? withdrawableNotes;
-  const renderWalletReady = walletReady || Boolean(demoOrdersFixture);
-  const renderOnline = demoOrdersFixture ? true : online;
+  const renderOrders = orders;
+  const renderTakerOrders = renderOrders;
+  const renderBatches = batches;
+  const renderSettlementTranscripts = settlementTranscripts;
+  const renderBalances = balances;
+  const renderPendingDeposits = pendingDeposits;
+  const renderWithdrawableNotes = withdrawableNotes;
+  const renderWalletReady = walletReady;
+  const renderOnline = online;
   const renderBatchByPair = useMemo(
     () =>
       renderBatches.reduce<Record<string, BatchSummary>>((acc, b) => {
-        const current = acc[b.pair_id];
-        if (!current || b.epoch_id > current.epoch_id) {
-          acc[b.pair_id] = b;
-        }
+        acc[b.pair_id] = displayBatchForPair(acc[b.pair_id], b);
         return acc;
       }, {}),
     [renderBatches]
@@ -1240,26 +1050,10 @@ export default function App() {
         Date.now()
       ).length
     : 0;
-  const activeTakerOrders = renderTakerOrders.filter((o) =>
-    ACTIVE_ORDER_STATUSES.has(o.status)
+  const activeTakerOrders = useMemo(
+    () => renderTakerOrders.filter((o) => ACTIVE_ORDER_STATUSES.has(o.status)),
+    [renderTakerOrders]
   );
-
-  useEffect(() => {
-    if (!walletReady || !ordersHydratedForOwner) return;
-    const w = walletRuntime();
-    if (!w?.isReady() || !w.releaseUnreferencedNoteLocks) return;
-    const retainedLockRefs = retainedLocalNoteLockRefs(orders, strategies);
-    let cancelled = false;
-    void w
-      .releaseUnreferencedNoteLocks(retainedLockRefs)
-      .then((changed) => {
-        if (!cancelled && changed) setBalanceTick((value) => value + 1);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [orders, strategies, walletReady, ordersHydratedForOwner]);
 
   useEffect(() => {
     if (
@@ -1299,19 +1093,6 @@ export default function App() {
               BigInt(priceBaseScale)
             ).toString()
           : strategy.child_amount;
-      const makerCurvePoints = strategy.maker_curve_points?.map((point) => ({
-        price: formatClearingPrice(
-          {
-            batchId: strategy.id,
-            epochId: 0,
-            clearingPrice: point.price,
-            priceBaseScale,
-          },
-          pair
-        ),
-        baseAmount: fromAtomicStr(point.base_amount, pair.base_asset_id),
-      }));
-
       for (const child of strategy.submitted_children) {
         if (!child.order_commitment || child.submitted_at_unix_ms <= 0)
           continue;
@@ -1338,7 +1119,7 @@ export default function App() {
           epochId: child.epoch_id,
           pair: strategy.pair,
           side: strategy.side,
-          wireMode: strategy.mode === "Resting" ? "Resting" : strategy.mode,
+          wireMode: strategy.mode,
           amount: fromAtomicStr(strategy.child_amount, pair.base_asset_id),
           fundingAsset,
           fundingAmount: fromAtomicStr(fundingAmountAtomic, fundingAsset),
@@ -1357,12 +1138,7 @@ export default function App() {
           fillOrKill: Boolean(strategy.fill_or_kill),
           status: "in_batch",
           submittedAt: child.submitted_at_unix_ms,
-          makerCurvePoints,
           relayMode: strategy.offline_package?.relay_mode ?? "SelfRelay",
-          relayFeeBps:
-            strategy.offline_package?.relay_mode === "ZylithRelay"
-              ? pair.relay_fee_bps ?? 0
-              : 0,
         });
       }
     }
@@ -1385,45 +1161,10 @@ export default function App() {
     return activePair;
   }
 
-  function curveFieldsForIntent(intent: TicketSubmitIntent, pair: PairConfig) {
-    const atomicCurvePoints = intent.curvePoints
-      .filter((pt) => pt.price.trim() && pt.baseAmount.trim())
-      .map((pt) => ({
-        price: toPriceAtomicStr(pt.price, pair.quote_asset_id),
-        baseAmount: toAtomicStr(pt.baseAmount, pair.base_asset_id),
-      }));
-    const sortedCurvePoints = [...atomicCurvePoints].sort((a, b) =>
-      BigInt(a.price) < BigInt(b.price)
-        ? -1
-        : BigInt(a.price) > BigInt(b.price)
-        ? 1
-        : 0
-    );
-    const curveBaseTotal = sortedCurvePoints.reduce(
-      (total, pt) => total + BigInt(pt.baseAmount),
-      0n
-    );
-    const curveEnvelopePrice =
-      sortedCurvePoints.length > 0
-        ? intent.side === "Buy"
-          ? sortedCurvePoints[sortedCurvePoints.length - 1].price
-          : sortedCurvePoints[0].price
-        : "0";
-    const atomicMakerInventoryCap = intent.inventoryCap.trim()
-      ? toAtomicStr(intent.inventoryCap, pair.base_asset_id)
-      : undefined;
-    return {
-      atomicCurvePoints: sortedCurvePoints,
-      curveBaseTotal,
-      curveEnvelopePrice,
-      atomicMakerInventoryCap,
-    };
-  }
-
   async function handleSubmit(intent: TicketSubmitIntent): Promise<boolean> {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock Zylith wallet first.");
+      setSubmitError("Connect a Starknet wallet first.");
       return false;
     }
     const submitPair = pairForIntent(intent);
@@ -1432,45 +1173,37 @@ export default function App() {
       return false;
     }
     const provisionalBatch = batchByPair[submitPair.pair_id] ?? null;
-    if (!provisionalBatch) {
-      setSubmitError(
-        "This pair is not accepting orders right now. Please retry later."
-      );
-      return false;
-    }
-
     setSubmitting(true);
     setSubmitError(null);
     try {
-      if (intent.shape === "strategy" && !coordinatorStatus?.batch_window_ms) {
+      const retryPrivateOnly =
+        intent.shape === "limit" &&
+        intent.executionPreference === "PrivateOnly" &&
+        intent.keepTryingPrivate === true;
+      if (
+        (intent.shape === "strategy" || retryPrivateOnly) &&
+        !coordinatorStatus?.batch_window_ms
+      ) {
         setSubmitError("Auction timing is still loading. Please retry later.");
         return false;
       }
+      const submissionBatch = await resolveTicketSubmissionBatch(
+        submitPair,
+        provisionalBatch,
+        coordinatorStatus?.batch_window_ms,
+      );
 
-      const wm = wireMode(intent.shape, intent.resting, intent.stratKind);
-      const curveFields =
-        intent.shape === "curve"
-          ? curveFieldsForIntent(intent, submitPair)
-          : null;
-      const atomicCurvePoints = curveFields?.atomicCurvePoints;
-      if (intent.shape === "curve" && (atomicCurvePoints?.length ?? 0) < 3) {
-        setSubmitError("Maker curves require at least 3 filled bands.");
-        return false;
-      }
-      const curveBaseTotal = curveFields?.curveBaseTotal ?? 0n;
-      const atomicAmount =
-        intent.shape === "curve"
-          ? curveBaseTotal.toString()
-          : toAtomicStr(intent.amount, submitPair.base_asset_id);
+      const wm = retryPrivateOnly
+        ? "Repeat"
+        : wireMode(intent.shape, intent.stratKind);
+      const atomicAmount = toAtomicStr(intent.amount, submitPair.base_asset_id);
       const atomicPrice =
-        intent.shape === "curve"
-          ? curveFields?.curveEnvelopePrice ?? "0"
-          : toPriceAtomicStr(
-              intent.shape === "limit"
-                ? intent.limitPrice
-                : intent.priceLimit || "0",
-              submitPair.quote_asset_id
-            );
+        toPriceAtomicStr(
+          intent.shape === "limit"
+            ? intent.limitPrice
+            : intent.priceLimit || "0",
+          submitPair.quote_asset_id
+        );
       const atomicMinFill = toAtomicStr(
         intent.minFill || "0",
         submitPair.base_asset_id
@@ -1489,7 +1222,6 @@ export default function App() {
               BigInt(priceBaseScale)
             ).toString()
           : atomicAmount;
-      const atomicMakerInventoryCap = curveFields?.atomicMakerInventoryCap;
 
       const orderRelayMode = intent.relayMode ?? "SelfRelay";
       const draft = {
@@ -1500,34 +1232,45 @@ export default function App() {
         limitPrice: atomicPrice,
         minFill: atomicMinFill,
         fillOrKill: intent.fillOrKill,
-        batchId: provisionalBatch.batch_id,
+        batchId: submissionBatch.batch_id,
         batchWindowMs: coordinatorStatus?.batch_window_ms,
-        makerCurvePoints: atomicCurvePoints,
-        makerInventoryCap:
-          atomicMakerInventoryCap && BigInt(atomicMakerInventoryCap) > 0n
-            ? atomicMakerInventoryCap
-            : undefined,
         priceBaseScale,
         durationBatches:
-          (intent.shape === "strategy" ||
-            (intent.shape === "curve" && intent.resting)) &&
-          intent.durationHours &&
+          retryPrivateOnly &&
+          intent.retryHours &&
+          coordinatorStatus?.batch_window_ms
+            ? Math.ceil(
+                (Number(intent.retryHours) * 3_600_000) /
+                  coordinatorStatus.batch_window_ms
+              )
+            : intent.shape === "strategy" &&
+              intent.durationHours &&
           coordinatorStatus?.batch_window_ms
             ? Math.ceil(
                 (Number(intent.durationHours) * 3_600_000) /
                   coordinatorStatus.batch_window_ms
               )
             : undefined,
-        childAmount: intent.childSize
+        childAmount: retryPrivateOnly
+          ? atomicAmount
+          : intent.childSize
           ? toAtomicStr(intent.childSize, submitPair.base_asset_id)
           : undefined,
-        randomizedSlicing: intent.jitter > 0,
-        randomizedSlicingBps: intent.jitter * 100,
-        offlineDelegation:
-          intent.shape === "curve" &&
-          intent.resting &&
-          (intent.relayMode === "ZylithRelay" ||
-            intent.relayOperator === "SelfHostedRelay"),
+        maxChildren:
+          retryPrivateOnly &&
+          intent.retryHours &&
+          coordinatorStatus?.batch_window_ms
+            ? Math.ceil(
+                (Number(intent.retryHours) * 3_600_000) /
+                  coordinatorStatus.batch_window_ms
+              )
+            : undefined,
+        randomizedSlicing: retryPrivateOnly ? false : intent.jitter > 0,
+        randomizedSlicingBps: retryPrivateOnly ? 0 : intent.jitter * 100,
+        executionPreference:
+          intent.executionPreference ?? "PrivateThenExternal",
+        retryUnfilled: retryPrivateOnly,
+        offlineDelegation: false,
         relayMode: orderRelayMode,
       };
 
@@ -1538,10 +1281,13 @@ export default function App() {
       const result = await w.submitPrivateOrder(draft);
       if (result.offline_package?.relay_mode === "ZylithRelay") {
         try {
-          await submitManagedRenewalPackage(result.offline_package);
+          const relayStatus = await submitZylithRenewalPackage(
+            result.offline_package
+          );
           await w
             .markPrivateStrategyRelayRegistered?.(
-              result.offline_package.package_id
+              result.offline_package.package_id,
+              relayStatus ?? undefined
             )
             .catch(() => false);
           setBalanceTick((v) => v + 1);
@@ -1563,7 +1309,7 @@ export default function App() {
           throw new Error("Self-hosted relay endpoint is invalid or missing");
         }
         try {
-          await submitSelfHostedRenewalPackage(
+          const relayStatus = await submitSelfHostedRenewalPackage(
             endpointUrl,
             result.offline_package
           );
@@ -1573,7 +1319,8 @@ export default function App() {
           );
           await w
             .markPrivateStrategyRelayRegistered?.(
-              result.offline_package.package_id
+              result.offline_package.package_id,
+              relayStatus ?? undefined
             )
             .catch(() => false);
           setBalanceTick((v) => v + 1);
@@ -1593,13 +1340,13 @@ export default function App() {
       const acceptedBatchId =
         result.batch_id ??
         result.first_child_batch_id ??
-        provisionalBatch.batch_id;
+        submissionBatch.batch_id;
       const acceptedEpochId =
         result.epoch_id ??
         result.first_child_epoch_id ??
         renderBatches.find((batch) => batch.batch_id === acceptedBatchId)
           ?.epoch_id ??
-        provisionalBatch.epoch_id;
+        submissionBatch.epoch_id;
 
       const newOrder: LocalOrder = {
         deployment_scope: deploymentOrderScope(deployment),
@@ -1618,10 +1365,7 @@ export default function App() {
         pair: submitPair.pair_id,
         side: intent.side,
         wireMode: wm,
-        amount:
-          intent.shape === "curve"
-            ? fromAtomicStr(curveBaseTotal.toString(), submitPair.base_asset_id)
-            : intent.amount,
+        amount: intent.amount,
         fundingAsset,
         fundingAmount: fromAtomicStr(fundingAmountAtomic, fundingAsset),
         limitPrice:
@@ -1632,6 +1376,9 @@ export default function App() {
             : "",
         minFill: intent.minFill,
         fillOrKill: intent.fillOrKill,
+        executionPreference:
+          intent.executionPreference ?? "PrivateThenExternal",
+        retryUnfilled: retryPrivateOnly,
         status:
           result.first_child_order_commitment || result.order_commitment
             ? "in_batch"
@@ -1640,15 +1387,7 @@ export default function App() {
         arrivalReferencePrice: arrivalReference.price,
         arrivalReferenceSource: arrivalReference.source,
         arrivalReferenceAt: arrivalReference.observedAt,
-        makerCurvePoints:
-          intent.shape === "curve"
-            ? intent.curvePoints.filter(
-                (pt) => pt.price.trim() && pt.baseAmount.trim()
-              )
-            : undefined,
         relayMode: orderRelayMode,
-        relayFeeBps:
-          orderRelayMode === "ZylithRelay" ? submitPair.relay_fee_bps ?? 0 : 0,
       };
 
       prependAndSaveOrder(newOrder);
@@ -1661,6 +1400,40 @@ export default function App() {
     }
   }
 
+  async function handleExternalCompletion(order: LocalOrder) {
+    const w = walletRuntime();
+    if (!w || !w.isReady()) {
+      setSubmitError("Connect a Starknet wallet before completing the residual.");
+      return;
+    }
+    if (externalCompletionBusy) return;
+    setExternalCompletionBusy(order.orderCommitment);
+    setSubmitError(null);
+    try {
+      await w.submitExternalCompletion({
+        orderCommitment: order.orderCommitment,
+      });
+      setBalanceTick((value) => value + 1);
+      await w.refreshPrivateState().catch(() => undefined);
+      const refreshedOrders = await w
+        .loadLocalOrders()
+        .catch(() => [] as LocalOrder[]);
+      const activeDeploymentScope = deploymentOrderScope(deployment);
+      const normalizedOrders = refreshedOrders
+        .map(normalizeLocalOrder)
+        .filter(
+          (entry) => entry.deployment_scope === activeDeploymentScope
+        );
+      ordersRef.current = normalizedOrders;
+      setOrders(normalizedOrders);
+      setBalanceTick((value) => value + 1);
+    } catch (error) {
+      setSubmitError(userFacingErrorMessage(error));
+    } finally {
+      setExternalCompletionBusy(null);
+    }
+  }
+
   function handleFundingPreview(
     intent: TicketSubmitIntent
   ): FundingPreview | null {
@@ -1670,34 +1443,19 @@ export default function App() {
       ? batchByPair[previewPair.pair_id] ?? null
       : null;
     if (!w || !w.isReady() || !previewPair || !previewBatch) return null;
-
-    const wm = wireMode(intent.shape, intent.resting, intent.stratKind);
+    const wm = wireMode(intent.shape, intent.stratKind);
     const priceBaseScale =
       previewPair.price_base_scale ??
       assetScale(previewPair.base_asset_id).toString();
     const base = previewPair.base_asset_id;
     const quote = previewPair.quote_asset_id;
-    const curveFields =
-      intent.shape === "curve"
-        ? curveFieldsForIntent(intent, previewPair)
-        : null;
-    const atomicCurvePoints = curveFields?.atomicCurvePoints;
-    const curveBaseTotal = curveFields?.curveBaseTotal ?? 0n;
     const atomicPrice =
-      intent.shape === "curve"
-        ? curveFields?.curveEnvelopePrice ?? "0"
-        : toPriceAtomicStr(
-            intent.shape === "limit"
-              ? intent.limitPrice
-              : intent.priceLimit || "0",
-            quote
-          );
-    let atomicAmount =
-      intent.shape === "curve"
-        ? curveBaseTotal.toString()
-        : toAtomicStr(intent.amount, base);
+      toPriceAtomicStr(
+        intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0",
+        quote
+      );
+    let atomicAmount = toAtomicStr(intent.amount, base);
     let mode = wm;
-    const atomicMakerInventoryCap = curveFields?.atomicMakerInventoryCap;
 
     if (intent.shape === "strategy") {
       const durationBatches =
@@ -1728,23 +1486,18 @@ export default function App() {
       minFill: toAtomicStr(intent.minFill || "0", base),
       fillOrKill: intent.fillOrKill,
       batchId: previewBatch.batch_id,
-      makerCurvePoints: atomicCurvePoints,
-      makerInventoryCap:
-        atomicMakerInventoryCap && BigInt(atomicMakerInventoryCap) > 0n
-          ? atomicMakerInventoryCap
-          : undefined,
       priceBaseScale,
     });
   }
 
   // Cancel order
-  async function cleanupManagedRelayStrategyPackage(strategyId: string) {
+  async function cleanupZylithRenewalStrategyPackage(strategyId: string) {
     const renewalPackage = strategies.find(
       (strategy) => strategy.id === strategyId
     )?.offline_package;
     if (!renewalPackage) return;
     if (renewalPackage.relay_mode === "ZylithRelay") {
-      await deleteManagedRenewalPackage(renewalPackage);
+      await deleteZylithRenewalPackage(renewalPackage);
       return;
     }
     if (renewalPackage.relay_mode === "SelfRelay") {
@@ -1773,12 +1526,12 @@ export default function App() {
 
     if (order.strategyId) {
       if (!w || !w.isReady()) {
-        setSubmitError("Unlock Zylith wallet before cancelling this strategy.");
+        setSubmitError("Connect wallet before cancelling this strategy.");
         return;
       }
       try {
         const result = await w.cancelPrivateStrategy(order.strategyId);
-        await cleanupManagedRelayStrategyPackage(order.strategyId).catch(
+        await cleanupZylithRenewalStrategyPackage(order.strategyId).catch(
           (error: unknown) => {
             setSubmitError(userFacingErrorMessage(error));
           }
@@ -1809,12 +1562,12 @@ export default function App() {
   async function handleCancelStrategy(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock Zylith wallet before cancelling this strategy.");
+      setSubmitError("Connect wallet before cancelling this strategy.");
       return;
     }
     try {
       await w.cancelPrivateStrategy(strategyId);
-      await cleanupManagedRelayStrategyPackage(strategyId).catch(
+      await cleanupZylithRenewalStrategyPackage(strategyId).catch(
         (error: unknown) => {
           setSubmitError(userFacingErrorMessage(error));
         }
@@ -1828,7 +1581,7 @@ export default function App() {
   async function handlePauseStrategy(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock Zylith wallet before pausing this curve.");
+      setSubmitError("Connect wallet before pausing this strategy.");
       return;
     }
     try {
@@ -1842,7 +1595,7 @@ export default function App() {
   async function handleResumeStrategy(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock Zylith wallet before resuming this curve.");
+      setSubmitError("Connect wallet before resuming this strategy.");
       return;
     }
     try {
@@ -1856,22 +1609,31 @@ export default function App() {
   async function handleRefreshStrategyPackage(strategyId: string) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock Zylith wallet before refreshing this package.");
+      setSubmitError("Connect wallet before refreshing this package.");
       return;
     }
     try {
       const renewalPackage = await w.refreshPrivateStrategyPackage(strategyId);
       if (renewalPackage.relay_mode === "ZylithRelay") {
-        await submitManagedRenewalPackage(renewalPackage);
+        const relayStatus = await submitZylithRenewalPackage(renewalPackage);
         await w
-          .markPrivateStrategyRelayRegistered?.(renewalPackage.package_id)
+          .markPrivateStrategyRelayRegistered?.(
+            renewalPackage.package_id,
+            relayStatus ?? undefined
+          )
           .catch(() => false);
       } else if (renewalPackage.relay_mode === "SelfRelay") {
         const endpointUrl = readSelfHostedRelayUrl(renewalPackage.package_id);
         if (endpointUrl) {
-          await submitSelfHostedRenewalPackage(endpointUrl, renewalPackage);
+          const relayStatus = await submitSelfHostedRenewalPackage(
+            endpointUrl,
+            renewalPackage
+          );
           await w
-            .markPrivateStrategyRelayRegistered?.(renewalPackage.package_id)
+            .markPrivateStrategyRelayRegistered?.(
+              renewalPackage.package_id,
+              relayStatus ?? undefined
+            )
             .catch(() => false);
         }
       }
@@ -1887,7 +1649,7 @@ export default function App() {
   }) {
     const w = walletRuntime();
     if (!w || !w.isReady()) {
-      setSubmitError("Unlock Zylith wallet before consolidating notes.");
+      setSubmitError("Connect wallet before consolidating notes.");
       return;
     }
     try {
@@ -1900,6 +1662,7 @@ export default function App() {
           batch_epoch: 0,
           clearing_price: "0",
           price_base_scale: "1",
+          multi_pair_commitment: "0x0",
           settled_at_unix_ms: result.settled_at_unix_ms ?? Date.now(),
           loaded_at_unix_ms: Date.now(),
         },
@@ -1911,43 +1674,19 @@ export default function App() {
     }
   }
 
-  function toggleLiquidityWorkspace() {
-    if (workspace === "liquidity") {
-      navigatePath(sessionGet(LAST_TAKER_ROUTE_KEY, "/trade"));
-      return;
-    }
-    const remembered = sessionGet(
-      LAST_LIQUIDITY_ROUTE_KEY,
-      "/liquidity/curves"
-    );
-    const path = liquidityPath(liquidityTabFromPath(remembered));
-    window.open(
-      `${window.location.origin}${path}`,
-      "_blank",
-      "noopener,noreferrer"
-    );
-  }
-
   return (
     <div className="app-shell">
       <TopNav
-        workspace={workspace}
         tab={tab}
-        liquidityTab={liquidityTab}
         setTab={changeTab}
-        setLiquidityTab={changeLiquidityTab}
         onBrandClick={() => navigatePath("/trade")}
-        onToggleLiquidity={toggleLiquidityWorkspace}
         activeOrderCount={activeTakerOrders.length}
         claimableOutputCount={claimableOutputCount}
         walletReady={renderWalletReady}
-        withdrawalRoutePreference={userPreferences.withdrawalRoute}
-        setWithdrawalRoutePreference={updateWithdrawalRoute}
         starknetAddress={starknetAddress}
         onOpenWallet={() => setOpenSlide("wallet")}
         onDeposit={() => setOpenSlide("deposit")}
         onWithdraw={() => setOpenSlide("withdraw")}
-        onRecovery={() => setOpenSlide("recovery")}
         onLock={() => {
           walletRuntime()?.lock();
         }}
@@ -1955,7 +1694,7 @@ export default function App() {
       />
 
       <main className="screen">
-        {workspace === "taker" && tab === "trade" && (
+        {tab === "trade" && (
           <div className="trade-grid">
             <PairList
               pairs={pairs}
@@ -2000,6 +1739,7 @@ export default function App() {
             <RightColumn
               activeBatch={renderActiveBatch}
               activePairId={activePairId}
+              batchWindowMs={coordinatorStatus?.batch_window_ms ?? null}
               settlementTranscripts={renderSettlementTranscripts}
               online={renderOnline}
               allAssets={allAssets}
@@ -2023,17 +1763,21 @@ export default function App() {
           </div>
         )}
 
-        {workspace === "taker" && tab === "orders" && (
+        {tab === "orders" && (
           <OrdersScreen
             orders={renderTakerOrders}
             onCancel={(order) => {
               void handleCancelOrder(order);
             }}
+            onCompleteExternal={(order) => {
+              void handleExternalCompletion(order);
+            }}
+            externalCompletionBusy={externalCompletionBusy}
             walletReady={renderWalletReady}
           />
         )}
 
-        {workspace === "taker" && tab === "assets" && (
+        {tab === "assets" && (
           <AssetsScreen
             allAssets={allAssets}
             depositableAssets={depositableAssets}
@@ -2066,11 +1810,11 @@ export default function App() {
           />
         )}
 
-        {workspace === "taker" && tab === "reports" && (
+        {tab === "reports" && (
           <Suspense
             fallback={
               <div className="empty-zone">
-                <div className="empty-mark">—</div>
+                <div className="empty-mark">-</div>
                 <div className="empty-body">Loading reports</div>
               </div>
             }
@@ -2085,50 +1829,6 @@ export default function App() {
           </Suspense>
         )}
 
-        {workspace === "liquidity" && (
-          <Suspense
-            fallback={
-              <div className="empty-zone">
-                <div className="empty-mark">—</div>
-                <div className="empty-body">Loading liquidity</div>
-              </div>
-            }
-          >
-            <LiquidityWorkspace
-              tab={liquidityTab}
-              pairs={pairs}
-              activePairId={liquidityPairId}
-              setActivePairId={setLiquidityPairId}
-              orders={renderMakerOrders}
-              strategies={renderStrategies}
-              batches={renderBatches}
-              balances={renderBalances}
-              pendingDeposits={renderPendingDeposits}
-              withdrawableNotes={renderWithdrawableNotes}
-              settlementTranscripts={renderSettlementTranscripts}
-              walletReady={renderWalletReady}
-              submitting={submitting}
-              submitError={submitError}
-              onPreviewFunding={handleFundingPreview}
-              onSubmitCurve={handleSubmit}
-              onCancelOrder={(order) => {
-                void handleCancelOrder(order);
-              }}
-              onCancelStrategy={handleCancelStrategy}
-              onPauseStrategy={handlePauseStrategy}
-              onResumeStrategy={handleResumeStrategy}
-              onDeposit={(asset) => {
-                if (asset) setSlideAsset(asset);
-                setOpenSlide("deposit");
-              }}
-              onWithdraw={(asset) => {
-                if (asset) setSlideAsset(asset);
-                setOpenSlide("withdraw");
-              }}
-              onNavigateCurves={() => changeLiquidityTab("curves")}
-            />
-          </Suspense>
-        )}
       </main>
 
       <WalletSlide
@@ -2146,6 +1846,7 @@ export default function App() {
         defaultAsset={slideAsset}
         allAssets={depositableAssets.length > 0 ? depositableAssets : allAssets}
         starknetAddress={starknetAddress}
+        walletReady={renderWalletReady}
         onOpenWallet={() => setOpenSlide("wallet")}
         setSlideAsset={setSlideAsset}
       />
@@ -2159,13 +1860,11 @@ export default function App() {
         defaultNoteCommitment={claimNoteCommitment}
         settlementTranscripts={renderSettlementTranscripts}
         claimDelaySeconds={claimDelaySeconds}
-        withdrawalRoutePreference={userPreferences.withdrawalRoute}
         allAssets={allAssets}
+        starknetAddress={starknetAddress}
+        walletReady={renderWalletReady}
+        onOpenWallet={() => setOpenSlide("wallet")}
         setSlideAsset={setSlideAsset}
-      />
-      <RecoverySlide
-        open={openSlide === "recovery"}
-        onClose={() => setOpenSlide(null)}
       />
     </div>
   );

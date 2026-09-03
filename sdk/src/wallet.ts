@@ -1,9 +1,6 @@
 import type { OfflineRenewalPackage } from "./relay.js";
 import type {
-  ManagedMakerAuthorization,
-  PrivateStrategySummary,
   TicketSubmitIntent,
-  WalletBalance,
   WithdrawableNote,
 } from "./common.js";
 
@@ -19,7 +16,6 @@ export type PrivateOrderSubmission = {
 
 export type PrivateReportRequest = {
   batch_id: string;
-  order_commitments: string[];
   orders?: Array<{ order_commitment: string; cancellation_secret: string }>;
 };
 
@@ -27,18 +23,6 @@ export type TraderWalletRuntime = {
   submitPrivateOrder: (order: TicketSubmitIntent) => Promise<PrivateOrderSubmission>;
   syncPrivateSettlementReports?: (requests: PrivateReportRequest[]) => Promise<unknown[]>;
   scanNotes?: () => Promise<boolean>;
-  submitHostedWithdrawal?: (request: { note_commitment: string; asset?: string }) => Promise<unknown>;
+  submitStrk20Withdrawal?: (request: { note_commitment: string; asset?: string }) => Promise<unknown>;
   getWithdrawableNotes?: () => WithdrawableNote[];
-};
-
-export type MakerWalletRuntime = {
-  submitPrivateOrder?: (order: TicketSubmitIntent) => Promise<PrivateOrderSubmission>;
-  submitDelegatedPrivateOrder?: (
-    order: TicketSubmitIntent,
-    authorization: ManagedMakerAuthorization
-  ) => Promise<PrivateOrderSubmission>;
-  refreshPrivateStrategyPackage?: (strategyId: string) => Promise<OfflineRenewalPackage>;
-  markPrivateStrategyRelayRegistered?: (strategyId: string) => Promise<boolean>;
-  getPrivateStrategies?: () => PrivateStrategySummary[];
-  getBalances?: () => WalletBalance[];
 };

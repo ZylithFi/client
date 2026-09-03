@@ -1,5 +1,6 @@
 import { assetDecimals, fromAtomicStr } from "./assets";
 import { denominationTableForAsset, splitDepositAmount } from "./depositSplitting";
+import { safeAtomicAmount } from "./noteLifecycle";
 import type { WithdrawableNote } from "./shieldedBalances";
 
 export type NoteConsolidationPlan = {
@@ -36,7 +37,7 @@ function consolidationPlanForAsset(asset: string, notes: WithdrawableNote[]): No
   const decimals = assetDecimals(asset);
   const depositNotes = notes.filter(note => note.source === "deposit");
   if (depositNotes.length > 0) {
-    const sourceAmount = depositNotes.reduce((sum, note) => sum + BigInt(note.amount), 0n);
+    const sourceAmount = depositNotes.reduce((sum, note) => sum + safeAtomicAmount(note.amount), 0n);
     const targetAmounts = splitDepositAmount(sourceAmount, asset, decimals);
     return {
       kind: "deposit_exit",
@@ -59,7 +60,7 @@ function consolidationPlanForAsset(asset: string, notes: WithdrawableNote[]): No
   const nonStandardNotes = notes.filter(note => !standard.has(note.amount));
   if (nonStandardNotes.length < 2) return null;
 
-  const sourceAmount = nonStandardNotes.reduce((sum, note) => sum + BigInt(note.amount), 0n);
+  const sourceAmount = nonStandardNotes.reduce((sum, note) => sum + safeAtomicAmount(note.amount), 0n);
   const targetAmounts = splitDepositAmount(sourceAmount, asset, decimals);
   if (targetAmounts.length >= nonStandardNotes.length) return null;
 
@@ -80,5 +81,5 @@ function consolidationPlanForAsset(asset: string, notes: WithdrawableNote[]): No
 }
 
 function isAvailablePrivateNote(note: WithdrawableNote): boolean {
-  return !note.locked && !note.spent && !note.pending_withdrawal_tx && BigInt(note.amount) > 0n;
+  return !note.locked && !note.spent && !note.pending_withdrawal_tx && safeAtomicAmount(note.amount) > 0n;
 }

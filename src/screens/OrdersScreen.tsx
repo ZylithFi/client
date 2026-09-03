@@ -22,10 +22,14 @@ function fmtAddr(s: string): string {
 export function OrdersScreen({
   orders,
   onCancel,
+  onCompleteExternal,
+  externalCompletionBusy,
   walletReady,
 }: {
   orders: LocalOrder[];
   onCancel: (o: LocalOrder) => void;
+  onCompleteExternal?: (o: LocalOrder) => void;
+  externalCompletionBusy?: string | null;
   walletReady: boolean;
 }) {
   const [filter, setFilter] = useState<"active" | "history">("active");
@@ -64,12 +68,12 @@ export function OrdersScreen({
       <div className="table-zone">
         {!walletReady ? (
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Sign in to view your orders.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Connect wallet to view your orders.</div>
           </div>
         ) : displayed.length === 0 ? (
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
+            <div className="empty-mark">-</div>
             <div className="empty-body">
               Orders appear after you submit a trade.
             </div>
@@ -107,8 +111,8 @@ export function OrdersScreen({
                     </td>
                     <td>{order.wireMode}</td>
                     <td className="num">{order.amount}</td>
-                    <td className="num">{order.limitPrice || "—"}</td>
-                    <td className="num">{order.clearingPrice || "—"}</td>
+                    <td className="num">{order.limitPrice || "-"}</td>
+                    <td className="num">{order.clearingPrice || "-"}</td>
                     <td>
                       <span className={`pill ${statusTone(order.status)}`}>{statusLabel(order.status)}</span>
                     </td>
@@ -119,6 +123,40 @@ export function OrdersScreen({
                           style={{ fontSize: 10, color: "var(--z-status-danger)", letterSpacing: "0.06em" }}
                           onClick={() => onCancel(order)}
                         >Cancel</button>
+                      )}
+                      {onCompleteExternal &&
+                        order.externalCompletion &&
+                        ["available", "ready", "failed"].includes(
+                          order.externalCompletion.status
+                        ) && (
+                          <button
+                            style={{
+                              marginLeft: 8,
+                              fontSize: 10,
+                              color: "var(--z-accent)",
+                              letterSpacing: "0.04em",
+                            }}
+                            disabled={
+                              externalCompletionBusy === order.orderCommitment
+                            }
+                            onClick={() => onCompleteExternal(order)}
+                          >
+                            {externalCompletionBusy === order.orderCommitment
+                              ? "Completing..."
+                              : "Complete via AVNU"}
+                          </button>
+                        )}
+                      {order.externalCompletion?.status === "consolidating" && (
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            fontSize: 10,
+                            color: "var(--z-status-info)",
+                            letterSpacing: "0.04em",
+                          }}
+                        >
+                          Preparing residual...
+                        </span>
                       )}
                     </td>
                   </tr>

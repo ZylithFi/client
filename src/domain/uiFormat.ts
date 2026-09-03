@@ -1,4 +1,5 @@
 import type { BatchSummary } from "./auctionEpoch";
+import { batchSubmissionSafetyBufferMs } from "./batchSubmission";
 
 export function msToCountdown(ms: number): string {
   if (ms <= 0) return "0:00";
@@ -9,6 +10,7 @@ export function msToCountdown(ms: number): string {
 export function batchState(
   batch: BatchSummary,
   now: number,
+  batchWindowMs?: number | null,
 ): { label: string; tone: "good" | "warn" | "info" } {
   if (batch.status === "Closed") return { label: "Closed", tone: "warn" };
   if (batch.status === "Clearing" || batch.status === "Proving") {
@@ -18,6 +20,8 @@ export function batchState(
   if (batch.status === "Settled") return { label: "Settled", tone: "info" };
   if (batch.status === "Cancelled") return { label: "Cancelled", tone: "warn" };
   const msLeft = batch.close_time_unix_ms - now;
-  if (msLeft <= 15_000) return { label: "Closing", tone: "warn" };
+  if (msLeft <= batchSubmissionSafetyBufferMs(batchWindowMs ?? undefined)) {
+    return { label: "Closing", tone: "warn" };
+  }
   return { label: "Accepting", tone: "good" };
 }
