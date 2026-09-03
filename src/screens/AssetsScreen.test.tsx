@@ -21,7 +21,7 @@ const baseProps = {
 };
 
 describe("AssetsScreen", () => {
-  it("gates asset data until the Zylith wallet and Starknet wallet are connected", () => {
+  it("gates asset data until the wallet session and Starknet wallet are connected", () => {
     render(
       <AssetsScreen
         {...baseProps}
@@ -30,7 +30,7 @@ describe("AssetsScreen", () => {
       />,
     );
 
-    expect(screen.getByText("Sign in to view assets.")).toBeInTheDocument();
+    expect(screen.getByText("Connect wallet to view assets.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connect wallet" })).not.toBeInTheDocument();
     expect(screen.queryByText("Private assets")).not.toBeInTheDocument();
     expect(screen.queryByText("STRK")).not.toBeInTheDocument();
@@ -131,5 +131,47 @@ describe("AssetsScreen", () => {
     expect(screen.getAllByText("Failed deposit", { selector: "span" })).toHaveLength(1);
     expect(screen.getAllByText("25")).toHaveLength(2);
     expect(screen.getByText("Deposit transaction failed. · 3 notes")).toBeInTheDocument();
+  });
+
+  it("renders malformed local amount records without crashing", () => {
+    render(
+      <AssetsScreen
+        {...baseProps}
+        walletReady
+        starknetAddress="0xabc"
+        balances={[{ asset: "STRK", available: "bad", locked: "-1" }]}
+        pendingDeposits={[{
+          note_commitment: "0xpending",
+          asset: "STRK",
+          amount: "bad",
+          transaction_hash: "0xtx",
+          requested_at_unix_ms: 10,
+          confirmed: false,
+        }]}
+        withdrawableNotes={[{
+          note_commitment: "0xoutput",
+          batch_id: "batch-1",
+          source: "settlement_output",
+          asset: "STRK",
+          amount: "bad",
+          locked: false,
+          spent: false,
+          metadata_commitment: "0xmeta",
+        }]}
+        settlementTranscripts={{
+          "batch-1": {
+            batch_id: "batch-1",
+            pair_id: "STRK/USDC",
+            batch_epoch: 12,
+            clearing_price: "300",
+            settled_at_unix_ms: 1_000,
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText("Pending deposit").length).toBeGreaterThan(0);
+    expect(screen.getByText("Withdrawable")).toBeInTheDocument();
+    expect(screen.getAllByText("-").length).toBeGreaterThan(0);
   });
 });

@@ -1,8 +1,8 @@
 import { formatClearingPrice, fromAtomicStr } from "./assets";
 import type { BatchSummary, PublicSettlementTranscript } from "./auctionEpoch";
-import type { CurvePoint } from "./makerCurves";
+import type { LiquidityBandPoint } from "./liquidityBands";
 import type { LocalOrder, PrivateStrategySummary } from "./orderLifecycle";
-import { statusLabel, statusTone } from "./orderLifecycle";
+import { orderLiquidityBandAttribution, orderLiquidityBandPoints, statusLabel, statusTone } from "./orderLifecycle";
 import type { WalletBalance } from "./shieldedBalances";
 
 type PairConfigLike = {
@@ -11,13 +11,13 @@ type PairConfigLike = {
   quote_asset_id: string;
 };
 
-export type LiquidityCurveRecord = {
+export type LiquidityPositionRecord = {
   id: string;
   pair: string;
   side: "Buy" | "Sell";
   sideLabel: "Bid" | "Ask";
   status: "Active" | "Pending" | "Paused" | "Expiring" | "Cancelled" | "Historical";
-  points: CurvePoint[];
+  points: LiquidityBandPoint[];
   submittedAt: number;
   endEpoch?: number;
   nextChildIndex?: number;
@@ -26,7 +26,7 @@ export type LiquidityCurveRecord = {
   strategy?: PrivateStrategySummary;
 };
 
-export type CurveEpochOutcome = {
+export type PositionEpochOutcome = {
   key: string;
   epoch: number;
   submittedAt: number;
@@ -54,7 +54,7 @@ export function parseHuman(value?: string): number {
 }
 
 export function formatHuman(value: number, suffix = ""): string {
-  if (!Number.isFinite(value) || value <= 0) return "—";
+  if (!Number.isFinite(value) || value <= 0) return "-";
   const formatted = value.toLocaleString("en-US", {
     maximumFractionDigits: value >= 100 ? 2 : 6,
   });
@@ -62,7 +62,7 @@ export function formatHuman(value: number, suffix = ""): string {
 }
 
 export function formatCompactHuman(value: number, suffix = ""): string {
-  if (!Number.isFinite(value) || value <= 0) return "—";
+  if (!Number.isFinite(value) || value <= 0) return "-";
   const formatted = new Intl.NumberFormat("en-US", {
     notation: value >= 100_000 ? "compact" : "standard",
     maximumFractionDigits: value >= 100_000 ? 2 : value >= 100 ? 1 : 6,
@@ -71,7 +71,7 @@ export function formatCompactHuman(value: number, suffix = ""): string {
 }
 
 export function formatPct(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "-";
   return `${value.toFixed(1)}%`;
 }
 
@@ -80,13 +80,13 @@ export function mean(values: number[]): number {
 }
 
 export function formatBps(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "-";
   const formatted = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1);
   return `${value > 0 ? "+" : ""}${formatted} bps`;
 }
 
 export function fmtTime(ts: number): string {
-  if (!ts) return "—";
+  if (!ts) return "-";
   return new Date(ts).toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -95,7 +95,7 @@ export function fmtTime(ts: number): string {
 }
 
 export function fmtAddr(value?: string): string {
-  if (!value) return "—";
+  if (!value) return "-";
   if (value.length < 12) return value;
   return `${value.slice(0, 8)}…${value.slice(-5)}`;
 }
@@ -121,15 +121,15 @@ export function orderFilled(order: LocalOrder): number {
   return parseHuman(order.filledAmount ?? order.amount);
 }
 
-export function curveFillRate(orders: LocalOrder[]): number {
+export function positionFillRate(orders: LocalOrder[]): number {
   if (orders.length === 0) return 0;
   return (orders.filter(terminalFill).length / orders.length) * 100;
 }
 
-export function averageCurveFillRate(records: LiquidityCurveRecord[]): string {
+export function averagePositionFillRate(records: LiquidityPositionRecord[]): string {
   const recordsWithOrders = records.filter(record => record.relatedOrders.length > 0);
-  if (recordsWithOrders.length === 0) return "—";
-  return formatPct(mean(recordsWithOrders.map(record => curveFillRate(record.relatedOrders))));
+  if (recordsWithOrders.length === 0) return "-";
+  return formatPct(mean(recordsWithOrders.map(record => positionFillRate(record.relatedOrders))));
 }
 
 export function depthFilled(orders: LocalOrder[]): number {
@@ -146,7 +146,7 @@ export function weightedAverageClearing(orders: LocalOrder[]): string {
     numerator += price * size;
     denominator += size;
   }
-  if (denominator <= 0) return "—";
+  if (denominator <= 0) return "-";
   return (numerator / denominator).toLocaleString("en-US", { maximumFractionDigits: 8 });
 }
 
@@ -173,7 +173,7 @@ export function orderQuoteNotional(order: LocalOrder, transcript?: PublicSettlem
   return 0;
 }
 
-function makerCaptureBps(order: LocalOrder): number | null {
+function positionCaptureBps(order: LocalOrder): number | null {
   if (!terminalFill(order)) return null;
   const limit = parseHuman(order.limitPrice);
   const clearing = parseHuman(order.clearingPrice);
@@ -183,11 +183,11 @@ function makerCaptureBps(order: LocalOrder): number | null {
     : ((clearing - limit) / limit) * 10_000;
 }
 
-export function weightedMakerCaptureBps(orders: LocalOrder[]): number {
+export function weightedPositionCaptureBps(orders: LocalOrder[]): number {
   let numerator = 0;
   let denominator = 0;
   for (const order of orders) {
-    const capture = makerCaptureBps(order);
+    const capture = positionCaptureBps(order);
     const size = orderFilled(order);
     if (capture === null || size <= 0) continue;
     numerator += capture * size;
@@ -196,22 +196,30 @@ export function weightedMakerCaptureBps(orders: LocalOrder[]): number {
   return denominator > 0 ? numerator / denominator : Number.NaN;
 }
 
-export function committedDepth(points: CurvePoint[], fallbackOrders: LocalOrder[]): number {
+export function committedDepth(points: LiquidityBandPoint[], fallbackOrders: LocalOrder[]): number {
   const pointDepth = points.reduce((sum, point) => sum + parseHuman(point.baseAmount), 0);
   if (pointDepth > 0) return pointDepth;
   return fallbackOrders.reduce((sum, order) => sum + orderDepth(order), 0);
 }
 
-export function curveBaseAsset(record: LiquidityCurveRecord): string {
+export function positionBaseAsset(record: LiquidityPositionRecord): string {
   return record.pair.split("/")[0] ?? "";
 }
 
-export function curveQuoteAsset(record: LiquidityCurveRecord): string {
+export function positionQuoteAsset(record: LiquidityPositionRecord): string {
   return record.pair.split("/")[1] ?? "";
 }
 
-export function curveFundingAsset(record: LiquidityCurveRecord): string {
-  return record.side === "Buy" ? curveQuoteAsset(record) : curveBaseAsset(record);
+export function positionFundingAsset(record: LiquidityPositionRecord): string {
+  return record.side === "Buy" ? positionQuoteAsset(record) : positionBaseAsset(record);
+}
+
+export function liquidityStrategyInventoryCap(strategy?: PrivateStrategySummary): string | undefined {
+  return strategy?.liquidity_inventory_cap;
+}
+
+export function liquidityStrategyBandCount(strategy?: PrivateStrategySummary): number | undefined {
+  return strategy?.liquidity_curve_points?.length;
 }
 
 export function balanceAmount(
@@ -233,7 +241,7 @@ export function assetListText(assets: string[]) {
   return `${assets.slice(0, -1).join(", ")} and ${assets.at(-1)}`;
 }
 
-export function curveLockedCapital(record: LiquidityCurveRecord): number {
+export function positionLockedCapital(record: LiquidityPositionRecord): number {
   if (record.points.length === 0) {
     return record.relatedOrders.reduce((sum, order) => sum + parseHuman(order.fundingAmount ?? order.amount), 0);
   }
@@ -241,28 +249,31 @@ export function curveLockedCapital(record: LiquidityCurveRecord): number {
   return record.points.reduce((sum, point) => sum + parseHuman(point.price) * parseHuman(point.baseAmount), 0);
 }
 
-export function attributedBandFill(record: LiquidityCurveRecord, bandIndex: number): number | null {
+export function attributedBandFill(record: LiquidityPositionRecord, bandIndex: number): number | null {
   let sawAttribution = false;
   let filled = 0;
-  const baseAsset = curveBaseAsset(record);
+  const baseAsset = positionBaseAsset(record);
   for (const order of record.relatedOrders) {
-    const attribution = order.makerBandAttribution;
+    const attribution = orderLiquidityBandAttribution(order);
     if (!attribution?.bands?.length) continue;
     sawAttribution = true;
     for (const band of attribution.bands) {
       if (band.band_index === bandIndex) {
-        filled += parseHuman(fromAtomicStr(band.filled_base_amount, baseAsset));
+        try {
+          filled += parseHuman(fromAtomicStr(band.filled_base_amount, baseAsset));
+        } catch {
+          continue;
+        }
       }
     }
   }
   return sawAttribution ? filled : null;
 }
 
-export function displayedBandFill(record: LiquidityCurveRecord, bandIndex: number, fallbackRemaining: number): number {
+export function displayedBandFill(record: LiquidityPositionRecord, bandIndex: number): number {
   const exact = attributedBandFill(record, bandIndex);
   if (exact !== null) return exact;
-  const depth = parseHuman(record.points[bandIndex]?.baseAmount);
-  return Math.min(depth, fallbackRemaining);
+  return 0;
 }
 
 export function orderFundingExposure(order: LocalOrder, asset: string): number {
@@ -273,20 +284,28 @@ export function orderFundingExposure(order: LocalOrder, asset: string): number {
   return 0;
 }
 
-function strategyPoints(strategy: PrivateStrategySummary, pair: PairConfigLike | undefined): CurvePoint[] {
+function strategyPoints(strategy: PrivateStrategySummary, pair: PairConfigLike | undefined): LiquidityBandPoint[] {
   if (!pair) return [];
-  return (strategy.maker_curve_points ?? []).map(point => ({
-    price: fromAtomicStr(point.price, pair.quote_asset_id),
-    baseAmount: fromAtomicStr(point.base_amount, pair.base_asset_id),
-  }));
+  const points: LiquidityBandPoint[] = [];
+  for (const point of strategy.liquidity_curve_points ?? []) {
+    try {
+      points.push({
+        price: fromAtomicStr(point.price, pair.quote_asset_id),
+        baseAmount: fromAtomicStr(point.base_amount, pair.base_asset_id),
+      });
+    } catch {
+      continue;
+    }
+  }
+  return points;
 }
 
-export function buildCurveRecords(
+export function buildPositionRecords(
   orders: LocalOrder[],
   strategies: PrivateStrategySummary[],
   pairs: PairConfigLike[],
-): LiquidityCurveRecord[] {
-  const records: LiquidityCurveRecord[] = [];
+): LiquidityPositionRecord[] {
+  const records: LiquidityPositionRecord[] = [];
   const consumedOrderRefs = new Set<string>();
 
   for (const strategy of strategies.filter(strategy => strategy.mode === "Resting")) {
@@ -323,7 +342,7 @@ export function buildCurveRecords(
 
   for (const order of orders) {
     if (consumedOrderRefs.has(order.ordRef)) continue;
-    if (order.wireMode !== "Maker Curve" && order.wireMode !== "Resting") continue;
+    if (order.wireMode !== "Liquidity Position" && order.wireMode !== "Resting") continue;
     records.push({
       id: order.ordRef,
       pair: order.pair,
@@ -334,7 +353,7 @@ export function buildCurveRecords(
         : order.status === "cancelled"
           ? "Cancelled"
           : "Historical",
-      points: order.makerCurvePoints ?? [{
+      points: orderLiquidityBandPoints(order) ?? [{
         price: order.limitPrice || order.clearingPrice || "",
         baseAmount: order.amount,
       }],
@@ -344,12 +363,12 @@ export function buildCurveRecords(
   }
 
   return records.sort((a, b) => {
-    const statusRank = (record: LiquidityCurveRecord) => record.status === "Active" ? 0 : record.status === "Expiring" ? 1 : 2;
+    const statusRank = (record: LiquidityPositionRecord) => record.status === "Active" ? 0 : record.status === "Expiring" ? 1 : 2;
     return statusRank(a) - statusRank(b) || b.submittedAt - a.submittedAt;
   });
 }
 
-export function activeCurveRecords(records: LiquidityCurveRecord[]): LiquidityCurveRecord[] {
+export function activePositionRecords(records: LiquidityPositionRecord[]): LiquidityPositionRecord[] {
   return records.filter(record =>
     record.status === "Active" ||
     record.status === "Pending" ||
@@ -358,7 +377,7 @@ export function activeCurveRecords(records: LiquidityCurveRecord[]): LiquidityCu
   );
 }
 
-export function curveStatusPillTone(status: LiquidityCurveRecord["status"]): string {
+export function positionStatusPillTone(status: LiquidityPositionRecord["status"]): string {
   if (status === "Active") return "good";
   if (status === "Pending") return "info";
   if (status === "Expiring") return "warn";
@@ -392,7 +411,7 @@ function relayChildStatusDisplay(
   }
 }
 
-export function makerOutcomeTone(label: string, fallbackTone: string): string {
+export function liquidityOutcomeTone(label: string, fallbackTone: string): string {
   if (label === "Filled") return "good";
   if (label === "Partial") return "info";
   if (["In batch", "Proving", "Settling", "Queued"].includes(label)) return "warn";
@@ -400,10 +419,10 @@ export function makerOutcomeTone(label: string, fallbackTone: string): string {
   return fallbackTone;
 }
 
-export function curveEpochOutcomes(
-  record: LiquidityCurveRecord,
+export function positionEpochOutcomes(
+  record: LiquidityPositionRecord,
   batchStatus: Map<string, BatchSummary["status"]>,
-): CurveEpochOutcome[] {
+): PositionEpochOutcome[] {
   const children = record.strategy?.submitted_children ?? [];
   if (children.length > 0) {
     return children.map(child => {
@@ -417,7 +436,7 @@ export function curveEpochOutcomes(
         epoch: child.epoch_id,
         submittedAt: child.submitted_at_unix_ms,
         label,
-        tone: makerOutcomeTone(label, related ? statusTone(related.status) : relayStatus.tone),
+        tone: liquidityOutcomeTone(label, related ? statusTone(related.status) : relayStatus.tone),
         detail: related?.batchId ? `Batch ${fmtAddr(related.batchId)}` : child.relay_detail || relayStatus.label,
         clearingPrice: related?.clearingPrice,
         filledAmount: related?.filledAmount,
@@ -429,50 +448,49 @@ export function curveEpochOutcomes(
     epoch: order.epochId,
     submittedAt: order.submittedAt,
     label: statusLabel(order.status),
-    tone: makerOutcomeTone(statusLabel(order.status), statusTone(order.status)),
+    tone: liquidityOutcomeTone(statusLabel(order.status), statusTone(order.status)),
     detail: `Batch ${fmtAddr(order.batchId)}`,
     clearingPrice: order.clearingPrice,
     filledAmount: order.filledAmount,
   }));
 }
 
-export function epochOutcomeWindow(outcomes: CurveEpochOutcome[], limit = 48): CurveEpochOutcome[] {
+export function epochOutcomeWindow(outcomes: PositionEpochOutcome[], limit = 48): PositionEpochOutcome[] {
   const sorted = [...outcomes].sort((a, b) => a.epoch - b.epoch);
   if (sorted.length <= limit) return sorted;
   return sorted.slice(sorted.length - limit);
 }
 
-export function latestEpochOutcomes(outcomes: CurveEpochOutcome[], limit = 12): CurveEpochOutcome[] {
+export function latestEpochOutcomes(outcomes: PositionEpochOutcome[], limit = 12): PositionEpochOutcome[] {
   return [...outcomes]
     .sort((a, b) => b.epoch - a.epoch)
     .slice(0, limit)
     .reverse();
 }
 
-export function curveDisplayRef(record: LiquidityCurveRecord): string {
+export function positionDisplayRef(record: LiquidityPositionRecord): string {
   const source = record.strategy?.parent_order_commitment || record.id;
-  if (!source) return "CRV";
+  if (!source) return "LP";
   const compact = source
     .replace(/^strategy[-:]?/i, "")
     .replace(/^0x/i, "")
-    .replace(/^0+/, "")
-    .replace(/^demo[_-]?/i, "");
+    .replace(/^0+/, "");
   const readable = compact.split(/[_:-]+/).filter(Boolean).slice(-2).join("-");
   if (/\b(parent|curve)\b/i.test(readable)) {
-    return `CRV-${curveBaseAsset(record).replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 8) || "MAKER"}`;
+    return `LP-${positionBaseAsset(record).replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 8) || "LIQ"}`;
   }
-  return `CRV-${(readable || compact).slice(0, 10).toUpperCase() || fmtAddr(source)}`;
+  return `LP-${(readable || compact).slice(0, 10).toUpperCase() || fmtAddr(source)}`;
 }
 
-export function averageCurvePrice(record: LiquidityCurveRecord): string {
+export function averagePositionPrice(record: LiquidityPositionRecord): string {
   const settled = weightedAverageClearing(record.relatedOrders);
-  if (settled !== "—") return settled;
+  if (settled !== "-") return settled;
   const prices = record.points.map(point => parseHuman(point.price)).filter(value => value > 0);
-  if (prices.length === 0) return "—";
+  if (prices.length === 0) return "-";
   return mean(prices).toLocaleString("en-US", { maximumFractionDigits: 8 });
 }
 
-export function renewalPackageStatus(record: LiquidityCurveRecord): {
+export function renewalPackageStatus(record: LiquidityPositionRecord): {
   label: string;
   tone: "info" | "warn" | "good";
 } {

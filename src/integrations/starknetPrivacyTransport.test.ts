@@ -9,7 +9,7 @@ import {
 
 describe("starknet privacy transport urls", () => {
   it("normalizes service base urls", () => {
-    expect(serviceBaseUrl("https://api.example.com///")).toBe("https://api.example.com");
+    expect(serviceBaseUrl(" https://api.example.com/// ")).toBe("https://api.example.com");
     expect(serviceBaseUrl("https://api.example.com/path")).toBe("https://api.example.com/path");
   });
 
@@ -21,6 +21,9 @@ describe("starknet privacy transport urls", () => {
       "https://paymaster.example.com/execute-outside"
     );
     expect(paymasterExecuteUrl("https://paymaster.example.com///")).toBe(
+      "https://paymaster.example.com/execute-outside"
+    );
+    expect(paymasterExecuteUrl(" https://paymaster.example.com/execute-outside ")).toBe(
       "https://paymaster.example.com/execute-outside"
     );
   });

@@ -26,7 +26,7 @@ function order(overrides: Partial<LocalOrder> = {}): LocalOrder {
 }
 
 describe("OrdersScreen", () => {
-  it("shows direct taker order fields without maker strategy concepts", () => {
+  it("shows direct taker order fields without liquidity strategy concepts", () => {
     render(
       <OrdersScreen
         walletReady

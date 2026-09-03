@@ -55,6 +55,15 @@ export function markDepositRecordConfirmed(record: DepositConfirmationRecord) {
   record.deposit_failure_reason = undefined;
 }
 
+export function markDepositRecordFailed(
+  record: DepositConfirmationRecord,
+  reason: string,
+) {
+  record.deposit_confirmed = false;
+  record.deposit_failed = true;
+  record.deposit_failure_reason = reason;
+}
+
 export function pendingDepositFailureReason(input: {
   record: DepositConfirmationRecord;
   status: DepositReceiptState | null;

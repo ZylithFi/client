@@ -17,7 +17,7 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[]}
-        batchWindowMs={90_000}
+        batchWindowMs={20_000}
         walletReady={false}
         hasPrivateBalance={false}
         submitting={false}
@@ -37,7 +37,7 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[]}
-        batchWindowMs={90_000}
+        batchWindowMs={20_000}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}
@@ -59,7 +59,7 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
-        batchWindowMs={90_000}
+        batchWindowMs={20_000}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}
@@ -84,5 +84,25 @@ describe("OrderTicket", () => {
       amount: "2",
       limitPrice: "0.10",
     }));
+  });
+
+  it("keeps quick-fill safe when local balance or pair scale is malformed", () => {
+    render(
+      <OrderTicket
+        pair={{ ...pair, price_base_scale: "bad-scale" }}
+        balances={[{ asset: "USDC", available: "bad-balance", locked: "-1" }]}
+        batchWindowMs={20_000}
+        walletReady={true}
+        hasPrivateBalance={true}
+        submitting={false}
+        submitError={null}
+        onOpenWallet={vi.fn()}
+        onDeposit={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Max" })).toBeDisabled();
+    expect(screen.getByText("- USDC available")).toBeInTheDocument();
   });
 });

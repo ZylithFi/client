@@ -64,12 +64,12 @@ export function OrdersScreen({
       <div className="table-zone">
         {!walletReady ? (
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Sign in to view your orders.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Connect wallet to view your orders.</div>
           </div>
         ) : displayed.length === 0 ? (
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
+            <div className="empty-mark">-</div>
             <div className="empty-body">
               Orders appear after you submit a trade.
             </div>
@@ -107,8 +107,8 @@ export function OrdersScreen({
                     </td>
                     <td>{order.wireMode}</td>
                     <td className="num">{order.amount}</td>
-                    <td className="num">{order.limitPrice || "—"}</td>
-                    <td className="num">{order.clearingPrice || "—"}</td>
+                    <td className="num">{order.limitPrice || "-"}</td>
+                    <td className="num">{order.clearingPrice || "-"}</td>
                     <td>
                       <span className={`pill ${statusTone(order.status)}`}>{statusLabel(order.status)}</span>
                     </td>

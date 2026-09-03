@@ -17,12 +17,13 @@ describe("app routes", () => {
   });
 
   it("maps liquidity paths to tabs", () => {
-    expect(liquidityTabFromPath("/liquidity/curves")).toBe("curves");
+    expect(liquidityTabFromPath("/liquidity/positions")).toBe("positions");
+    expect(liquidityTabFromPath("/liquidity/curves")).toBe("positions");
     expect(liquidityTabFromPath("/liquidity/orders")).toBe("orders");
     expect(liquidityTabFromPath("/liquidity/inventory")).toBe("inventory");
     expect(liquidityTabFromPath("/liquidity/analytics")).toBe("analytics");
-    expect(liquidityTabFromPath("/liquidity/unknown")).toBe("curves");
-    expect(liquidityTabFromPath("/liquidity")).toBe("curves");
+    expect(liquidityTabFromPath("/liquidity/unknown")).toBe("positions");
+    expect(liquidityTabFromPath("/liquidity")).toBe("positions");
   });
 
   it("normalizes canonical taker paths", () => {
@@ -33,7 +34,7 @@ describe("app routes", () => {
   });
 
   it("normalizes canonical liquidity paths", () => {
-    expect(liquidityPath("curves")).toBe("/liquidity/curves");
+    expect(liquidityPath("positions")).toBe("/liquidity/positions");
     expect(liquidityPath("orders")).toBe("/liquidity/orders");
     expect(liquidityPath("inventory")).toBe("/liquidity/inventory");
     expect(liquidityPath("analytics")).toBe("/liquidity/analytics");

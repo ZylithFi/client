@@ -5,6 +5,7 @@ import {
   elapsedMs,
   firstRenewalSlotEpoch,
   hasBatchSubmissionSafetyWindow,
+  hostedRelayLeadEpochs,
   privateSubmissionDelayMs,
   remainingBatchMs,
   renewalPackageMaxSubmissionDelayMs,
@@ -15,14 +16,22 @@ export {
   batchSubmissionSafetyBufferMs,
   firstRenewalSlotEpoch,
   hasBatchSubmissionSafetyWindow,
+  hostedRelayLeadEpochs,
   renewalPackageMaxSubmissionDelayMs,
 } from "./domain/batchSubmission";
+import { assetDecimals } from "./domain/assets";
+import {
+  assertBatchSummary,
+  assertCurrentDeploymentManifestShape,
+  type BatchSummary,
+} from "./domain/auctionEpoch";
 import {
   denominationTableForAsset,
   splitDepositAmount,
 } from "./domain/depositSplitting";
 import {
   depositRecordMatchesConfirmedFunding,
+  markDepositRecordFailed,
   markDepositRecordConfirmed,
   pendingDepositFailureReason,
   pendingDepositFundingCommitments,
@@ -35,48 +44,77 @@ import {
   requiredString,
 } from "./domain/felt";
 import {
-  hostedNoteConsolidationEnabledForDeployment,
-  hostedWithdrawalEnabledForDeployment,
+  fundingRailTokenAddress,
+  noteConsolidationEnabledForDeployment,
   selectedDepositFundingRail,
+  strk20WithdrawalEnabledForDeployment,
   type StarknetPrivacyDepositFundingRail,
 } from "./domain/fundingRail";
 export {
-  hostedNoteConsolidationEnabledForDeployment,
-  hostedWithdrawalEnabledForDeployment,
+  noteConsolidationEnabledForDeployment,
+  strk20WithdrawalEnabledForDeployment,
 } from "./domain/fundingRail";
-import { selectedStarknetProvider } from "./domain/browserWallet";
+import {
+  connectStarknetProvider,
+  discoverStarknetWallets,
+  notifyWalletRuntimeChanged,
+  selectedStarknetProvider,
+  setWalletRuntime,
+} from "./domain/browserWallet";
 import {
   bytesToBase64,
   decryptLocalStore,
-  decryptSeed,
+  decryptSeedWithWalletSignature,
+  encryptSeedWithWalletSignature,
   encryptLocalStore,
-  encryptSeed,
+  isWalletSignatureVaultRecord,
+  walletSignatureVaultMetadataMatches,
   stableJsonStringify,
+  walletSignatureVaultId,
+  walletSignatureVaultAuthToken,
   type EncryptedLocalStore,
   type VaultRecord,
+  type WalletSignatureVaultRecord,
+  type WalletSignatureVaultContext,
 } from "./domain/walletLocalCrypto";
-import { fetchJson, postJson, starknetRpc } from "./domain/runtimeHttp";
+import {
+  RuntimeHttpStatusError,
+  fetchJson,
+  fetchWithTimeout,
+  postJson,
+  starknetRpc,
+} from "./domain/runtimeHttp";
+import { setPrivacyFundingStage } from "./domain/privacyFundingStage";
+import { notifyPrivateSettlementReports } from "./domain/privateSettlementReportEvents";
 import {
   browserSafeServiceUrl,
   defaultServiceUrlForHost,
   localServiceUrl,
   normalizeUrl,
-  paymasterEndpointBase,
-  paymasterEndpointPath,
 } from "./domain/serviceUrls";
 export {
   defaultServiceUrlForHost,
 } from "./domain/serviceUrls";
 import {
   applyStrk20ExitClaimReceipt,
+  applyStrk20ExitStagingReceipt,
   isRetryableStrk20ExitClaim,
   isSpendableLocalNote,
   isWithdrawableNoteLocked,
 } from "./domain/strk20ExitState";
 export { applyStrk20ExitClaimReceipt } from "./domain/strk20ExitState";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
-import type { LocalOrder, LocalOrderStatus } from "./domain/orderLifecycle";
-import type { MakerBandAttribution } from "./domain/shieldedBalances";
+import {
+  normalizeLocalOrder,
+  type LocalOrder,
+  type LocalOrderStatus,
+} from "./domain/orderLifecycle";
+import type { LiquidityBandAttribution } from "./domain/shieldedBalances";
+import type {
+  PrivateLiquidityPositionCloseRequest,
+  PrivateLiquidityPositionOpenRequest,
+  PrivateLiquidityPositionReconfigureRequest,
+} from "@zylith/sdk";
 import {
   submitPrivacyBridgeDeposit,
   submitPrivacyOpenNoteWithdrawal,
@@ -93,26 +131,25 @@ import { hash as starknetHash } from "starknet";
 type Side = "Buy" | "Sell";
 type OrderMode =
   | "Limit"
-  | "Maker Curve"
+  | "Liquidity Position"
   | "TWAP"
   | "VWAP"
   | "Repeat"
   | "Resting";
-const DIRECT_ORDER_MODES = new Set<OrderMode>(["Limit", "Maker Curve"]);
+const DIRECT_ORDER_MODES = new Set<OrderMode>(["Limit"]);
 const STRATEGY_ORDER_MODES = new Set<OrderMode>([
   "TWAP",
   "VWAP",
   "Repeat",
-  "Resting",
 ]);
-const MIN_MAKER_CURVE_POINTS = 3;
 const MAX_ORDER_FUNDING_INPUTS = 4;
 const DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS = 10;
-const privateReportOutputTagsEnabled =
-  normalizeText(
-    import.meta.env.VITE_ZYLITH_ENABLE_PRIVATE_REPORT_OUTPUT_TAGS
-  ).toLowerCase() === "true";
-
+const WALLET_SIGNATURE_REQUEST_TIMEOUT_MS = 90_000;
+const STARKNET_WALLET_INVOKE_TIMEOUT_MS = 3 * 60_000;
+const STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS = 10_000;
+const DEPLOYMENT_MANIFEST_REQUEST_TIMEOUT_MS = 10_000;
+const REQUIRED_COORDINATOR_FETCH_TIMEOUT_MS = 20_000;
+const WALLET_VAULT_REQUEST_TIMEOUT_MS = 10_000;
 type WalletBalance = {
   asset: string;
   available: string;
@@ -146,6 +183,30 @@ type FundingPreview = {
   notes: FundingNotePreview[];
 };
 
+export type PrivateLiquidityPositionLifecycleAuthorizationRequest = {
+  position_id: string;
+  prior_position_commitment?: string;
+  output_position_commitment?: string;
+  epoch: string;
+  base_amount: string;
+  quote_amount: string;
+};
+
+export type PrivateLiquidityPositionLifecycleAuthorization = {
+  signature_r: string;
+  signature_s: string;
+};
+
+export type PrivateLiquidityPositionOpenResult = {
+  lifecycle_id: string;
+  position_commitment: string;
+  transition_commitment: string;
+  funding_note_commitments: string[];
+  batch_id: string;
+  epoch_id: number;
+  submission_ambiguous?: boolean;
+};
+
 type PrivateOrderDraft = {
   pair: string;
   side: Side;
@@ -163,28 +224,15 @@ type PrivateOrderDraft = {
   randomizedSlicingBps?: number;
   priceBaseScale?: string;
   offlineDelegation?: boolean;
-  makerCurvePoints?: Array<{ price: string; baseAmount: string }>;
-  makerCurveRotationBps?: number;
-  makerInventoryCap?: string;
   relayMode?: "SelfRelay" | "ZylithRelay";
 };
 
-type WalletRuntime = {
-  hasVault: () => boolean;
+export type WalletRuntime = {
+  hasVault: (starknetAddress?: string | null) => boolean;
+  vaultAuthMode: (starknetAddress?: string | null) => "none" | "wallet-signature";
   isReady: () => boolean;
-  createWallet: (passphrase: string) => Promise<boolean>;
-  replaceWithNewWallet: (passphrase: string) => Promise<boolean>;
-  importRecoverySeed: (
-    recoveryPhraseOrSeedHex: string,
-    passphrase: string
-  ) => Promise<boolean>;
-  replaceRecoverySeed: (
-    recoveryPhraseOrSeedHex: string,
-    passphrase: string
-  ) => Promise<boolean>;
-  unlockWithPassphrase: (passphrase: string) => Promise<boolean>;
-  requestSessionUnlock: () => Promise<boolean>;
-  exportRecoverySeed: (passphrase: string) => Promise<string>;
+  createWalletWithWalletSignature: (starknetAddress: string) => Promise<boolean>;
+  unlockWithWalletSignature: (starknetAddress: string) => Promise<boolean>;
   syncRecoveryArtifacts: () => Promise<boolean>;
   getPublicConfig: () => WalletPublicConfig | null;
   lock: () => void;
@@ -192,8 +240,8 @@ type WalletRuntime = {
   getPendingDeposits: () => PendingDeposit[];
   getWithdrawableNotes: () => WithdrawableNote[];
   getPrivateStrategies: () => PrivateStrategySummary[];
-  hostedWithdrawalAvailable: () => boolean;
-  hostedNoteConsolidationAvailable: () => boolean;
+  strk20WithdrawalAvailable: () => boolean;
+  noteConsolidationAvailable: () => boolean;
   loadLocalOrders: () => Promise<LocalOrder[]>;
   saveLocalOrders: (orders: LocalOrder[]) => Promise<void>;
   previewFundingNotes: (order: PrivateOrderDraft) => FundingPreview;
@@ -208,9 +256,6 @@ type WalletRuntime = {
   syncPrivateSettlementReports: (
     requests: PrivateSettlementReportRequest[]
   ) => Promise<PrivateSettlementReport[]>;
-  releaseUnreferencedNoteLocks: (
-    retainedLockRefs: string[]
-  ) => Promise<boolean>;
   submitDepositViaWallet: (
     asset: string,
     amount: string
@@ -241,7 +286,10 @@ type WalletRuntime = {
     order_commitment: string;
     cancellation_secret: string;
   }) => Promise<{ cancelled_at_unix_ms: number }>;
-  markPrivateStrategyRelayRegistered: (strategyId: string) => Promise<boolean>;
+  markPrivateStrategyRelayRegistered: (
+    strategyId: string,
+    relayStatus?: { access_token?: string }
+  ) => Promise<boolean>;
   cancelPrivateStrategy: (strategyId: string) => Promise<{
     cancelled_at_unix_ms: number;
     parent_cancel_transaction_hash?: string;
@@ -277,7 +325,7 @@ type WalletRuntime = {
   settlePrivateOrderLock: (
     orderCommitment: string,
     outcome: "released" | "spent",
-    fundingFallback?: {
+    settlementFunding?: {
       asset?: string;
       amount?: string;
       batchId?: string;
@@ -287,11 +335,30 @@ type WalletRuntime = {
   createOfflineRenewalPackage: (
     order: PrivateOrderDraft
   ) => Promise<OfflineRenewalPackage>;
+  openPrivateLiquidityPosition: (
+    request: PrivateLiquidityPositionOpenRequest,
+    batch?: BatchSummary
+  ) => Promise<PrivateLiquidityPositionOpenResult>;
+  reconfigurePrivateLiquidityPosition: (
+    request: PrivateLiquidityPositionReconfigureRequest,
+    batch?: BatchSummary
+  ) => Promise<PrivateLiquidityPositionLifecycleResult>;
+  closePrivateLiquidityPosition: (
+    request: PrivateLiquidityPositionCloseRequest,
+    batch?: BatchSummary
+  ) => Promise<PrivateLiquidityPositionLifecycleResult>;
+  getPrivateLiquidityPositions: () => LocalLiquidityPositionRecord[];
+  authorizePrivateLiquidityPositionOpen: (
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest
+  ) => PrivateLiquidityPositionLifecycleAuthorization;
+  authorizePrivateLiquidityPositionReconfigure: (
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest
+  ) => PrivateLiquidityPositionLifecycleAuthorization;
+  authorizePrivateLiquidityPositionClose: (
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest
+  ) => PrivateLiquidityPositionLifecycleAuthorization;
   getOfflineRenewalPackages: () => OfflineRenewalPackage[];
-  submitHostedWithdrawal: (
-    request: unknown
-  ) => Promise<{ transaction_hash: string }>;
-  submitWithdrawalViaPaymaster: (
+  submitStrk20Withdrawal: (
     request: unknown
   ) => Promise<{ transaction_hash: string }>;
 };
@@ -299,12 +366,29 @@ type WalletRuntime = {
 type WalletWasmModule = {
   default?: () => Promise<void>;
   zylith_wallet_generate_seed_hex: () => string;
-  zylith_wallet_generate_mnemonic: () => string;
-  zylith_wallet_seed_hex_to_mnemonic: (seedHex: string) => string;
-  zylith_wallet_mnemonic_to_seed_hex: (phrase: string) => string;
   zylith_wallet_derive_public_config: (seedHex: string) => string;
   zylith_wallet_build_deposit_submission_plan: (inputJson: string) => string;
   zylith_wallet_build_private_order_submission: (inputJson: string) => string;
+  zylith_wallet_build_private_liquidity_position_open: (
+    inputJson: string
+  ) => string;
+  zylith_wallet_prepare_private_liquidity_position_reconfigure: (
+    inputJson: string
+  ) => string;
+  zylith_wallet_build_private_liquidity_position_reconfigure: (
+    inputJson: string
+  ) => string;
+  zylith_wallet_prepare_private_liquidity_position_close: (
+    inputJson: string
+  ) => string;
+  zylith_wallet_build_private_liquidity_position_close: (
+    inputJson: string
+  ) => string;
+  zylith_wallet_authorize_liquidity_position_open: (inputJson: string) => string;
+  zylith_wallet_authorize_liquidity_position_reconfigure: (
+    inputJson: string
+  ) => string;
+  zylith_wallet_authorize_liquidity_position_close: (inputJson: string) => string;
   zylith_wallet_build_strategy_parent: (inputJson: string) => string;
   zylith_wallet_build_renewal_parent_cancel_submission_plan: (
     inputJson: string
@@ -329,6 +413,12 @@ type WalletWasmModule = {
     batchId: string,
     maxOutputCount: number
   ) => string;
+  zylith_wallet_output_recovery_key_tags_range: (
+    seedHex: string,
+    batchId: string,
+    startOutputIndex: number,
+    outputCount: number
+  ) => string;
   zylith_wallet_decrypt_output_recovery_record: (
     seedHex: string,
     batchId: string,
@@ -336,17 +426,16 @@ type WalletWasmModule = {
     recordJson: string,
     expectedOutputNoteRoot: string
   ) => string;
+  zylith_wallet_decrypt_liquidity_attribution_artifact: (
+    seedHex: string,
+    artifactJson: string
+  ) => string;
   zylith_wallet_recovery_auth_tag: (seedHex: string) => string;
   zylith_wallet_create_recovery_snapshot: (inputJson: string) => string;
   zylith_wallet_decrypt_recovery_artifact: (
     seedHex: string,
     artifactJson: string
   ) => string;
-  zylith_wallet_decrypt_maker_attribution_artifact: (
-    seedHex: string,
-    artifactJson: string
-  ) => string;
-  zylith_wallet_build_withdrawal_submission_plan: (inputJson: string) => string;
   zylith_wallet_build_settlement_output_withdrawal_submission_plan: (
     inputJson: string
   ) => string;
@@ -380,7 +469,7 @@ export type LocalNoteRecord = {
   };
   output_note?: unknown;
   output_proof?: unknown;
-  maker_attribution?: MakerBandAttribution;
+  liquidity_provider_attribution?: LiquidityBandAttribution;
   locked_by_order?: string;
   pending_deposit_tx?: string;
   deposit_confirmed?: boolean;
@@ -487,7 +576,7 @@ type WithdrawableNote = {
   strk20_exit_commitment?: string;
   strk20_open_note_id?: string;
   metadata_commitment: string;
-  maker_attribution?: MakerBandAttribution;
+  liquidity_provider_attribution?: LiquidityBandAttribution;
 };
 
 type NoteConsolidationRequest = {
@@ -504,15 +593,8 @@ type NoteConsolidationResult = {
   output_note_commitments: string[];
 };
 
-type MakerAttributionArtifactList = {
-  batch_id: string;
-  maker_public_key: string;
-  artifacts: unknown[];
-};
-
 type RenewalCancelWitnessResponse = {
   cancel_marker: string;
-  entry_count: number;
   prior_renewal_entries: string[];
   renewal_cancel_sparse_witness: {
     key_low: string;
@@ -520,17 +602,6 @@ type RenewalCancelWitnessResponse = {
     merkle_path: string[];
     merkle_directions: string[];
   };
-};
-
-type MakerAttributionPlaintext = {
-  version: number;
-  batch_id: string;
-  pair_id: string;
-  epoch_id: number;
-  maker_public_key: string;
-  curve_commitment: string;
-  output_note_commitment: string;
-  attribution: MakerBandAttribution;
 };
 
 type PrivateStrategySummary = {
@@ -547,8 +618,6 @@ type PrivateStrategySummary = {
   price_base_scale?: string;
   min_fill: string;
   fill_or_kill: boolean;
-  maker_curve_points?: Array<{ price: string; base_amount: string }>;
-  maker_inventory_cap?: string;
   renewal_window_children?: number;
   max_children: number;
   next_child_index: number;
@@ -564,6 +633,7 @@ type PrivateStrategySummary = {
     relay_mode?: "SelfRelay" | "ZylithRelay";
     parent_cancel_authority?: string;
     relay_authorization?: OfflineRenewalPackage["relay_authorization"];
+    access_token?: string;
   };
   parent_cancel_transaction_hash?: string;
   last_error?: string;
@@ -578,15 +648,6 @@ type PrivateStrategySummary = {
     submitted_at_unix_ms: number;
     delegated?: boolean;
   }>;
-};
-
-type BatchSummary = {
-  batch_id: string;
-  pair_id: string;
-  epoch_id: number;
-  close_time_unix_ms: number;
-  status: string;
-  order_count_bucket: string;
 };
 
 type PublishedBatchArtifactList = {
@@ -609,11 +670,12 @@ type ProofJobStatus = {
 
 type PrivateSettlementReportRequest = {
   batch_id: string;
-  order_commitments?: string[];
   orders?: Array<{
     order_commitment: string;
     cancellation_secret: string;
   }>;
+  liquidity_position_transition_commitments?: string[];
+  liquidity_provider_public_keys?: string[];
 };
 
 type PrivateSettlementReportOrderAuth = {
@@ -626,7 +688,6 @@ type PrivateOrderExecutionReport = {
   pair_id: string;
   order_commitment: string;
   order_report_auth_tag?: string | null;
-  funding_note_commitment?: string;
   funding_note_commitments?: string[];
   status: string;
   side: Side;
@@ -652,12 +713,32 @@ type PrivateSettlementReport = {
   output_note_root: string;
   clearing_price: string;
   price_base_scale: string;
-  matched_order_count: number;
+  matched_order_count_bucket?: string;
   output_recovery_records: Array<{
     output_index: number;
     recovery: unknown;
   }>;
   order_execution_reports: PrivateOrderExecutionReport[];
+  liquidity_position_lifecycle_reports?: PrivateLiquidityPositionLifecycleReport[];
+  liquidity_provider_attribution_artifacts?: unknown[];
+};
+
+type LiquidityAttributionPlaintext = {
+  version: number;
+  batch_id: string;
+  pair_id: string;
+  epoch_id: number;
+  liquidity_provider_public_key: string;
+  curve_commitment: string;
+  output_note_commitment: string;
+  attribution: LiquidityBandAttribution;
+};
+
+type PrivateLiquidityPositionLifecycleReport = {
+  transition_commitment: string;
+  kind: "Open" | "Update" | "Close" | "Reconfigure";
+  consumed_position_commitment?: string | { 0?: string } | null;
+  output_position_commitment?: string | { 0?: string } | null;
 };
 
 type OutputRecoveryKeyTagList = {
@@ -711,6 +792,7 @@ type WalletScanState = {
   version: 1;
   scanned_artifact_ids: string[];
   private_report_batch_ids: string[];
+  liquidity_attribution_batch_ids: string[];
   artifact_epoch_cursor: number;
 };
 
@@ -724,15 +806,97 @@ type CoordinatorAccepted = {
   batch_id: string;
 };
 
+type PrivateLiquidityPositionOpenBuild = {
+  lifecycle_id: string;
+  position?: ProtocolPrivateLiquidityPosition;
+  position_commitment: string;
+  transition_commitment: string;
+  funding_note_commitments: string[];
+  ingress_request: unknown;
+};
+
+type PrivateLiquidityPositionLifecycleBuild = {
+  lifecycle_id: string;
+  position_id: string;
+  prior_position_commitment: string;
+  output_position?: ProtocolPrivateLiquidityPosition;
+  output_position_commitment?: string;
+  transition_commitment: string;
+  output_notes?: unknown[];
+  ingress_request: unknown;
+};
+
+type ProtocolPrivateLiquidityPosition = Record<string, unknown> & {
+  position_id?: string;
+  pair_id?: string;
+  base_asset_id?: string;
+  quote_asset_id?: string;
+};
+
+type LocalLiquidityPositionStatus =
+  | "pending_open"
+  | "active"
+  | "pending_reconfigure"
+  | "pending_close"
+  | "closed";
+
+type LocalLiquidityPositionRecord = {
+  id: string;
+  position: ProtocolPrivateLiquidityPosition;
+  position_commitment: string;
+  pair_id: string;
+  status: LocalLiquidityPositionStatus;
+  deployment_scope?: string;
+  last_lifecycle_id?: string;
+  last_transition_commitment?: string;
+  last_batch_id?: string;
+  last_epoch_id?: number;
+  opened_at_unix_ms?: number;
+  updated_at_unix_ms?: number;
+  fill_attributions?: LiquidityAttributionPlaintext[];
+};
+
+type PrivateLiquidityPositionLifecycleResult = {
+  lifecycle_id: string;
+  position_id: string;
+  prior_position_commitment: string;
+  output_position_commitment?: string;
+  transition_commitment: string;
+  output_notes?: unknown[];
+  batch_id: string;
+  epoch_id: number;
+  submission_ambiguous?: boolean;
+};
+
+type LiquidityPositionInsertionWitnessResponse = {
+  prior_liquidity_position_root: string;
+  new_liquidity_position_root: string;
+  active_position_count: number;
+  state_update: unknown;
+};
+
+type LiquidityPositionStateResponse = {
+  prior_liquidity_position_root: string;
+  position: ProtocolPrivateLiquidityPosition;
+  position_commitment: string;
+  active_position_count: number;
+};
+
+type LiquidityPositionLifecycleAccepted = {
+  lifecycle_id: string;
+  transition_commitment: string;
+  batch_id: string;
+  accepted_at_unix_ms: number;
+};
+
 type StarknetCallPayload = {
   contract_address: string;
   entrypoint: string;
   calldata: string[];
 };
 
-type HostedWithdrawalRequest = {
+type Strk20WithdrawalRequest = {
   chain_id?: string;
-  recipient?: string;
   shielded_asset_adapter_address?: string;
   auction_verifier_address?: string;
   note_commitment?: string;
@@ -746,26 +910,24 @@ type DeploymentConfig = {
   chain_id?: string;
   rpc_url?: string;
   proof?: {
-    native_prover_rpc_url?: string;
     native_tx_prover_url?: string;
     note_consolidation_statement_program_address?: string;
     withdrawal_statement_program_address?: string;
   };
-  proof_config?: {
-    native_prover_rpc_url?: string;
-  };
   contracts?: {
     auction_verifier?: string;
     shielded_asset_adapter?: string;
-    privacy_deposit_bridge?: string;
   };
   token_addresses?: Record<string, string>;
   funding?: {
     primary?: "starknet_privacy" | string;
-    capabilities?: {
-      private_withdrawals?: boolean;
-      private_transfers?: boolean;
-    };
+    assets?: Record<
+      string,
+      {
+        token_address?: string;
+        rail_token_address?: string;
+      }
+    >;
     starknet_privacy?: {
       privacy_pool?: string;
       bridge_adapter?: string;
@@ -774,7 +936,6 @@ type DeploymentConfig = {
       paymaster_address?: string;
       paymaster_url?: string;
       proof_signer_class_hash?: string;
-      shielded_asset_adapter?: string;
       sdk_package?: string;
       sdk_version?: string;
       min_proving_delay_blocks?: number;
@@ -789,15 +950,15 @@ type DeploymentConfig = {
         enabled?: boolean;
       }
     >;
+    assets?: Record<
+      string,
+      {
+        token_address?: string;
+      }
+    >;
   };
 };
 
-const ZAN_STARKNET_SEPOLIA_RPC_URL =
-  "https://api.zan.top/public/starknet-sepolia/rpc/v0_10";
-const SELECTED_STARKNET_WALLET_STORAGE_KEY = "zylith:selected-starknet-wallet";
-const CONNECTED_STARKNET_ADDRESS_STORAGE_KEY =
-  "zylith:connected-starknet-address";
-const rpcSyncedProviders = new WeakSet<StarknetInjectedProvider>();
 const CHAIN_ID_ALIASES: Record<string, string> = {
   SN_SEPOLIA: "0x534e5f5345504f4c4941",
   SN_MAIN: "0x534e5f4d41494e",
@@ -819,6 +980,7 @@ type StarknetInjectedProvider = {
   id?: string;
   name?: string;
   chainId?: string;
+  getChainId?: () => Promise<string> | string;
   enable?: (options?: unknown) => Promise<unknown>;
   request?: (request: {
     type?: string;
@@ -829,6 +991,7 @@ type StarknetInjectedProvider = {
     address?: string;
     getChainId?: () => Promise<string>;
     execute?: (calls: StarknetWalletCall[]) => Promise<unknown>;
+    signMessage?: (typedData: unknown) => Promise<unknown>;
   };
   selectedAddress?: string;
   isConnected?: boolean;
@@ -836,13 +999,10 @@ type StarknetInjectedProvider = {
 
 declare global {
   interface Window {
-    zylithWallet?: WalletRuntime;
-    zylithWalletLoadError?: string;
     starknet?: StarknetInjectedProvider;
     starknet_ready?: StarknetInjectedProvider;
     starknet_xverse?: StarknetInjectedProvider;
     xverse?: StarknetInjectedProvider;
-    zylithSelectedStarknetProvider?: StarknetInjectedProvider;
   }
 }
 
@@ -867,8 +1027,15 @@ type RecoverySnapshotPayload = {
   version: 1;
   notes: LocalNoteRecord[];
   strategies: PrivateStrategyRecord[];
+  liquidity_positions?: LocalLiquidityPositionRecord[];
   orders?: LocalOrder[];
   created_at_unix_ms: number;
+};
+
+type WalletSignatureVaultBundle = {
+  wallet_auth_id: string;
+  vault: VaultRecord;
+  updated_at_unix_ms?: number;
 };
 
 type StrategyParentMaterial = {
@@ -909,6 +1076,7 @@ type OfflineRenewalPackage = {
     signature_r: string;
     signature_s: string;
   };
+  access_token?: string;
   ingress_key_registry_fingerprint?: string;
   relay_policy: {
     prover_url: string;
@@ -934,7 +1102,7 @@ type PrivateStrategyRecord = {
   version: 1;
   deployment_scope?: string;
   id: string;
-  mode: Exclude<OrderMode, "Limit" | "Maker Curve">;
+  mode: Exclude<OrderMode, "Limit" | "Liquidity Position">;
   pair: string;
   side: Side;
   total_amount: string;
@@ -951,9 +1119,6 @@ type PrivateStrategyRecord = {
   end_epoch: number;
   randomized_slicing: boolean;
   slice_jitter_bps: number;
-  maker_curve_points?: Array<{ price: string; base_amount: string }>;
-  maker_curve_rotation_bps?: number;
-  maker_inventory_cap?: string;
   renewal_window_children?: number;
   parent: StrategyParentMaterial;
   submitted_children: StrategyChildRecord[];
@@ -975,45 +1140,30 @@ type PrivateStrategyRecord = {
 };
 
 const coordinatorUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_COORDINATOR_URL ||
-    localServiceUrl(3000, "coordinator")
+  browserSafeServiceUrl(
+    normalizeUrl(import.meta.env.VITE_ZYLITH_COORDINATOR_URL) ||
+      localServiceUrl(3000, "coordinator"),
+    "coordinator"
+  )
 );
 const proverUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_PRIVATE_INGRESS_URL ||
-    import.meta.env.VITE_ZYLITH_PROVER_URL ||
-    localServiceUrl(3200, "prover")
+  browserSafeServiceUrl(
+    normalizeUrl(import.meta.env.VITE_ZYLITH_PRIVATE_INGRESS_URL) ||
+      localServiceUrl(3200, "prover"),
+    "prover"
+  )
 );
 const indexerUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_INDEXER_URL || localServiceUrl(3300, "indexer")
+  browserSafeServiceUrl(
+    normalizeUrl(import.meta.env.VITE_ZYLITH_INDEXER_URL) ||
+      localServiceUrl(3300, "indexer"),
+    "indexer"
+  )
 );
-const configuredPaymasterUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_PAYMASTER_URL ||
-    localServiceUrl(8787, "paymaster/execute-outside")
-);
-const configuredChainId = normalizeText(import.meta.env.VITE_ZYLITH_CHAIN_ID);
-const configuredPaymasterAddress = normalizeText(
-  import.meta.env.VITE_ZYLITH_PAYMASTER_ADDRESS
-);
-const configuredAuctionVerifierAddress = normalizeText(
-  import.meta.env.VITE_ZYLITH_AUCTION_VERIFIER_ADDRESS
-);
-const configuredShieldedAssetAdapterAddress = normalizeText(
-  import.meta.env.VITE_ZYLITH_SHIELDED_ASSET_ADAPTER_ADDRESS
-);
-const walletWasmModuleUrl = normalizeUrl(
-  import.meta.env.VITE_ZYLITH_WALLET_WASM_MODULE_URL ||
-    "/wallet/zylith_wallet_wasm.js"
-);
-const remoteWalletWasmModuleAllowed =
-  normalizeText(import.meta.env.VITE_ZYLITH_ALLOW_REMOTE_WALLET_WASM).toLowerCase() ===
-  "true";
+const walletWasmModuleUrl = "/wallet/zylith_wallet_wasm.js";
 const ingressKeyPin = normalizeText(
   import.meta.env.VITE_ZYLITH_INGRESS_KEY_REGISTRY_PIN
 );
-const publicMakerAttributionLookupEnabled =
-  normalizeText(
-    import.meta.env.VITE_ZYLITH_ENABLE_PUBLIC_MAKER_ATTRIBUTION_LOOKUP
-  ).toLowerCase() === "true";
 const scanEpochLookback = positiveInteger(
   import.meta.env.VITE_ZYLITH_WALLET_SCAN_EPOCH_LOOKBACK,
   128
@@ -1022,9 +1172,10 @@ const scanEpochBackfillStep = positiveInteger(
   import.meta.env.VITE_ZYLITH_WALLET_SCAN_EPOCH_BACKFILL_STEP,
   Math.max(scanEpochLookback, 512)
 );
-const VAULT_KEY = "zylith.wallet.vault.v1";
+const VAULT_KEY = "zylith.wallet.vault.v4";
 const NOTES_PREFIX = "zylith.wallet.notes.v1:";
 const STRATEGIES_PREFIX = "zylith.wallet.strategies.v1:";
+const LIQUIDITY_POSITIONS_PREFIX = "zylith.wallet.liquidity-positions.v1:";
 const ORDERS_PREFIX = "zylith.wallet.orders.v1:";
 const SCAN_STATE_PREFIX = "zylith.wallet.scan-state.v1:";
 const STARKNET_PRIVACY_REGISTRY_PREFIX =
@@ -1034,27 +1185,25 @@ const DEPOSIT_CONFIRMATION_WORKER_INTERVAL_MS = 5_000;
 const LATEST_EPOCH_CACHE_TTL_MS = 15_000;
 const PRIVATE_REPORT_OUTPUT_TAG_COUNT = boundedInteger(
   import.meta.env.VITE_ZYLITH_PRIVATE_REPORT_OUTPUT_TAG_COUNT,
-  128,
-  8,
-  512
+  4_096,
+  256,
+  8_192
 );
-const PRIVATE_SETTLEMENT_REPORTS_EVENT = "zylith-private-settlement-reports";
+const PRIVATE_REPORT_OUTPUT_TAG_PAGE_SIZE = 1_024;
 const MAX_STRATEGY_CHILDREN = boundedInteger(
   import.meta.env.VITE_ZYLITH_MAX_STRATEGY_CHILDREN,
   86_400,
   1,
   100_000
-); // 90d at the production 90s epoch cadence.
+);
 const PENDING_DEPOSIT_FAILURE_GRACE_MS = 10 * 60 * 1000;
 const CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS = 10 * 60 * 1000;
 const DEPOSIT_CONFIRMATION_STALE_MS = 2 * 60 * 1000;
-const DEFAULT_MAKER_CURVE_ROTATION_BPS = boundedInteger(
-  import.meta.env.VITE_ZYLITH_MAKER_CURVE_ROTATION_BPS,
-  250,
-  0,
-  1_000
-);
+const STRK20_WITHDRAWAL_PREPARE_TIMEOUT_MS = 2 * 60 * 1000;
+const STRK20_WITHDRAWAL_SUBMIT_TIMEOUT_MS = 20 * 60 * 1000;
+const DEFAULT_LIQUIDITY_POSITION_BATCH_WINDOW_MS = 20_000;
 const RECOVERY_SNAPSHOT_MIN_INTERVAL_MS = 60_000;
+const PENDING_LIQUIDITY_POSITION_OPEN_RELEASE_GRACE_MS = 30 * 60_000;
 
 export async function installConfiguredZylithWalletRuntime() {
   if (typeof window === "undefined" || !walletWasmModuleUrl) return;
@@ -1062,36 +1211,34 @@ export async function installConfiguredZylithWalletRuntime() {
     if (
       !walletWasmModuleUrlAllowed(
         walletWasmModuleUrl,
-        window.location.href,
-        remoteWalletWasmModuleAllowed
+        window.location.href
       )
     ) {
       throw new Error(
         "Wallet runtime module must be served from the current origin."
       );
     }
-    const runtimeImport = new Function("url", "return import(url)") as (
-      url: string
-    ) => Promise<unknown>;
-    const mod = (await runtimeImport(walletWasmModuleUrl)) as WalletWasmModule;
+    const resolvedModuleUrl = new URL(
+      walletWasmModuleUrl,
+      window.location.href
+    ).href;
+    const mod = (await import(
+      /* @vite-ignore */ resolvedModuleUrl
+    )) as WalletWasmModule;
     if (typeof mod.default === "function") await mod.default();
-    window.zylithWallet = createZylithWalletRuntime(mod);
-    window.zylithWalletLoadError = undefined;
+    setWalletRuntime(createZylithWalletRuntime(mod));
   } catch (error) {
-    window.zylithWallet = undefined;
-    window.zylithWalletLoadError = userFacingErrorMessage(
+    const loadError = userFacingErrorMessage(
       error,
-      "Failed to load Zylith wallet runtime."
+      "Failed to load private trading runtime."
     );
-  } finally {
-    window.dispatchEvent(new CustomEvent("zylith-wallet-runtime-ready"));
+    setWalletRuntime(null, loadError);
   }
 }
 
 export function walletWasmModuleUrlAllowed(
   moduleUrl: string,
-  pageUrl: string,
-  allowRemote = false
+  pageUrl: string
 ): boolean {
   const trimmedModuleUrl = moduleUrl.trim();
   if (!trimmedModuleUrl) return false;
@@ -1099,7 +1246,7 @@ export function walletWasmModuleUrlAllowed(
     const baseUrl = pageUrl.trim() || "http://localhost/";
     const page = new URL(baseUrl);
     const resolved = new URL(trimmedModuleUrl, page);
-    return allowRemote || resolved.origin === page.origin;
+    return resolved.origin === page.origin;
   } catch {
     return false;
   }
@@ -1112,6 +1259,7 @@ export function createZylithWalletRuntime(
   let publicConfig: WalletPublicConfig | null = null;
   let notes: LocalNoteRecord[] = [];
   let strategies: PrivateStrategyRecord[] = [];
+  let liquidityPositions: LocalLiquidityPositionRecord[] = [];
   let deploymentScope = "unbound";
   let strategyTimer: number | null = null;
   let depositConfirmationTimer: number | null = null;
@@ -1120,33 +1268,30 @@ export function createZylithWalletRuntime(
   let depositSubmissionInFlightRequestId: string | null = null;
   let recoverySyncInFlight = false;
   let postUnlockSyncInFlight = false;
+  let walletSignatureVaultOperation:
+    | { key: string; promise: Promise<boolean> }
+    | null = null;
+  let walletSessionGeneration = 0;
   let lastRecoverySnapshotAtUnixMs = 0;
   let deploymentConfigCache: DeploymentConfig | null = null;
   let scanState: WalletScanState = {
     version: 1,
     scanned_artifact_ids: [],
     private_report_batch_ids: [],
+    liquidity_attribution_batch_ids: [],
     artifact_epoch_cursor: 0,
   };
   let latestEpochCache: { value: number | null; expiresAt: number } | null =
     null;
+  let coordinatorBatchWindowCache: { value: number | null; expiresAt: number } | null =
+    null;
+  let ingressRegistryCache: unknown | null = null;
 
   function requireUnlocked() {
     if (!seedHex || !publicConfig) {
-      throw new Error("Zylith wallet is locked");
+      throw new Error("Wallet session is locked");
     }
     return { seedHex, publicConfig };
-  }
-
-  function setupSessionUnlockChannel() {
-    // Intentionally disabled: raw wallet seeds must never be sent over
-    // BroadcastChannel. A future cross-tab unlock flow must use a
-    // non-extractable worker/session capability instead.
-  }
-
-  function requestSessionUnlock(): Promise<boolean> {
-    if (seedHex && publicConfig) return Promise.resolve(true);
-    return Promise.resolve(false);
   }
 
   async function loadNotes() {
@@ -1235,6 +1380,53 @@ export function createZylithWalletRuntime(
     );
   }
 
+  async function loadLiquidityPositions() {
+    const unlocked = requireUnlocked();
+    const key = `${LIQUIDITY_POSITIONS_PREFIX}${localStateScope()}`;
+    const stored = readJson<EncryptedLocalStore>(key);
+    if (!stored) {
+      liquidityPositions = [];
+      return;
+    }
+    try {
+      const decoded = await decryptLocalStore<unknown>(
+        stored,
+        unlocked.seedHex,
+        unlocked.publicConfig.account_id,
+        "liquidity-positions"
+      );
+      liquidityPositions = Array.isArray(decoded)
+        ? decoded
+            .map(normalizeLocalLiquidityPositionRecord)
+            .filter(
+              (position) => position.deployment_scope === deploymentScope
+            )
+        : [];
+    } catch {
+      quarantineLocalStore(key);
+      liquidityPositions = [];
+    }
+  }
+
+  async function saveLiquidityPositions() {
+    if (!seedHex || !publicConfig) return;
+    const encrypted = await encryptLocalStore(
+      liquidityPositions.map((position) =>
+        normalizeLocalLiquidityPositionRecord({
+          ...position,
+          deployment_scope: deploymentScope,
+        })
+      ),
+      seedHex,
+      publicConfig.account_id,
+      "liquidity-positions"
+    );
+    localStorage.setItem(
+      `${LIQUIDITY_POSITIONS_PREFIX}${localStateScope()}`,
+      JSON.stringify(encrypted)
+    );
+  }
+
   async function loadLocalOrders(): Promise<LocalOrder[]> {
     const unlocked = requireUnlocked();
     const key = `${ORDERS_PREFIX}${localStateScope()}`;
@@ -1248,9 +1440,9 @@ export function createZylithWalletRuntime(
         "orders"
       );
       return Array.isArray(decoded)
-        ? (decoded as LocalOrder[]).filter(
-            (order) => order.deployment_scope === deploymentScope
-          )
+        ? (decoded as LocalOrder[])
+            .map(normalizeLocalOrder)
+            .filter((order) => order.deployment_scope === deploymentScope)
         : [];
     } catch {
       quarantineLocalStore(key);
@@ -1262,7 +1454,9 @@ export function createZylithWalletRuntime(
     if (!seedHex || !publicConfig) return;
     const encrypted = await encryptLocalStore(
       orders
-        .map((order) => ({ ...order, deployment_scope: deploymentScope }))
+        .map((order) =>
+          normalizeLocalOrder({ ...order, deployment_scope: deploymentScope })
+        )
         .filter((order) => order.deployment_scope === deploymentScope),
       seedHex,
       publicConfig.account_id,
@@ -1292,8 +1486,6 @@ export function createZylithWalletRuntime(
       ...strategy,
       offline_package: {
         ...strategy.offline_package,
-        // Managed packages are already registered with Zylith Relay. Self-hosted
-        // packages keep ingress payloads so the maker can recover and operate them.
         slots: strategy.offline_package.slots.map((slot) => ({
           ...slot,
           ingress_request: undefined,
@@ -1308,6 +1500,7 @@ export function createZylithWalletRuntime(
         version: 1,
         scanned_artifact_ids: [],
         private_report_batch_ids: [],
+        liquidity_attribution_batch_ids: [],
         artifact_epoch_cursor: 0,
       };
       return;
@@ -1319,6 +1512,7 @@ export function createZylithWalletRuntime(
         version: 1,
         scanned_artifact_ids: [],
         private_report_batch_ids: [],
+        liquidity_attribution_batch_ids: [],
         artifact_epoch_cursor: 0,
       };
       return;
@@ -1336,6 +1530,9 @@ export function createZylithWalletRuntime(
         private_report_batch_ids: uniqueStrings(
           decoded.private_report_batch_ids
         ),
+        liquidity_attribution_batch_ids: uniqueStrings(
+          decoded.liquidity_attribution_batch_ids
+        ),
         artifact_epoch_cursor: nonNegativeInteger(
           decoded.artifact_epoch_cursor,
           0
@@ -1347,6 +1544,7 @@ export function createZylithWalletRuntime(
         version: 1,
         scanned_artifact_ids: [],
         private_report_batch_ids: [],
+        liquidity_attribution_batch_ids: [],
         artifact_epoch_cursor: 0,
       };
     }
@@ -1402,18 +1600,29 @@ export function createZylithWalletRuntime(
     );
   }
 
-  async function hydrateFromSeed(nextSeedHex: string) {
+  async function hydrateFromSeed(
+    nextSeedHex: string,
+    generation = walletSessionGeneration
+  ) {
+    ensureWalletSignatureOperationCurrent(generation);
     seedHex = normalizeRecoverySeed(nextSeedHex);
     publicConfig = JSON.parse(
       core.zylith_wallet_derive_public_config(seedHex)
     ) as WalletPublicConfig;
     deploymentScope = await resolveDeploymentScope();
+    ensureWalletSignatureOperationCurrent(generation);
     await loadNotes();
+    ensureWalletSignatureOperationCurrent(generation);
     await loadStrategies();
+    ensureWalletSignatureOperationCurrent(generation);
+    await loadLiquidityPositions();
+    ensureWalletSignatureOperationCurrent(generation);
     await loadScanState();
+    ensureWalletSignatureOperationCurrent(generation);
     void runPostUnlockSync();
     startDepositConfirmationWorker();
     startStrategyWorker();
+    notifyWalletRuntimeChanged();
     return true;
   }
 
@@ -1424,6 +1633,8 @@ export function createZylithWalletRuntime(
       await refreshDepositConfirmations().catch(() => false);
       await syncRecoveryArtifacts({ pushSnapshot: false }).catch(() => false);
       await pruneUnsettledSettlementOutputs().catch(() => false);
+      await syncLiquidityPositionLifecycleState().catch(() => false);
+      await releaseStalePendingLiquidityPositionOpens().catch(() => false);
       await scanNotes().catch(() => undefined);
       await pushRecoverySnapshot(false).catch(() => undefined);
     } finally {
@@ -1431,95 +1642,277 @@ export function createZylithWalletRuntime(
     }
   }
 
-  function parseRecoverySeedInput(value: string) {
-    const normalized = value.trim();
-    if (/^(0x)?[0-9a-fA-F]{64}$/.test(normalized)) {
-      return normalizeRecoverySeed(normalized);
-    }
-    return normalizeRecoverySeed(
-      core.zylith_wallet_mnemonic_to_seed_hex(normalized)
+  function walletVaultStorageKey(starknetAddress?: string | null) {
+    const normalized = starknetAddress
+      ? normalizeFeltForComparison(starknetAddress)
+      : "";
+    return normalized ? `${VAULT_KEY}:${normalized}` : VAULT_KEY;
+  }
+
+  function readWalletSignatureVault(starknetAddress?: string | null) {
+    return readJson<VaultRecord>(walletVaultStorageKey(starknetAddress));
+  }
+
+  function writeWalletSignatureVault(vault: WalletSignatureVaultRecord) {
+    localStorage.setItem(
+      walletVaultStorageKey(vault.wallet_address),
+      JSON.stringify(vault)
     );
   }
 
-  function hasVault() {
-    return Boolean(readJson<VaultRecord>(VAULT_KEY));
+  function removeWalletSignatureVault(starknetAddress?: string | null) {
+    localStorage.removeItem(walletVaultStorageKey(starknetAddress));
   }
 
-  async function createWallet(passphrase: string) {
-    validateWalletPassphrase(passphrase);
-    if (hasVault()) {
-      throw new Error("Zylith wallet already exists");
+  function hasVault(starknetAddress?: string | null) {
+    return isWalletSignatureVaultRecord(readWalletSignatureVault(starknetAddress));
+  }
+
+  function vaultAuthMode(starknetAddress?: string | null): "none" | "wallet-signature" {
+    const vault = readWalletSignatureVault(starknetAddress);
+    if (isWalletSignatureVaultRecord(vault)) return "wallet-signature";
+    return "none";
+  }
+
+  async function createWalletWithWalletSignature(starknetAddress: string) {
+    return runWalletSignatureVaultOperation(
+      `create:${normalizeFeltForComparison(starknetAddress)}`,
+      async () => {
+        const generation = walletSessionGeneration;
+        const context = await requestWalletSignatureVaultContext(starknetAddress);
+        ensureWalletSignatureOperationCurrent(generation);
+        if (hasVault(context.walletAddress)) {
+          throw new Error("Wallet session already exists");
+        }
+        if (await restoreWalletSignatureVaultFromRemote(context, generation))
+          return true;
+        return writeNewWalletSignatureVault(starknetAddress, context, generation);
+      }
+    );
+  }
+
+  async function writeNewWalletSignatureVault(
+    starknetAddress: string,
+    context?: WalletSignatureVaultContext,
+    generation = walletSessionGeneration
+  ) {
+    const nextSeedHex = normalizeRecoverySeed(core.zylith_wallet_generate_seed_hex());
+    return writeWalletSignatureSeedVault(
+      nextSeedHex,
+      starknetAddress,
+      context,
+      generation
+    );
+  }
+
+  async function writeWalletSignatureSeedVault(
+    nextSeedHex: string,
+    starknetAddress: string,
+    context?: WalletSignatureVaultContext,
+    generation = walletSessionGeneration
+  ) {
+    const vaultContext =
+      context ?? (await requestWalletSignatureVaultContext(starknetAddress));
+    const nextVault = await encryptSeedWithWalletSignature(
+      nextSeedHex,
+      vaultContext
+    );
+    ensureWalletSignatureOperationCurrent(generation);
+    writeWalletSignatureVault(nextVault);
+    await pushWalletSignatureVaultBundle(vaultContext, nextVault).catch(
+      () => undefined
+    );
+    ensureWalletSignatureOperationCurrent(generation);
+    return hydrateFromSeed(nextSeedHex, generation);
+  }
+
+  async function unlockWithWalletSignature(starknetAddress: string) {
+    return runWalletSignatureVaultOperation(
+      `unlock:${normalizeFeltForComparison(starknetAddress)}`,
+      async () => {
+        const generation = walletSessionGeneration;
+        if (seedHex && publicConfig) return true;
+        const context = await requestWalletSignatureVaultContext(starknetAddress);
+        ensureWalletSignatureOperationCurrent(generation);
+        let vault = readWalletSignatureVault(context.walletAddress);
+        if (!vault) {
+          const remote = await pullWalletSignatureVaultBundle(context);
+          if (remote?.vault && isWalletSignatureVaultRecord(remote.vault)) {
+            if (walletSignatureVaultMetadataMatches(remote.vault, context)) {
+              vault = remote.vault;
+              writeWalletSignatureVault(remote.vault);
+            } else {
+              removeWalletSignatureVault(context.walletAddress);
+            }
+          }
+        }
+        if (!isWalletSignatureVaultRecord(vault)) return false;
+        if (!walletSignatureVaultMetadataMatches(vault, context)) {
+          removeWalletSignatureVault(context.walletAddress);
+          return false;
+        }
+        let nextSeedHex: string;
+        try {
+          nextSeedHex = await decryptSeedWithWalletSignature(vault, context);
+        } catch {
+          return false;
+        }
+        ensureWalletSignatureOperationCurrent(generation);
+        return hydrateFromSeed(nextSeedHex, generation);
+      }
+    );
+  }
+
+  function ensureWalletSignatureOperationCurrent(generation: number) {
+    if (generation !== walletSessionGeneration) {
+      throw new Error("Wallet session changed. Retry.");
     }
-    return writeNewWalletVault(passphrase);
   }
 
-  async function replaceWithNewWallet(passphrase: string) {
-    validateWalletPassphrase(passphrase);
-    lock();
-    return writeNewWalletVault(passphrase);
-  }
-
-  async function writeNewWalletVault(passphrase: string) {
-    const mnemonic = core.zylith_wallet_generate_mnemonic();
-    const nextSeedHex = core.zylith_wallet_mnemonic_to_seed_hex(mnemonic);
-    const nextVault = await encryptSeed(nextSeedHex, passphrase);
-    localStorage.setItem(VAULT_KEY, JSON.stringify(nextVault));
-    return hydrateFromSeed(nextSeedHex);
-  }
-
-  async function importRecoverySeed(
-    recoveryPhraseOrSeedHex: string,
-    passphrase: string
-  ) {
-    validateWalletPassphrase(passphrase);
-    if (hasVault()) {
-      throw new Error("Zylith wallet already exists");
+  function runWalletSignatureVaultOperation(
+    key: string,
+    operation: () => Promise<boolean>
+  ): Promise<boolean> {
+    if (walletSignatureVaultOperation?.key === key) {
+      return walletSignatureVaultOperation.promise;
     }
-    return writeRecoverySeedVault(recoveryPhraseOrSeedHex, passphrase);
+    const promise = operation().finally(() => {
+      if (walletSignatureVaultOperation?.promise === promise) {
+        walletSignatureVaultOperation = null;
+      }
+    });
+    walletSignatureVaultOperation = { key, promise };
+    return promise;
   }
 
-  async function replaceRecoverySeed(
-    recoveryPhraseOrSeedHex: string,
-    passphrase: string
+  async function requestWalletSignatureVaultContext(
+    starknetAddress: string
+  ): Promise<WalletSignatureVaultContext> {
+    const provider = selectedStarknetProvider();
+    if (!provider) {
+      throw new Error("Connect a Starknet wallet first");
+    }
+    const connected = connectedProviderAddress(provider);
+    const expectedAddress = normalizeFeltForComparison(starknetAddress);
+    if (connected && normalizeFeltForComparison(connected) !== expectedAddress) {
+      throw new Error("Connected Starknet wallet changed during private trading authorization");
+    }
+    const deployment = await loadDeploymentConfig();
+    await ensureWalletChain(provider, deployment);
+    const chainId = requiredNonZeroFelt(deployment.chain_id, "chain_id");
+    const deploymentId = await zylithWalletAuthDeploymentId(deployment, chainId);
+    const origin =
+      typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "zylith://local";
+    const typedData = await buildZylithWalletAuthTypedData({
+      walletAddress: expectedAddress,
+      chainId,
+      deploymentId,
+      origin,
+    });
+    const signature = await requestStarknetWalletTypedSignature(
+      provider,
+      typedData
+    );
+    return {
+      signature,
+      walletAddress: expectedAddress,
+      chainId,
+      deploymentId,
+      origin,
+      messageVersion: 2,
+    };
+  }
+
+  async function restoreWalletSignatureVaultFromRemote(
+    context: WalletSignatureVaultContext,
+    generation = walletSessionGeneration
   ) {
-    validateWalletPassphrase(passphrase);
-    lock();
-    return writeRecoverySeedVault(recoveryPhraseOrSeedHex, passphrase);
-  }
-
-  async function writeRecoverySeedVault(
-    recoveryPhraseOrSeedHex: string,
-    passphrase: string
-  ) {
-    const nextSeedHex = parseRecoverySeedInput(recoveryPhraseOrSeedHex);
-    core.zylith_wallet_derive_public_config(nextSeedHex);
-    const nextVault = await encryptSeed(nextSeedHex, passphrase);
-    localStorage.setItem(VAULT_KEY, JSON.stringify(nextVault));
-    return hydrateFromSeed(nextSeedHex);
-  }
-
-  async function unlockWithPassphrase(passphrase: string) {
-    if (seedHex && publicConfig) return true;
-    const vault = readJson<VaultRecord>(VAULT_KEY);
-    if (!vault) return false;
+    const remote = await pullWalletSignatureVaultBundle(context);
+    if (!remote?.vault || !isWalletSignatureVaultRecord(remote.vault)) {
+      return false;
+    }
     let nextSeedHex: string;
     try {
-      nextSeedHex = await decryptSeed(vault, passphrase);
+      nextSeedHex = await decryptSeedWithWalletSignature(remote.vault, context);
     } catch {
       return false;
     }
-    return hydrateFromSeed(nextSeedHex);
+    ensureWalletSignatureOperationCurrent(generation);
+    writeWalletSignatureVault(remote.vault);
+    return hydrateFromSeed(nextSeedHex, generation);
   }
 
-  async function exportRecoverySeed(passphrase: string) {
-    const vault = readJson<VaultRecord>(VAULT_KEY);
-    if (!vault) throw new Error("Create or import a Zylith wallet first");
-    return core.zylith_wallet_seed_hex_to_mnemonic(
-      await decryptSeed(vault, passphrase)
+  async function pullWalletSignatureVaultBundle(
+    context: WalletSignatureVaultContext
+  ): Promise<WalletSignatureVaultBundle | null> {
+    if (!coordinatorUrl) return null;
+    const [walletAuthId, walletAuthToken] = await Promise.all([
+      walletSignatureVaultId(context),
+      walletSignatureVaultAuthToken(context),
+    ]);
+    const path = `/api/wallet-vaults/${encodeURIComponent(walletAuthId)}`;
+    const bundle = await fetchWalletSignatureVaultBundle(
+      coordinatorUrl,
+      path,
+      walletAuthToken
+    );
+    if (bundle?.wallet_auth_id !== walletAuthId) return null;
+    return bundle;
+  }
+
+  async function fetchWalletSignatureVaultBundle(
+    baseUrl: string,
+    path: string,
+    walletAuthToken: string
+  ): Promise<WalletSignatureVaultBundle | null> {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        `${baseUrl.replace(/\/+$/, "")}${path}`,
+        {
+          headers: {
+            accept: "application/json",
+            "x-zylith-wallet-vault-auth": walletAuthToken,
+          },
+        },
+        WALLET_VAULT_REQUEST_TIMEOUT_MS
+      );
+    } catch {
+      throw new Error("Private trading state is unavailable. Retry later.");
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new RuntimeHttpStatusError(path, response.status, "");
+    }
+    return (await response.json()) as WalletSignatureVaultBundle;
+  }
+
+  async function pushWalletSignatureVaultBundle(
+    context: WalletSignatureVaultContext,
+    vault: VaultRecord
+  ) {
+    if (!coordinatorUrl) return;
+    const [walletAuthId, walletAuthToken] = await Promise.all([
+      walletSignatureVaultId(context),
+      walletSignatureVaultAuthToken(context),
+    ]);
+    await postJson<WalletSignatureVaultBundle>(
+      coordinatorUrl,
+      `/api/wallet-vaults/${encodeURIComponent(walletAuthId)}`,
+      {
+        wallet_auth_id: walletAuthId,
+        vault,
+        updated_at_unix_ms: Date.now(),
+      },
+      { "x-zylith-wallet-vault-auth": walletAuthToken }
     );
   }
 
   function lock() {
+    walletSessionGeneration += 1;
+    walletSignatureVaultOperation = null;
     if (strategyTimer !== null) {
       window.clearInterval(strategyTimer);
       strategyTimer = null;
@@ -1530,19 +1923,25 @@ export function createZylithWalletRuntime(
     }
     strategyWorkerInFlight = false;
     depositConfirmationWorkerInFlight = false;
+    depositSubmissionInFlightRequestId = null;
+    recoverySyncInFlight = false;
     postUnlockSyncInFlight = false;
     seedHex = null;
     publicConfig = null;
     deploymentScope = "unbound";
     notes = [];
     strategies = [];
+    liquidityPositions = [];
     scanState = {
       version: 1,
       scanned_artifact_ids: [],
       private_report_batch_ids: [],
+      liquidity_attribution_batch_ids: [],
       artifact_epoch_cursor: 0,
     };
     latestEpochCache = null;
+    coordinatorBatchWindowCache = null;
+    notifyWalletRuntimeChanged();
   }
 
   async function scanNotes() {
@@ -1601,11 +2000,6 @@ export function createZylithWalletRuntime(
           output_proof?: unknown;
         }>;
       };
-      const attributionByOutput = await fetchMakerAttributionForScannedNotes(
-        unlockedSeed,
-        artifact.batch_id,
-        scanned.notes
-      );
       for (const scannedNote of scanned.notes) {
         const normalizedCommitment = normalizeFeltForComparison(
           scannedNote.note_commitment
@@ -1621,9 +2015,6 @@ export function createZylithWalletRuntime(
           note: scannedNote.note,
           output_note: scannedNote.output_note,
           output_proof: scannedNote.output_proof,
-          maker_attribution: attributionByOutput.get(
-            scannedNote.note_commitment
-          ),
         });
         knownNoteCommitments.add(normalizedCommitment);
         notesChanged = true;
@@ -1657,6 +2048,10 @@ export function createZylithWalletRuntime(
     await syncWithdrawalState();
     await finalizePendingConsolidations();
     await syncSettlementOutputs();
+    await syncLiquidityProviderAttributionReports();
+    await syncActiveLiquidityPositionStates();
+    await syncLiquidityPositionLifecycleState();
+    await releaseStalePendingLiquidityPositionOpens();
   }
 
   async function refreshDepositState() {
@@ -1673,7 +2068,18 @@ export function createZylithWalletRuntime(
     await Promise.all(
       pending.map(async (record) => {
         if (record.strk20_exit_commitment) {
-          if (!record.pending_strk20_open_note_tx) return;
+          if (!record.pending_strk20_open_note_tx) {
+            const stagedTx = record.pending_withdrawal_tx;
+            if (!stagedTx) return;
+            const status = await fetchTransactionReceiptStatus(
+              stagedTx,
+              deployment
+            ).catch(() => null);
+            if (applyStrk20ExitStagingReceipt(record, status)) {
+              changed = true;
+            }
+            return;
+          }
           const status = await fetchTransactionReceiptStatus(
             record.pending_strk20_open_note_tx,
             deployment
@@ -1683,31 +2089,11 @@ export function createZylithWalletRuntime(
           }
           return;
         }
-        if (!indexerUrl) return;
-        const withdrawal = await fetchJson<{
-          note_commitment?: string | { value?: string };
-        }>(
-          indexerUrl,
-          `/api/withdrawals/${encodeURIComponent(record.note_commitment)}`
-        ).catch(() => null);
-        const confirmedCommitment = withdrawal?.note_commitment
-          ? normalizeNoteCommitment(withdrawal.note_commitment)
-          : "";
-        if (
-          confirmedCommitment !==
-          normalizeNoteCommitment(record.note_commitment)
-        )
-          return;
-        record.pending_withdrawal_tx = undefined;
-        record.withdrawal_requested_at_unix_ms = undefined;
-        record.locked_by_order = undefined;
-        record.spent = true;
-        changed = true;
       })
     );
     if (!changed) return false;
     await saveNotes();
-    await pushRecoverySnapshot(true);
+    await pushRecoverySnapshot(true).catch(() => false);
     return true;
   }
 
@@ -1757,6 +2143,122 @@ export function createZylithWalletRuntime(
     return pruned || scanned;
   }
 
+  async function syncLiquidityPositionLifecycleState() {
+    if (!coordinatorUrl) return false;
+    const requestsByBatch = new Map<string, PrivateSettlementReportRequest>();
+    for (const position of liquidityPositions) {
+      if (!isPendingLiquidityPositionStatus(position.status)) continue;
+      const batchId = normalizeText(position.last_batch_id);
+      const transitionCommitment = normalizeFeltForComparison(
+        position.last_transition_commitment
+      );
+      if (!batchId || !transitionCommitment) continue;
+      const request =
+        requestsByBatch.get(batchId) ??
+        ({
+          batch_id: batchId,
+          orders: [],
+          liquidity_position_transition_commitments: [],
+        } satisfies PrivateSettlementReportRequest);
+      request.liquidity_position_transition_commitments?.push(
+        transitionCommitment
+      );
+      requestsByBatch.set(batchId, request);
+    }
+    if (requestsByBatch.size === 0) return false;
+    const before = JSON.stringify(liquidityPositions);
+    await syncPrivateSettlementReports([...requestsByBatch.values()]);
+    return before !== JSON.stringify(liquidityPositions);
+  }
+
+  async function syncLiquidityProviderAttributionReports() {
+    const { publicConfig: unlockedConfig } = requireUnlocked();
+    if (!coordinatorUrl || !indexerUrl) return false;
+    const ownerPublicKey = normalizeText(
+      unlockedConfig.note_recognition_public_key
+    );
+    if (!ownerPublicKey) return false;
+    if (!liquidityPositions.some((position) => position.status !== "closed")) {
+      return false;
+    }
+    const { batches } = await fetchVisibleArtifacts();
+    const syncedBatchIds = new Set(scanState.liquidity_attribution_batch_ids);
+    const requests = batches
+      .filter(
+        (batch) => batch.settled_at_unix_ms && !syncedBatchIds.has(batch.batch_id)
+      )
+      .map((batch) => ({
+        batch_id: batch.batch_id,
+        liquidity_provider_public_keys: [ownerPublicKey],
+      }));
+    if (requests.length === 0) return false;
+    const before = JSON.stringify(liquidityPositions);
+    await syncPrivateSettlementReports(requests);
+    for (const request of requests) {
+      syncedBatchIds.add(request.batch_id);
+    }
+    scanState.liquidity_attribution_batch_ids = [...syncedBatchIds].slice(-512);
+    await saveScanState();
+    return before !== JSON.stringify(liquidityPositions);
+  }
+
+  async function syncActiveLiquidityPositionStates() {
+    if (!proverUrl) return false;
+    const active = liquidityPositions.filter(
+      (position) => position.status === "active"
+    );
+    if (active.length === 0) return false;
+    const before = JSON.stringify(liquidityPositions);
+    for (const position of active) {
+      await refreshLocalLiquidityPositionState(position).catch(() => position);
+    }
+    return before !== JSON.stringify(liquidityPositions);
+  }
+
+  async function releaseStalePendingLiquidityPositionOpens() {
+    if (!coordinatorUrl) return false;
+    const now = Date.now();
+    let notesChanged = false;
+    let positionsChanged = false;
+    for (let index = 0; index < liquidityPositions.length; index += 1) {
+      const position = liquidityPositions[index];
+      if (position.status !== "pending_open") continue;
+      const batchId = normalizeText(position.last_batch_id);
+      const lifecycleId = normalizeText(position.last_lifecycle_id);
+      if (!batchId || !lifecycleId) continue;
+      const batch = await fetchBatchById(batchId).catch(() => null);
+      if (!shouldReleasePendingLiquidityPositionOpen(batch, now)) continue;
+      const outputRoot = await fetchOnchainOutputNoteRoot(batchId).catch(
+        () => null
+      );
+      if (outputRoot && outputRoot !== "0x0") continue;
+      const lockRef = liquidityPositionLifecycleLockRef(lifecycleId);
+      notes = notes.map((note) => {
+        if (
+          normalizeFeltForComparison(note.locked_by_order) !==
+          normalizeFeltForComparison(lockRef)
+        ) {
+          return note;
+        }
+        notesChanged = true;
+        return { ...note, locked_by_order: undefined };
+      });
+      liquidityPositions[index] = {
+        ...position,
+        status: "closed",
+        updated_at_unix_ms: now,
+      };
+      positionsChanged = true;
+    }
+    if (notesChanged) await saveNotes();
+    if (positionsChanged) await saveLiquidityPositions();
+    if (notesChanged || positionsChanged) {
+      await pushRecoverySnapshot(true).catch(() => false);
+      notifyWalletRuntimeChanged();
+    }
+    return notesChanged || positionsChanged;
+  }
+
   async function syncPrivateSettlementReports(
     requests: PrivateSettlementReportRequest[]
   ) {
@@ -1765,6 +2267,7 @@ export function createZylithWalletRuntime(
     const reports: PrivateSettlementReport[] = [];
     let notesChanged = false;
     let ordersChanged = false;
+    let liquidityPositionsChanged = false;
     let localOrders: LocalOrder[] | null = null;
     let scanStateChanged = false;
     const syncedBatchIds = new Set(scanState.private_report_batch_ids);
@@ -1774,12 +2277,32 @@ export function createZylithWalletRuntime(
       }
       return localOrders;
     }
+    function outputRecoveryKeyTags(batchId: string) {
+      const tags: string[] = [];
+      for (
+        let start = 0;
+        start < PRIVATE_REPORT_OUTPUT_TAG_COUNT;
+        start += PRIVATE_REPORT_OUTPUT_TAG_PAGE_SIZE
+      ) {
+        const count = Math.min(
+          PRIVATE_REPORT_OUTPUT_TAG_PAGE_SIZE,
+          PRIVATE_REPORT_OUTPUT_TAG_COUNT - start
+        );
+        const page = JSON.parse(
+          core.zylith_wallet_output_recovery_key_tags_range(
+            unlockedSeed,
+            batchId,
+            start,
+            count
+          )
+        ) as OutputRecoveryKeyTagList;
+        tags.push(...page.key_tags);
+      }
+      return uniqueStrings(tags);
+    }
     for (const request of requests) {
       const batchId = request.batch_id?.trim();
       if (!batchId) continue;
-      const orderCommitments = uniqueStrings(request.order_commitments ?? [])
-        .map(normalizeFeltForComparison)
-        .filter((commitment): commitment is string => Boolean(commitment));
       const orderReportAuths: PrivateSettlementReportOrderAuth[] = [];
       for (const order of request.orders ?? []) {
         const orderCommitment = normalizeFeltForComparison(
@@ -1796,30 +2319,37 @@ export function createZylithWalletRuntime(
           order_commitment: orderCommitment,
           order_report_auth_tag: authTag,
         });
-        if (
-          !orderCommitments.some((commitment) => commitment === orderCommitment)
-        ) {
-          orderCommitments.push(orderCommitment);
-        }
       }
-      const keyTags = privateReportOutputTagsEnabled
-        ? (JSON.parse(
-            core.zylith_wallet_output_recovery_key_tags(
-              unlockedSeed,
-              batchId,
-              PRIVATE_REPORT_OUTPUT_TAG_COUNT
-            )
-          ) as OutputRecoveryKeyTagList)
-        : { key_tags: [] };
-      if (orderReportAuths.length === 0 && keyTags.key_tags.length === 0)
+      const keyTags = outputRecoveryKeyTags(batchId);
+      const liquidityPositionTransitionCommitments = uniqueStrings(
+        request.liquidity_position_transition_commitments
+          ?.map(normalizeFeltForComparison)
+          .filter((commitment): commitment is string => Boolean(commitment)) ??
+          []
+      );
+      const liquidityProviderPublicKeys = uniqueStrings(
+        request.liquidity_provider_public_keys
+          ?.map(normalizeText)
+          .filter((publicKey): publicKey is string => Boolean(publicKey)) ??
+          []
+      );
+      if (
+        orderReportAuths.length === 0 &&
+        keyTags.length === 0 &&
+        liquidityPositionTransitionCommitments.length === 0 &&
+        liquidityProviderPublicKeys.length === 0
+      ) {
         continue;
+      }
       const report = await postJson<PrivateSettlementReport>(
         coordinatorUrl,
         `/api/settlement-reports/${encodeURIComponent(batchId)}`,
         {
-          output_recovery_key_tags: keyTags.key_tags,
-          order_commitments: orderCommitments,
+          output_recovery_key_tags: keyTags,
           order_report_auths: orderReportAuths,
+          liquidity_position_transition_commitments:
+            liquidityPositionTransitionCommitments,
+          liquidity_provider_public_keys: liquidityProviderPublicKeys,
         }
       ).catch(() => null);
       if (!report) continue;
@@ -1840,7 +2370,6 @@ export function createZylithWalletRuntime(
         );
         const fundingCommitments = uniqueStrings([
           ...(execution.funding_note_commitments ?? []),
-          execution.funding_note_commitment,
         ]);
         const normalizedFundingCommitments = new Set(
           fundingCommitments
@@ -1970,6 +2499,12 @@ export function createZylithWalletRuntime(
           // A report may include recovery slots that do not decrypt under the current wallet after rotation.
         }
       }
+      if (applyLiquidityProviderAttributionArtifacts(report, unlockedSeed)) {
+        liquidityPositionsChanged = true;
+      }
+      if (applyLiquidityPositionLifecycleReports(report)) {
+        liquidityPositionsChanged = true;
+      }
       if (!syncedBatchIds.has(report.batch_id)) {
         syncedBatchIds.add(report.batch_id);
         scanStateChanged = true;
@@ -1987,13 +2522,11 @@ export function createZylithWalletRuntime(
       await saveLocalOrders(localOrders);
       scheduleRecoverySnapshot(false);
     }
-    if (reports.length > 0 && typeof window !== "undefined") {
-      window.dispatchEvent(
-        new CustomEvent(PRIVATE_SETTLEMENT_REPORTS_EVENT, {
-          detail: { count: reports.length },
-        })
-      );
+    if (liquidityPositionsChanged) {
+      await saveLiquidityPositions();
+      scheduleRecoverySnapshot(false);
     }
+    notifyPrivateSettlementReports(reports.length);
     return reports;
   }
 
@@ -2005,13 +2538,13 @@ export function createZylithWalletRuntime(
     if (recoverySyncInFlight) return false;
     recoverySyncInFlight = true;
     try {
-      const merged = await pullRecoverySnapshots();
+      const merged = await pullRecoverySnapshots().catch(() => false);
       if (merged) {
         await saveNotes();
         await saveStrategies();
       }
       if (options.pushSnapshot ?? true) {
-        await pushRecoverySnapshot(true);
+        await pushRecoverySnapshot(true).catch(() => false);
       }
       return true;
     } finally {
@@ -2023,7 +2556,7 @@ export function createZylithWalletRuntime(
     request: NoteConsolidationRequest
   ): Promise<NoteConsolidationResult> {
     const deployment = await loadDeploymentConfig();
-    if (!hostedNoteConsolidationEnabledForDeployment(deployment)) {
+    if (!noteConsolidationEnabledForDeployment(deployment)) {
       throw new Error(
         "Note consolidation is not available in this deployment."
       );
@@ -2129,11 +2662,29 @@ export function createZylithWalletRuntime(
     });
     await saveNotes();
     await pushRecoverySnapshot(true).catch(() => false);
-    const submitted = await postJson<NoteConsolidationResult>(
-      proverUrl,
-      "/api/private/note-consolidations/submit",
-      { witness: signedWitness }
-    );
+    let submitted: NoteConsolidationResult;
+    try {
+      submitted = await postJson<NoteConsolidationResult>(
+        proverUrl,
+        "/api/private/note-consolidations/submit",
+        { witness: signedWitness }
+      );
+    } catch (error) {
+      if (isDefiniteNoteConsolidationSubmitRejection(error)) {
+        notes = notes.map((record) => {
+          if (!sourceSet.has(normalizeFeltForComparison(record.note_commitment)))
+            return record;
+          return {
+            ...record,
+            locked_by_order: undefined,
+            pending_consolidation: undefined,
+          };
+        });
+        await saveNotes();
+        await pushRecoverySnapshot(true).catch(() => false);
+      }
+      throw error;
+    }
     if (String(submitted.execution_status ?? "").toUpperCase() === "REVERTED") {
       notes = notes.map((record) => {
         if (!sourceSet.has(normalizeFeltForComparison(record.note_commitment)))
@@ -2194,22 +2745,13 @@ export function createZylithWalletRuntime(
       fundingRail.bridgeAdapter,
       "privacy_deposit_bridge_address"
     );
-    const shieldedAssetAdapterAddress =
-      fundingRail.shieldedAssetAdapter ||
-      configuredShieldedAssetAdapterAddress ||
-      "0x0";
-    const tokenAddress = requiredNonZeroFelt(
-      deployment.token_addresses?.[asset],
-      `${asset} token address`
+    const shieldedAssetAdapterAddress = requiredNonZeroFelt(
+      fundingRail.shieldedAssetAdapter,
+      "shielded_asset_adapter_address"
     );
-    const chainId = requiredString(
-      configuredChainId || deployment.chain_id,
-      "chain_id"
-    );
-    const rpcUrl = requiredString(
-      deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL,
-      "rpc_url"
-    );
+    const tokenAddress = fundingRailTokenAddress(deployment, asset);
+    const chainId = requiredString(deployment.chain_id, "chain_id");
+    const rpcUrl = requiredString(deployment.rpc_url, "rpc_url");
     const discoveryUrl = browserSafeServiceUrl(
       normalizeUrl(fundingRail.discoveryUrl),
       "/starknet-privacy-discovery"
@@ -2297,33 +2839,35 @@ export function createZylithWalletRuntime(
     }
     const requestTime = Date.now();
     depositSubmissionInFlightRequestId = depositRequestId;
-    for (const plan of plans) {
-      const noteCommitment = normalizeNoteCommitment(plan.note_commitment);
-      const existing = notes.find(
-        (record) => record.note_commitment === noteCommitment
-      );
-      if (!existing) {
-        notes.push({
-          note_commitment: noteCommitment,
-          deployment_scope: deploymentScope,
-          source: "deposit",
-          note: plan.note,
-          deposit_confirmed: false,
-          funding_commitment: plan.encoded_args.funding_commitments[0],
-          deposit_root: plan.encoded_args.deposit_roots[0],
-          encrypted_note_activation: plan.encoded_args.encrypted_note_activations[0],
-          deposit_request_id: depositRequestId,
-          deposit_requested_at_unix_ms: requestTime,
-        });
-      }
-    }
-    await saveNotes();
-    await pushRecoverySnapshot(true);
-    const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
-      () => undefined
-    );
     let depositResult: SubmitPrivacyBridgeDepositResult;
+    let externalDepositSubmissionStarted = false;
     try {
+      for (const plan of plans) {
+        const noteCommitment = normalizeNoteCommitment(plan.note_commitment);
+        const existing = notes.find(
+          (record) => record.note_commitment === noteCommitment
+        );
+        if (!existing) {
+          notes.push({
+            note_commitment: noteCommitment,
+            deployment_scope: deploymentScope,
+            source: "deposit",
+            note: plan.note,
+            deposit_confirmed: false,
+            funding_commitment: plan.encoded_args.funding_commitments[0],
+            deposit_root: plan.encoded_args.deposit_roots[0],
+            encrypted_note_activation: plan.encoded_args.encrypted_note_activations[0],
+            deposit_request_id: depositRequestId,
+            deposit_requested_at_unix_ms: requestTime,
+          });
+        }
+      }
+      await saveNotes();
+      await pushRecoverySnapshot(true).catch(() => false);
+      const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
+        () => undefined
+      );
+      externalDepositSubmissionStarted = true;
       depositResult = await submitPrivacyBridgeDeposit({
         provider: provider as never,
         seedHex: unlockedSeed,
@@ -2334,9 +2878,15 @@ export function createZylithWalletRuntime(
         tokenAddress,
         discoveryUrl,
         provingUrl,
-        paymasterAddress:
-          fundingRail.paymasterAddress || configuredPaymasterAddress,
-        paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
+        provingOhttpEnabled: fundingRail.provingOhttpEnabled,
+        paymasterAddress: requiredNonZeroFelt(
+          fundingRail.paymasterAddress,
+          "privacy_paymaster_address"
+        ),
+        paymasterUrl: requiredString(
+          fundingRail.paymasterUrl,
+          "privacy_paymaster_url"
+        ),
         privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
         minProvingDelayBlocks:
           fundingRail.minProvingDelayBlocks ??
@@ -2365,6 +2915,7 @@ export function createZylithWalletRuntime(
       depositSubmissionInFlightRequestId = null;
       const message = error instanceof Error ? error.message : String(error);
       const ambiguousSubmission =
+        externalDepositSubmissionStarted &&
         /private deposit submission failed/i.test(message) &&
         /(network request failed|failed to fetch|service is unavailable|unreadable error|timed out)/i.test(
           message
@@ -2378,7 +2929,7 @@ export function createZylithWalletRuntime(
             record.deposit_confirmed === true
         );
         await saveNotes();
-        scheduleRecoverySnapshot(true);
+        await pushRecoverySnapshot(true).catch(() => false);
       }
       throw error;
     }
@@ -2397,18 +2948,32 @@ export function createZylithWalletRuntime(
     }
     depositSubmissionInFlightRequestId = null;
     await saveNotes();
-    scheduleRecoverySnapshot(false);
+    await pushRecoverySnapshot(true).catch(() => false);
     startDepositConfirmationWorker();
-    void (async () => {
+    try {
       await waitForStarknetTransaction(
         transactionHash,
         deployment,
         "Private deposit"
       );
       await refreshDepositConfirmations().catch(() => false);
-    })().catch((error) => {
-      console.warn("Deposit confirmation polling failed", error);
-    });
+    } catch (error) {
+      if (isSubmittedTransactionFailure(error)) {
+        const reason =
+          submittedTransactionFailureReason(error) ??
+          "Deposit transaction failed.";
+        for (const noteCommitment of noteCommitments) {
+          const record = notes.find(
+            (entry) => entry.note_commitment === noteCommitment
+          );
+          if (!record) continue;
+          markDepositRecordFailed(record, reason);
+        }
+        await saveNotes();
+        await pushRecoverySnapshot(true).catch(() => false);
+      }
+      throw error;
+    }
     return {
       transaction_hash: transactionHash,
       note_commitment: noteCommitments[0] ?? "",
@@ -2421,7 +2986,7 @@ export function createZylithWalletRuntime(
     deployment: DeploymentConfig,
     label: string
   ) {
-    const deadline = Date.now() + 180_000;
+    const deadline = Date.now() + 12 * 60_000;
     let lastStatus: {
       failed?: boolean;
       reason?: string;
@@ -2433,9 +2998,21 @@ export function createZylithWalletRuntime(
         deployment
       ).catch(() => null);
       if (lastStatus?.failed) {
-        throw new Error(
-          `${label} failed: ${lastStatus.reason ?? "transaction reverted"}`
-        );
+        const reason = lastStatus.reason ?? "transaction reverted";
+        const error = new Error(`${label} failed: ${reason}`);
+        (
+          error as Error & {
+            transactionFailed?: boolean;
+            transactionFailureReason?: string;
+          }
+        ).transactionFailed = true;
+        (
+          error as Error & {
+            transactionFailed?: boolean;
+            transactionFailureReason?: string;
+          }
+        ).transactionFailureReason = reason;
+        throw error;
       }
       if (lastStatus?.confirmed) return;
       await new Promise((resolve) => window.setTimeout(resolve, 3_000));
@@ -2443,6 +3020,20 @@ export function createZylithWalletRuntime(
     throw new Error(
       `${label} was submitted but is not confirmed yet. Please retry later after the network confirms it.`
     );
+  }
+
+  function isSubmittedTransactionFailure(error: unknown) {
+    return (
+      Boolean(error) &&
+      typeof error === "object" &&
+      (error as { transactionFailed?: unknown }).transactionFailed === true
+    );
+  }
+
+  function submittedTransactionFailureReason(error: unknown) {
+    return error && typeof error === "object"
+      ? (error as { transactionFailureReason?: string }).transactionFailureReason
+      : undefined;
   }
 
   async function refreshDepositConfirmations() {
@@ -2518,7 +3109,12 @@ export function createZylithWalletRuntime(
     }>(indexerUrl, "/api/deposits/confirmations", {
       funding_commitments: fundingCommitments,
     }).catch((error) => {
-      console.warn("Deposit confirmation lookup failed", error);
+      if (import.meta.env.DEV) {
+        console.warn(
+          "Deposit confirmation lookup failed",
+          safeDebugErrorMessage(error)
+        );
+      }
       return null;
     });
     const indexerStale =
@@ -2534,30 +3130,6 @@ export function createZylithWalletRuntime(
       } catch {
         // Ignore malformed indexer rows and keep the deposit pending until the receipt reconciliation handles it.
       }
-    }
-    const missingCommitments = fundingCommitments.filter(
-      (commitment) => !confirmedFundingCommitments.has(commitment)
-    );
-    if (missingCommitments.length === 0)
-      return { confirmedFundingCommitments, indexerStale };
-    const individualLookups = await Promise.all(
-      missingCommitments.map(async (commitment) => {
-        const record = await fetchJson<{
-          funding_commitment?: string;
-        }>(indexerUrl, `/api/deposits/${encodeURIComponent(commitment)}`).catch(
-          () => null
-        );
-        try {
-          return record?.funding_commitment
-            ? normalizeOptionalFelt(record.funding_commitment)
-            : null;
-        } catch {
-          return null;
-        }
-      })
-    );
-    for (const commitment of individualLookups) {
-      if (commitment) confirmedFundingCommitments.add(commitment);
     }
     return { confirmedFundingCommitments, indexerStale };
   }
@@ -2582,8 +3154,7 @@ export function createZylithWalletRuntime(
         confirmedRegistrationGraceMs: CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS,
       });
       if (failureReason) {
-        record.deposit_failed = true;
-        record.deposit_failure_reason = failureReason;
+        markDepositRecordFailed(record, failureReason);
         changed = true;
       }
     }
@@ -2592,31 +3163,36 @@ export function createZylithWalletRuntime(
 
   async function submitPrivateOrder(draft: PrivateOrderDraft) {
     requireUnlocked();
-    if (STRATEGY_ORDER_MODES.has(draft.mode)) {
-      if (draft.offlineDelegation) {
-        const offlinePackage = await createOfflineRenewalPackage(draft);
+    const timedDraft = await withCoordinatorBatchWindow(draft);
+    if (
+      timedDraft.mode === "Liquidity Position" ||
+      timedDraft.mode === "Resting"
+    ) {
+      throw new Error(
+        "Private liquidity must be opened through the private liquidity position lifecycle"
+      );
+    }
+    if (STRATEGY_ORDER_MODES.has(timedDraft.mode)) {
+      if (timedDraft.offlineDelegation) {
+        const offlinePackage = await createOfflineRenewalPackage(timedDraft);
         return {
           order_id: offlinePackage.package_id,
           offline_package: offlinePackage,
           status: `offline renewal package prepared with ${offlinePackage.slot_count} exact child slots`,
         };
       }
-      return createPrivateStrategy(draft);
+      return createPrivateStrategy(timedDraft);
     }
     if (!coordinatorUrl || !proverUrl) {
       throw new Error(
         "Coordinator and private ingress URLs are required for private order submission"
       );
     }
-    const batch = await resolveSubmittablePairBatch(
-      draft.pair,
-      draft.batchWindowMs
-    );
-    if (!batch || batch.status !== "Open") {
-      throw new Error("Auction window is no longer open");
-    }
     const registry = await fetchIngressRegistry();
-    const submitted = await submitSinglePrivateOrder(draft, batch, registry);
+    const submitted = await submitSinglePrivateOrderWithFreshBatch(
+      timedDraft,
+      registry
+    );
     return {
       order_id: submitted.order_commitment,
       order_commitment: submitted.order_commitment,
@@ -2628,9 +3204,284 @@ export function createZylithWalletRuntime(
       funding_note_commitments: submitted.funding_note_commitments,
       submission_ambiguous: submitted.submission_ambiguous,
       status: submitted.submission_ambiguous
-        ? "private ingress accepted; coordinator status pending"
+        ? "private submission pending reconciliation"
         : "private ingress accepted",
     };
+  }
+
+  async function openPrivateLiquidityPosition(
+    request: PrivateLiquidityPositionOpenRequest,
+    candidateBatch?: BatchSummary
+  ): Promise<PrivateLiquidityPositionOpenResult> {
+    const { seedHex: unlockedSeed } = requireUnlocked();
+    if (request.kind !== "OpenPrivateLiquidityPosition") {
+      throw new Error("Unsupported liquidity position lifecycle request");
+    }
+    if (!coordinatorUrl || !proverUrl) {
+      throw new Error(
+        "Coordinator and private ingress URLs are required for liquidity position opening"
+      );
+    }
+    const batchWindowMs =
+      (await fetchCoordinatorBatchWindowMs()) ??
+      coordinatorBatchWindowCache?.value ??
+      DEFAULT_LIQUIDITY_POSITION_BATCH_WINDOW_MS;
+    const batch =
+      candidateBatch ??
+      (await resolveSubmittablePairBatch(request.pairId, batchWindowMs));
+    if (!batch || batch.status !== "Open") {
+      throw new Error("Liquidity position auction window is no longer open");
+    }
+    if (batch.pair_id !== request.pairId) {
+      throw new Error(
+        "Liquidity position batch does not match the requested pair"
+      );
+    }
+    const submissionSafetyBufferMs = batchSubmissionSafetyBufferMs(batchWindowMs);
+    if (
+      batch.close_time_unix_ms - Date.now() <=
+      submissionSafetyBufferMs
+    ) {
+      throw new Error(
+        "Liquidity position auction window is inside the submission safety buffer"
+      );
+    }
+    const priorLiquidityPositionRoot = await fetchOnchainLiquidityPositionRoot();
+
+    const fundingNotes = selectLiquidityPositionFundingNotes(request);
+    const durationBatches = liquidityPositionDurationBatches(
+      request,
+      batchWindowMs
+    );
+    const telemetryStart = performance.now();
+    const positionNonce = randomU64();
+    const buildOpenInput = (
+      priorRoot: string,
+      stateUpdate?: unknown
+    ): Record<string, unknown> => {
+      const input: Record<string, unknown> = {
+          seed_hex: unlockedSeed,
+          pair_id: request.pairId,
+          batch_id: batch.batch_id,
+          epoch_id: batch.epoch_id.toString(),
+          funding_notes: fundingNotes.map((record) => record.note),
+          base_asset_id: request.baseAssetId,
+          quote_asset_id: request.quoteAssetId,
+          base_reserve: request.baseReserveAtomic,
+          quote_reserve: request.quoteReserveAtomic,
+          price_lower_bound: request.priceLowerBoundAtomic,
+          price_upper_bound: request.priceUpperBoundAtomic,
+          max_fill_base_per_batch: request.maxFillBasePerBatchAtomic,
+          curve_policy: {
+            kind: request.curvePolicy.kind,
+            band_count: request.curvePolicy.bandCount.toString(),
+            spread_bps: request.curvePolicy.spreadBps.toString(),
+            target_base_ratio_bps:
+              request.curvePolicy.targetBaseRatioBps.toString(),
+            inventory_skew_bps:
+              request.curvePolicy.inventorySkewBps.toString(),
+            max_price_deviation_bps:
+              request.curvePolicy.maxPriceDeviationBps.toString(),
+          },
+          rotation_policy: {
+            max_price_rotation_bps:
+              request.rotationPolicy.maxPriceRotationBps.toString(),
+            max_depth_rotation_bps:
+              request.rotationPolicy.maxDepthRotationBps.toString(),
+            skip_epoch_bps: request.rotationPolicy.skipEpochBps.toString(),
+          },
+          oracle_guard: request.oracleGuard
+            ? {
+                oracle_id: request.oracleGuard.oracleId,
+                max_staleness_ms:
+                  request.oracleGuard.maxStalenessMs.toString(),
+                max_divergence_bps:
+                  request.oracleGuard.maxDivergenceBps.toString(),
+              }
+            : undefined,
+          expiry_epoch: (batch.epoch_id + durationBatches).toString(),
+          position_nonce: positionNonce,
+          prior_liquidity_position_root: priorRoot,
+          padding: randomPadding(2048),
+        };
+      if (stateUpdate !== undefined) input.state_update = stateUpdate;
+      return input;
+    };
+    const preview = JSON.parse(
+      core.zylith_wallet_build_private_liquidity_position_open(
+        JSON.stringify(buildOpenInput("0x0"))
+      )
+    ) as PrivateLiquidityPositionOpenBuild;
+    let built = preview;
+    if (priorLiquidityPositionRoot !== "0x0") {
+      const positionId = normalizeText(preview.position?.position_id);
+      if (!positionId) {
+        throw new Error(
+          "Liquidity position preview did not return a position id"
+        );
+      }
+      const insertionWitness =
+        await postJson<LiquidityPositionInsertionWitnessResponse>(
+          proverUrl,
+          "/api/private/liquidity-positions/insertion-witness",
+          {
+            position_id: positionId,
+            output_commitment: preview.position_commitment,
+            prior_liquidity_position_root: priorLiquidityPositionRoot,
+            padding: randomPadding(2048),
+          }
+        );
+      const witnessedPriorRoot = normalizeFeltForComparison(
+        insertionWitness.prior_liquidity_position_root
+      );
+      if (witnessedPriorRoot !== priorLiquidityPositionRoot) {
+        throw new Error(
+          "Liquidity position insertion witness was built against a stale root"
+        );
+      }
+      built = JSON.parse(
+        core.zylith_wallet_build_private_liquidity_position_open(
+          JSON.stringify(
+            buildOpenInput(priorLiquidityPositionRoot, insertionWitness.state_update)
+          )
+        )
+      ) as PrivateLiquidityPositionOpenBuild;
+    }
+    const buildCompletedAt = performance.now();
+    const lockRef = liquidityPositionLifecycleLockRef(built.lifecycle_id);
+    for (const fundingNote of fundingNotes) {
+      fundingNote.locked_by_order = lockRef;
+    }
+    await saveNotes();
+    await pushRecoverySnapshot(true).catch(() => false);
+
+    let privateIngressStarted = false;
+    let coordinatorSubmissionStarted = false;
+    try {
+      const submissionDelayMs = privateSubmissionDelayMs(
+        batch.close_time_unix_ms,
+        submissionSafetyBufferMs
+      );
+      await delay(submissionDelayMs);
+      if (
+        batch.close_time_unix_ms - Date.now() <=
+        submissionSafetyBufferMs
+      ) {
+        throw new Error(
+          "Liquidity position auction window entered the submission safety buffer before private ingress submission"
+        );
+      }
+      const beforePrivateIngress = performance.now();
+      const ingressTelemetry: OrderIngressTelemetry = {
+        version: 1,
+        client_build_ms: elapsedMs(telemetryStart, buildCompletedAt),
+        private_submission_delay_ms: submissionDelayMs,
+        client_elapsed_before_private_ingress_ms: elapsedMs(
+          telemetryStart,
+          beforePrivateIngress
+        ),
+        batch_time_remaining_before_private_ingress_ms:
+          remainingBatchMs(batch.close_time_unix_ms),
+        submission_safety_buffer_ms: submissionSafetyBufferMs,
+      };
+      privateIngressStarted = true;
+      const ingress = await postJson<IngressResponse>(
+        proverUrl,
+        "/api/private/liquidity-positions/lifecycle",
+        attachOrderIngressTelemetry(built.ingress_request, ingressTelemetry)
+      );
+      const afterPrivateIngress = performance.now();
+      const coordinatorTelemetry: OrderIngressTelemetry = {
+        ...ingressTelemetry,
+        private_ingress_roundtrip_ms: elapsedMs(
+          beforePrivateIngress,
+          afterPrivateIngress
+        ),
+        client_elapsed_before_coordinator_ms: elapsedMs(
+          telemetryStart,
+          afterPrivateIngress
+        ),
+        batch_time_remaining_before_coordinator_ms:
+          remainingBatchMs(batch.close_time_unix_ms),
+      };
+      coordinatorSubmissionStarted = true;
+      const accepted = await postJson<LiquidityPositionLifecycleAccepted>(
+        coordinatorUrl,
+        "/api/liquidity-positions/lifecycle",
+        attachOrderIngressTelemetry(
+          ingress.coordinator_submission,
+          coordinatorTelemetry
+        )
+      );
+      storeLocalLiquidityPosition({
+        position: built.position,
+        positionCommitment: built.position_commitment,
+        status: "pending_open",
+        lifecycleId: accepted.lifecycle_id ?? built.lifecycle_id,
+        transitionCommitment:
+          accepted.transition_commitment ?? built.transition_commitment,
+        batchId: accepted.batch_id ?? batch.batch_id,
+        epochId: batch.epoch_id,
+      });
+      await saveLiquidityPositions();
+      scheduleRecoverySnapshot(true);
+      return {
+        lifecycle_id: accepted.lifecycle_id ?? built.lifecycle_id,
+        position_commitment: built.position_commitment,
+        transition_commitment:
+          accepted.transition_commitment ?? built.transition_commitment,
+        funding_note_commitments: fundingNotes.map(
+          (note) => note.note_commitment
+        ),
+        batch_id: accepted.batch_id ?? batch.batch_id,
+        epoch_id: batch.epoch_id,
+      };
+    } catch (error) {
+      if (
+        isAmbiguousPrivateLiquidityPositionSubmissionError(
+          error,
+          coordinatorSubmissionStarted
+            ? "coordinator_submission"
+            : privateIngressStarted
+              ? "private_ingress"
+              : "pre_ingress"
+        )
+      ) {
+        storeLocalLiquidityPosition({
+          position: built.position,
+          positionCommitment: built.position_commitment,
+          status: "pending_open",
+          lifecycleId: built.lifecycle_id,
+          transitionCommitment: built.transition_commitment,
+          batchId: batch.batch_id,
+          epochId: batch.epoch_id,
+        });
+        await saveLiquidityPositions();
+        await pushRecoverySnapshot(true).catch(() => false);
+        return {
+          lifecycle_id: built.lifecycle_id,
+          position_commitment: built.position_commitment,
+          transition_commitment: built.transition_commitment,
+          funding_note_commitments: fundingNotes.map(
+            (note) => note.note_commitment
+          ),
+          batch_id: batch.batch_id,
+          epoch_id: batch.epoch_id,
+          submission_ambiguous: true,
+        };
+      }
+      for (const fundingNote of fundingNotes) {
+        if (
+          normalizeFeltForComparison(fundingNote.locked_by_order) ===
+          normalizeFeltForComparison(lockRef)
+        ) {
+          fundingNote.locked_by_order = undefined;
+        }
+      }
+      await saveNotes();
+      await pushRecoverySnapshot(true).catch(() => false);
+      throw error;
+    }
   }
 
   async function confirmDepositsFromSubmittedTransactions(
@@ -2664,8 +3515,7 @@ export function createZylithWalletRuntime(
       if (!calldata) continue;
       const calldataSet = new Set(calldata.map(normalizeFeltForComparison));
       const bridgeAddress = normalizeOptionalFelt(
-        deployment.funding?.starknet_privacy?.bridge_adapter ||
-          deployment.contracts?.privacy_deposit_bridge
+        deployment.funding?.starknet_privacy?.bridge_adapter
       );
       for (const record of records) {
         const fundingCommitment = normalizeOptionalFelt(record.funding_commitment);
@@ -2712,11 +3562,17 @@ export function createZylithWalletRuntime(
     return accepted;
   }
 
-  async function markPrivateStrategyRelayRegistered(strategyId: string) {
+  async function markPrivateStrategyRelayRegistered(
+    strategyId: string,
+    relayStatus?: { access_token?: string }
+  ) {
     requireUnlocked();
     const strategy = strategies.find((entry) => entry.id === strategyId);
     if (!strategy || !strategy.offline_package) return false;
     if (strategy.status !== "pending_relay") return false;
+    if (relayStatus?.access_token) {
+      strategy.offline_package.access_token = relayStatus.access_token;
+    }
     strategy.status = "delegated";
     strategy.updated_at_unix_ms = Date.now();
     await saveStrategies();
@@ -2727,7 +3583,7 @@ export function createZylithWalletRuntime(
   async function settlePrivateOrderLock(
     orderCommitment: string,
     outcome: "released" | "spent",
-    fundingFallback?: {
+    settlementFunding?: {
       asset?: string;
       amount?: string;
       batchId?: string;
@@ -2750,9 +3606,9 @@ export function createZylithWalletRuntime(
         spent: outcome === "spent" ? true : note.spent,
       };
     });
-    if (outcome === "spent" && fundingFallback?.noteCommitments?.length) {
+    if (outcome === "spent" && settlementFunding?.noteCommitments?.length) {
       const commitments = new Set(
-        fundingFallback.noteCommitments.map(normalizeFeltForComparison)
+        settlementFunding.noteCommitments.map(normalizeFeltForComparison)
       );
       notes = notes.map((note) => {
         if (!commitments.has(normalizeFeltForComparison(note.note_commitment)))
@@ -2768,60 +3624,42 @@ export function createZylithWalletRuntime(
     if (
       !changed &&
       outcome === "spent" &&
-      (await spentFallbackAlreadyApplied(expectedOrderCommitment))
+      (await settlementSpendAlreadyRecorded(expectedOrderCommitment))
     ) {
       return false;
     }
     if (!changed) return false;
     if (outcome === "spent")
-      await markSpentFallbackApplied(expectedOrderCommitment);
+      await recordSettlementSpend(expectedOrderCommitment);
     await saveNotes();
     scheduleRecoverySnapshot(false);
     return true;
   }
 
-  async function releaseUnreferencedNoteLocks(retainedLockRefs: string[]) {
-    requireUnlocked();
-    const retained = new Set(
-      retainedLockRefs.map(normalizeFeltForComparison).filter(Boolean)
-    );
-    let changed = false;
-    notes = notes.map((note) => {
-      const lockRef = normalizeFeltForComparison(note.locked_by_order);
-      if (!lockRef || retained.has(lockRef)) return note;
-      changed = true;
-      return { ...note, locked_by_order: undefined };
-    });
-    if (!changed) return false;
-    await saveNotes();
-    scheduleRecoverySnapshot(false);
-    return true;
-  }
-
-  async function spentFallbackKey(orderCommitment: string) {
+  async function settlementSpendKey(orderCommitment: string) {
     const { seedHex: unlockedSeed } = requireUnlocked();
     const digest = await sha256Json({
-      domain: "zylith/spent-fallback-key-v1",
+      domain: "zylith/settlement-spend-key-v1",
       scope: localStateScope(),
       seed_hex: unlockedSeed,
       order_commitment: normalizeFeltForComparison(orderCommitment),
     });
-    return `zylith.spent-fallback.${localStateScope()}.${digest}`;
+    return `zylith.settlement-spend.${localStateScope()}.${digest}`;
   }
 
-  async function spentFallbackAlreadyApplied(orderCommitment: string) {
+  async function settlementSpendAlreadyRecorded(orderCommitment: string) {
     try {
       return (
-        localStorage.getItem(await spentFallbackKey(orderCommitment)) === "1"
+        localStorage.getItem(await settlementSpendKey(orderCommitment)) === "1"
       );
     } catch {
       return false;
     }
   }
 
-  async function markSpentFallbackApplied(orderCommitment: string) {
+  async function recordSettlementSpend(orderCommitment: string) {
     try {
-      localStorage.setItem(await spentFallbackKey(orderCommitment), "1");
+      localStorage.setItem(await settlementSpendKey(orderCommitment), "1");
     } catch {
       /* noop */
     }
@@ -2832,13 +3670,9 @@ export function createZylithWalletRuntime(
   ) {
     const { seedHex: unlockedSeed } = requireUnlocked();
     const deployment = await loadDeploymentConfig();
-    const chainId = requiredString(
-      configuredChainId || deployment.chain_id,
-      "chain_id"
-    );
+    const chainId = requiredString(deployment.chain_id, "chain_id");
     const auctionVerifierAddress = requiredNonZeroFelt(
-      deployment.contracts?.auction_verifier ||
-        configuredAuctionVerifierAddress,
+      deployment.contracts?.auction_verifier,
       "auction_verifier_address"
     );
     const basePlanRequest = {
@@ -2872,11 +3706,7 @@ export function createZylithWalletRuntime(
       starknet_call: StarknetCallPayload;
       encoded_args: { cancel_marker: string };
     };
-    const { transaction_hash: transactionHash } =
-      await submitProtocolCallViaPaymaster(
-        plan.starknet_call,
-        strategy.parent.parent_cancel_authority
-      );
+    const transactionHash = await executeInjectedStarknetCalls([plan.starknet_call]);
     await recordRenewalCancelMarkerWithCoordinator(
       plan.encoded_args.cancel_marker,
       auctionVerifierAddress,
@@ -2893,13 +3723,9 @@ export function createZylithWalletRuntime(
     strategy: PrivateStrategyRecord
   ) {
     const deployment = await loadDeploymentConfig();
-    const chainId = requiredString(
-      configuredChainId || deployment.chain_id,
-      "chain_id"
-    );
+    const chainId = requiredString(deployment.chain_id, "chain_id");
     const auctionVerifierAddress = requiredNonZeroFelt(
-      deployment.contracts?.auction_verifier ||
-        configuredAuctionVerifierAddress,
+      deployment.contracts?.auction_verifier,
       "auction_verifier_address"
     );
     const markerPlan = JSON.parse(
@@ -2963,39 +3789,6 @@ export function createZylithWalletRuntime(
       throw new Error("Cancellation witness does not match this curve");
     }
     return witness;
-  }
-
-  async function submitProtocolCallViaPaymaster(
-    call: StarknetCallPayload,
-    signerAddress: string
-  ) {
-    const deployment = await loadDeploymentConfig();
-    const paymasterEndpointUrl = normalizeUrl(
-      configuredPaymasterUrl ||
-        deployment.funding?.starknet_privacy?.paymaster_url
-    );
-    if (!paymasterEndpointUrl)
-      throw new Error("Transaction relay is not configured");
-    const chainId = requiredString(
-      configuredChainId || deployment.chain_id,
-      "chain_id"
-    );
-    const paymasterAddress = requiredNonZeroFelt(
-      configuredPaymasterAddress ||
-        deployment.funding?.starknet_privacy?.paymaster_address,
-      "paymaster_address"
-    );
-    return postJson<{ transaction_hash: string }>(
-      paymasterEndpointBase(paymasterEndpointUrl),
-      paymasterEndpointPath(paymasterEndpointUrl),
-      {
-        chain_id: chainId,
-        signer_address: signerAddress,
-        paymaster_address: paymasterAddress,
-        call,
-        relay_nonce: randomFeltHex(),
-      }
-    );
   }
 
   function signRenewalRelayPackageAuthorization(
@@ -3141,7 +3934,9 @@ export function createZylithWalletRuntime(
     if (strategy.status !== "paused") {
       throw new Error("Only paused strategies can be resumed");
     }
-    const batch = await fetchCurrentPairBatch(strategy.pair).catch(() => null);
+    const batch = await fetchSubmittablePairBatch(strategy.pair).catch(
+      () => null
+    );
     const resumedAt = Date.now();
     if (batch && batch.status === "Open") {
       const nextEpoch = firstRenewalSlotEpoch(
@@ -3174,9 +3969,14 @@ export function createZylithWalletRuntime(
     if (!strategy) throw new Error("Strategy not found");
     if (strategy.status === "cancelled")
       throw new Error("Cancelled strategies cannot be refreshed");
-    if (strategy.mode !== "Resting") {
+    if (strategy.mode === "Resting") {
       throw new Error(
-        "Renewal package refresh is only supported for resting maker curves"
+        "Legacy resting liquidity automation is disabled; open a private liquidity position instead."
+      );
+    }
+    if (!STRATEGY_ORDER_MODES.has(strategy.mode)) {
+      throw new Error(
+        "Renewal package refresh is only supported for TWAP, VWAP, and Repeat strategies"
       );
     }
     const offlinePackage = await createOfflineRenewalPackageForStrategy(
@@ -3189,7 +3989,7 @@ export function createZylithWalletRuntime(
     strategy.updated_at_unix_ms = Date.now();
     await saveNotes();
     await saveStrategies();
-    scheduleRecoverySnapshot(true);
+    await pushRecoverySnapshot(true).catch(() => false);
     return offlinePackage;
   }
 
@@ -3322,10 +4122,9 @@ export function createZylithWalletRuntime(
     ) {
       throw new Error("Auction window is inside the submission safety buffer");
     }
-    const materializedDraft = materializeMakerCurveDraft(draft);
-    const fundingNotes = selectFundingNotes(materializedDraft);
+    const fundingNotes = selectFundingNotes(draft);
     const built = buildPrivateOrderForSlot(
-      materializedDraft,
+      draft,
       batch,
       fundingNotes,
       registry,
@@ -3339,7 +4138,8 @@ export function createZylithWalletRuntime(
       fundingNote.locked_by_order = pendingOrderCommitment;
     }
     await saveNotes();
-    scheduleRecoverySnapshot(false);
+    await pushRecoverySnapshot(true).catch(() => false);
+    let privateIngressStarted = false;
     let coordinatorSubmissionStarted = false;
     try {
       const submissionDelayMs = privateSubmissionDelayMs(
@@ -3368,6 +4168,7 @@ export function createZylithWalletRuntime(
           remainingBatchMs(batch.close_time_unix_ms),
         submission_safety_buffer_ms: submissionSafetyBufferMs,
       };
+      privateIngressStarted = true;
       const ingress = await postJson<IngressResponse>(
         proverUrl,
         "/api/private/orders",
@@ -3409,7 +4210,7 @@ export function createZylithWalletRuntime(
           }
         }
         await saveNotes();
-        scheduleRecoverySnapshot(false);
+        await pushRecoverySnapshot(true).catch(() => false);
       }
       return {
         order_commitment: acceptedOrderCommitment,
@@ -3423,7 +4224,16 @@ export function createZylithWalletRuntime(
         epoch_id: batch.epoch_id,
       };
     } catch (error) {
-      if (coordinatorSubmissionStarted) {
+      if (
+        isAmbiguousPrivateOrderSubmissionError(
+          error,
+          coordinatorSubmissionStarted
+            ? "coordinator_submission"
+            : privateIngressStarted
+              ? "private_ingress"
+              : "pre_ingress"
+        )
+      ) {
         return {
           order_commitment: pendingOrderCommitment,
           cancellation_secret: built.cancellation_secret,
@@ -3446,17 +4256,48 @@ export function createZylithWalletRuntime(
         }
       }
       await saveNotes();
-      scheduleRecoverySnapshot(false);
+      await pushRecoverySnapshot(true).catch(() => false);
       throw error;
     }
+  }
+
+  async function submitSinglePrivateOrderWithFreshBatch(
+    draft: PrivateOrderDraft,
+    registry: unknown,
+    parent?: { material: StrategyParentMaterial; childIndex: number }
+  ) {
+    if (draft.batchId?.trim()) {
+      const batch = await resolveExplicitPairBatch(draft);
+      return submitSinglePrivateOrder(draft, batch, registry, parent);
+    }
+    let lastRolloverError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const batch = await resolveSubmittablePairBatch(
+        draft.pair,
+        draft.batchWindowMs
+      );
+      if (!batch || batch.status !== "Open") {
+        lastRolloverError = new Error("Auction window is no longer open");
+        await delay(250);
+        continue;
+      }
+      try {
+        return await submitSinglePrivateOrder(draft, batch, registry, parent);
+      } catch (error) {
+        if (!isBatchRolloverError(error)) throw error;
+        lastRolloverError = error;
+        await delay(250);
+      }
+    }
+    throw lastRolloverError instanceof Error
+      ? lastRolloverError
+      : new Error("Auction window is no longer open");
   }
 
   async function createPrivateStrategy(draft: PrivateOrderDraft) {
     const { seedHex: unlockedSeed } = requireUnlocked();
     if (!STRATEGY_ORDER_MODES.has(draft.mode)) {
-      throw new Error(
-        "Strategy worker only supports TWAP, VWAP, Repeat, and Resting"
-      );
+      throw new Error("Strategy worker only supports TWAP, VWAP, and Repeat");
     }
     if (!coordinatorUrl || !proverUrl) {
       throw new Error(
@@ -3470,39 +4311,21 @@ export function createZylithWalletRuntime(
     if (!batch || batch.status !== "Open") {
       throw new Error("Strategy auction window is no longer open");
     }
-    const isResting = draft.mode === "Resting";
-    const makerCurvePoints = isResting ? normalizeMakerCurvePoints(draft) : [];
-    if (isResting && makerCurvePoints.length < MIN_MAKER_CURVE_POINTS) {
-      throw new Error(
-        `Resting maker strategy requires at least ${MIN_MAKER_CURVE_POINTS} maker curve points`
-      );
-    }
-    const makerCurveBaseAmount = makerCurveTotalBaseAmount(makerCurvePoints);
-    const totalAmount = isResting
-      ? parseOptionalRawAmount(
-          draft.makerInventoryCap,
-          "maker inventory cap"
-        ) ??
-        parseOptionalRawAmount(draft.amount, "strategy amount") ??
-        makerCurveBaseAmount
-      : parseRawAmount(draft.amount, "strategy amount");
+    const totalAmount = parseRawAmount(draft.amount, "strategy amount");
     const maxChildren = clampStrategyChildren(
       draft.maxChildren ??
         draft.durationBatches ??
         defaultStrategyChildren(draft.mode)
     );
-    const childAmount = isResting
-      ? makerCurveBaseAmount
-      : parseOptionalRawAmount(draft.childAmount, "child amount") ??
-        ceilDiv(totalAmount, BigInt(maxChildren));
+    const childAmount =
+      parseOptionalRawAmount(draft.childAmount, "child amount") ??
+      ceilDiv(totalAmount, BigInt(maxChildren));
     if (childAmount <= 0n || childAmount > totalAmount) {
       throw new Error(
         "Child amount must be positive and not exceed strategy amount"
       );
     }
-    const limitPrice = isResting
-      ? makerCurveEnvelopePrice(draft.side, makerCurvePoints)
-      : parseRawAmount(draft.limitPrice, "limit price");
+    const limitPrice = parseRawAmount(draft.limitPrice, "limit price");
     const minFill = normalizeOrderMinFill(draft, childAmount);
     const parent = JSON.parse(
       core.zylith_wallet_build_strategy_parent(
@@ -3533,11 +4356,6 @@ export function createZylithWalletRuntime(
       end_epoch: batch.epoch_id + maxChildren - 1,
       randomized_slicing: draft.randomizedSlicing ?? true,
       slice_jitter_bps: normalizeJitterBps(draft.randomizedSlicingBps),
-      maker_curve_points: isResting
-        ? serializeMakerCurvePoints(makerCurvePoints)
-        : undefined,
-      maker_curve_rotation_bps: isResting ? makerCurveRotationBps(draft) : 0,
-      maker_inventory_cap: isResting ? totalAmount.toString() : undefined,
       renewal_window_children: maxChildren,
       parent,
       submitted_children: [],
@@ -3576,7 +4394,7 @@ export function createZylithWalletRuntime(
     const { seedHex: unlockedSeed } = requireUnlocked();
     if (!STRATEGY_ORDER_MODES.has(draft.mode)) {
       throw new Error(
-        "Offline renewal packages only support TWAP, VWAP, Repeat, and Resting strategies"
+        "Offline renewal packages only support TWAP, VWAP, and Repeat strategies"
       );
     }
     if (!coordinatorUrl || !proverUrl) {
@@ -3584,49 +4402,34 @@ export function createZylithWalletRuntime(
         "Coordinator and private ingress URLs are required for offline renewal packages"
       );
     }
-    const currentBatch = await fetchCurrentPairBatch(draft.pair);
-    if (!currentBatch || currentBatch.status !== "Open") {
+    const anchorBatch = await resolveSubmittablePairBatch(
+      draft.pair,
+      draft.batchWindowMs
+    );
+    if (!anchorBatch || anchorBatch.status !== "Open") {
       throw new Error(
-        "Current auction window is unavailable; cannot anchor offline renewal slots"
+        "No safe auction window is available; cannot anchor offline renewal slots"
       );
     }
     const registry = await fetchIngressRegistry();
-    const isResting = draft.mode === "Resting";
-    const makerCurvePoints = isResting ? normalizeMakerCurvePoints(draft) : [];
-    if (isResting && makerCurvePoints.length < MIN_MAKER_CURVE_POINTS) {
-      throw new Error(
-        `Resting maker strategy requires at least ${MIN_MAKER_CURVE_POINTS} maker curve points`
-      );
-    }
-    const makerCurveBaseAmount = makerCurveTotalBaseAmount(makerCurvePoints);
-    const totalAmount = isResting
-      ? parseOptionalRawAmount(
-          draft.makerInventoryCap,
-          "maker inventory cap"
-        ) ??
-        parseOptionalRawAmount(draft.amount, "strategy amount") ??
-        makerCurveBaseAmount
-      : parseRawAmount(draft.amount, "strategy amount");
+    const totalAmount = parseRawAmount(draft.amount, "strategy amount");
     const maxChildren = clampStrategyChildren(
       draft.maxChildren ??
         draft.durationBatches ??
         defaultStrategyChildren(draft.mode)
     );
-    const childAmount = isResting
-      ? makerCurveBaseAmount
-      : parseOptionalRawAmount(draft.childAmount, "child amount") ??
-        ceilDiv(totalAmount, BigInt(maxChildren));
+    const childAmount =
+      parseOptionalRawAmount(draft.childAmount, "child amount") ??
+      ceilDiv(totalAmount, BigInt(maxChildren));
     if (childAmount <= 0n || childAmount > totalAmount) {
       throw new Error(
         "Child amount must be positive and not exceed strategy amount"
       );
     }
-    const limitPrice = isResting
-      ? makerCurveEnvelopePrice(draft.side, makerCurvePoints)
-      : parseRawAmount(draft.limitPrice, "limit price");
+    const limitPrice = parseRawAmount(draft.limitPrice, "limit price");
     const minFill = normalizeOrderMinFill(draft, childAmount);
     const firstEpoch = firstRenewalSlotEpoch(
-      currentBatch,
+      anchorBatch,
       draft.relayMode ?? "SelfRelay",
       Date.now(),
       draft.batchWindowMs
@@ -3660,11 +4463,6 @@ export function createZylithWalletRuntime(
       end_epoch: firstEpoch + maxChildren - 1,
       randomized_slicing: draft.randomizedSlicing ?? true,
       slice_jitter_bps: normalizeJitterBps(draft.randomizedSlicingBps),
-      maker_curve_points: isResting
-        ? serializeMakerCurvePoints(makerCurvePoints)
-        : undefined,
-      maker_curve_rotation_bps: isResting ? makerCurveRotationBps(draft) : 0,
-      maker_inventory_cap: isResting ? totalAmount.toString() : undefined,
       renewal_window_children: maxChildren,
       parent,
       submitted_children: [],
@@ -3674,7 +4472,6 @@ export function createZylithWalletRuntime(
     };
     const slots: OfflineRenewalSlot[] = [];
     const reservedNotes = new Set<string>();
-    let restingFundingNotes: LocalNoteRecord[] | null = null;
     const fundingLocks: Array<{
       notes: LocalNoteRecord[];
       orderCommitment: string;
@@ -3689,47 +4486,21 @@ export function createZylithWalletRuntime(
       const childDraft: PrivateOrderDraft = {
         pair: strategy.pair,
         side: strategy.side,
-        mode: strategy.mode === "Resting" ? "Maker Curve" : "Limit",
+        mode: "Limit",
         amount: amount.toString(),
         limitPrice: strategy.limit_price,
         priceBaseScale: strategy.price_base_scale,
         minFill: min(BigInt(strategy.min_fill), amount).toString(),
         fillOrKill: strategy.fill_or_kill,
         batchId: batch.batch_id,
-        makerCurvePoints:
-          strategy.mode === "Resting"
-            ? strategyMakerCurveDraftPoints(strategy)
-            : undefined,
-        makerCurveRotationBps:
-          strategy.mode === "Resting"
-            ? strategy.maker_curve_rotation_bps
-            : undefined,
-        makerInventoryCap:
-          strategy.mode === "Resting"
-            ? strategy.maker_inventory_cap
-            : undefined,
         relayMode: draft.relayMode ?? "SelfRelay",
       };
-      const materializedChildDraft = materializeMakerCurveDraft(childDraft);
-      const fundingSelectionDraft =
-        strategy.mode === "Resting"
-          ? makerCurveFundingSelectionDraft(childDraft)
-          : materializedChildDraft;
-      const fundingNotes =
-        strategy.mode === "Resting"
-          ? (restingFundingNotes ??= selectFundingNotes(
-              fundingSelectionDraft,
-              new Set<string>(),
-              strategyFundingLockRef(strategy)
-            ))
-          : selectFundingNotes(materializedChildDraft, reservedNotes);
-      if (strategy.mode !== "Resting") {
-        for (const fundingNote of fundingNotes) {
-          reservedNotes.add(fundingNote.note_commitment);
-        }
+      const fundingNotes = selectFundingNotes(childDraft, reservedNotes);
+      for (const fundingNote of fundingNotes) {
+        reservedNotes.add(fundingNote.note_commitment);
       }
       const built = buildPrivateOrderForSlot(
-        materializedChildDraft,
+        childDraft,
         batch,
         fundingNotes,
         registry,
@@ -3743,12 +4514,10 @@ export function createZylithWalletRuntime(
         fundingNotes,
         fundingLabelSalt
       );
-      if (strategy.mode !== "Resting" || fundingLocks.length === 0) {
-        fundingLocks.push({
-          notes: fundingNotes,
-          orderCommitment: built.order_commitment,
-        });
-      }
+      fundingLocks.push({
+        notes: fundingNotes,
+        orderCommitment: built.order_commitment,
+      });
       strategy.submitted_children.push({
         parent_child_index: childIndex,
         batch_id: batch.batch_id,
@@ -3773,17 +4542,11 @@ export function createZylithWalletRuntime(
         funding_note_commitments: fundingLabels,
         ingress_request: built.ingress_request,
       });
-      if (strategy.mode !== "Resting") {
-        strategy.remaining_amount = (
-          BigInt(strategy.remaining_amount) - amount
-        ).toString();
-      }
+      strategy.remaining_amount = (
+        BigInt(strategy.remaining_amount) - amount
+      ).toString();
       strategy.next_child_index += 1;
-      if (
-        strategy.mode !== "Resting" &&
-        BigInt(strategy.remaining_amount) <= 0n
-      )
-        break;
+      if (BigInt(strategy.remaining_amount) <= 0n) break;
     }
     if (slots.length === 0) {
       throw new Error(
@@ -3836,17 +4599,14 @@ export function createZylithWalletRuntime(
     strategy.offline_package = offlinePackage;
     strategies.push(strategy);
     for (const lock of fundingLocks) {
-      const lockRef =
-        strategy.mode === "Resting"
-          ? strategyFundingLockRef(strategy)
-          : normalizeFeltForComparison(lock.orderCommitment);
+      const lockRef = normalizeFeltForComparison(lock.orderCommitment);
       for (const note of lock.notes) {
         note.locked_by_order = lockRef;
       }
     }
     await saveNotes();
     await saveStrategies();
-    scheduleRecoverySnapshot(true);
+    await pushRecoverySnapshot(true).catch(() => false);
     return offlinePackage;
   }
 
@@ -3854,32 +4614,28 @@ export function createZylithWalletRuntime(
     strategy: PrivateStrategyRecord
   ): Promise<OfflineRenewalPackage> {
     const { seedHex: unlockedSeed } = requireUnlocked();
+    if (strategy.mode === "Resting") {
+      throw new Error(
+        "Legacy resting liquidity automation is disabled; open a private liquidity position instead."
+      );
+    }
     if (!coordinatorUrl || !proverUrl) {
       throw new Error(
         "Coordinator and private ingress URLs are required for offline renewal packages"
       );
     }
-    const currentBatch = await fetchCurrentPairBatch(strategy.pair);
-    if (!currentBatch || currentBatch.status !== "Open") {
+    const anchorBatch = await resolveSubmittablePairBatch(
+      strategy.pair,
+      strategy.batch_window_ms
+    );
+    if (!anchorBatch || anchorBatch.status !== "Open") {
       throw new Error(
-        "Current auction window is unavailable; cannot refresh renewal slots"
+        "No safe auction window is available; cannot refresh renewal slots"
       );
     }
     const registry = await fetchIngressRegistry();
-    const makerCurvePoints =
-      strategy.mode === "Resting"
-        ? strategyMakerCurveDraftPoints(strategy)
-        : [];
-    if (
-      strategy.mode === "Resting" &&
-      makerCurvePoints.length < MIN_MAKER_CURVE_POINTS
-    ) {
-      throw new Error(
-        `Resting maker strategy requires at least ${MIN_MAKER_CURVE_POINTS} maker curve points`
-      );
-    }
     const firstSafeEpoch = firstRenewalSlotEpoch(
-      currentBatch,
+      anchorBatch,
       strategy.offline_package?.relay_mode ?? "SelfRelay",
       Date.now(),
       strategy.batch_window_ms
@@ -3892,29 +4648,13 @@ export function createZylithWalletRuntime(
     );
     const slots: OfflineRenewalSlot[] = [];
     const reservedNotes = new Set<string>();
-    let restingFundingNotes: LocalNoteRecord[] | null = null;
     const fundingLocks: Array<{
       notes: LocalNoteRecord[];
       orderCommitment: string;
     }> = [];
     const fundingLabelSalt = randomFeltHex();
     for (let offset = 0; offset < slotCount; offset += 1) {
-      const amount =
-        strategy.mode === "Resting"
-          ? makerCurveTotalBaseAmount(
-              normalizeMakerCurvePoints({
-                pair: strategy.pair,
-                side: strategy.side,
-                mode: "Maker Curve",
-                amount: strategy.child_amount,
-                limitPrice: strategy.limit_price,
-                minFill: strategy.min_fill,
-                fillOrKill: strategy.fill_or_kill,
-                batchId: "",
-                makerCurvePoints: makerCurvePoints,
-              })
-            )
-          : strategyChildAmount(strategy);
+      const amount = strategyChildAmount(strategy);
       if (amount <= 0n) break;
       const epoch = firstEpoch + offset;
       const batch = syntheticBatchForEpoch(strategy.pair, epoch);
@@ -3922,45 +4662,21 @@ export function createZylithWalletRuntime(
       const childDraft: PrivateOrderDraft = {
         pair: strategy.pair,
         side: strategy.side,
-        mode: strategy.mode === "Resting" ? "Maker Curve" : "Limit",
+        mode: "Limit",
         amount: amount.toString(),
         limitPrice: strategy.limit_price,
         priceBaseScale: strategy.price_base_scale,
         minFill: min(BigInt(strategy.min_fill), amount).toString(),
         fillOrKill: strategy.fill_or_kill,
         batchId: batch.batch_id,
-        makerCurvePoints:
-          strategy.mode === "Resting" ? makerCurvePoints : undefined,
-        makerCurveRotationBps:
-          strategy.mode === "Resting"
-            ? strategy.maker_curve_rotation_bps
-            : undefined,
-        makerInventoryCap:
-          strategy.mode === "Resting"
-            ? strategy.maker_inventory_cap
-            : undefined,
         relayMode: strategy.offline_package?.relay_mode ?? "SelfRelay",
       };
-      const materializedChildDraft = materializeMakerCurveDraft(childDraft);
-      const fundingSelectionDraft =
-        strategy.mode === "Resting"
-          ? makerCurveFundingSelectionDraft(childDraft)
-          : materializedChildDraft;
-      const fundingNotes =
-        strategy.mode === "Resting"
-          ? (restingFundingNotes ??= selectFundingNotes(
-              fundingSelectionDraft,
-              new Set<string>(),
-              strategyFundingLockRef(strategy)
-            ))
-          : selectFundingNotes(materializedChildDraft, reservedNotes);
-      if (strategy.mode !== "Resting") {
-        for (const fundingNote of fundingNotes) {
-          reservedNotes.add(fundingNote.note_commitment);
-        }
+      const fundingNotes = selectFundingNotes(childDraft, reservedNotes);
+      for (const fundingNote of fundingNotes) {
+        reservedNotes.add(fundingNote.note_commitment);
       }
       const built = buildPrivateOrderForSlot(
-        materializedChildDraft,
+        childDraft,
         batch,
         fundingNotes,
         registry,
@@ -3974,12 +4690,10 @@ export function createZylithWalletRuntime(
         fundingNotes,
         fundingLabelSalt
       );
-      if (strategy.mode !== "Resting" || fundingLocks.length === 0) {
-        fundingLocks.push({
-          notes: fundingNotes,
-          orderCommitment: built.order_commitment,
-        });
-      }
+      fundingLocks.push({
+        notes: fundingNotes,
+        orderCommitment: built.order_commitment,
+      });
       strategy.submitted_children.push({
         parent_child_index: childIndex,
         batch_id: batch.batch_id,
@@ -4004,17 +4718,11 @@ export function createZylithWalletRuntime(
         funding_note_commitments: fundingLabels,
         ingress_request: built.ingress_request,
       });
-      if (strategy.mode !== "Resting") {
-        strategy.remaining_amount = (
-          BigInt(strategy.remaining_amount) - amount
-        ).toString();
-      }
+      strategy.remaining_amount = (
+        BigInt(strategy.remaining_amount) - amount
+      ).toString();
       strategy.next_child_index += 1;
-      if (
-        strategy.mode !== "Resting" &&
-        BigInt(strategy.remaining_amount) <= 0n
-      )
-        break;
+      if (BigInt(strategy.remaining_amount) <= 0n) break;
     }
     if (slots.length === 0) {
       throw new Error(
@@ -4073,10 +4781,7 @@ export function createZylithWalletRuntime(
     strategy.end_epoch = offlinePackage.end_epoch;
     strategy.last_error = undefined;
     for (const lock of fundingLocks) {
-      const lockRef =
-        strategy.mode === "Resting"
-          ? strategyFundingLockRef(strategy)
-          : normalizeFeltForComparison(lock.orderCommitment);
+      const lockRef = normalizeFeltForComparison(lock.orderCommitment);
       for (const note of lock.notes) {
         note.locked_by_order = lockRef;
       }
@@ -4087,7 +4792,7 @@ export function createZylithWalletRuntime(
   function startStrategyWorker() {
     if (strategyTimer !== null) return;
     strategyTimer = window.setInterval(() => {
-      void runStrategyWorkerOnce();
+      void runStrategyWorkerOnce().catch(() => undefined);
     }, STRATEGY_WORKER_INTERVAL_MS);
   }
 
@@ -4121,6 +4826,13 @@ export function createZylithWalletRuntime(
     strategyWorkerInFlight = true;
     try {
       for (const strategy of active) {
+        if (strategy.mode === "Resting") {
+          strategy.status = "paused";
+          strategy.last_error =
+            "Legacy resting liquidity automation is disabled; open a private liquidity position instead.";
+          strategy.updated_at_unix_ms = Date.now();
+          continue;
+        }
         await materializeStrategyChildIfDue(strategy);
       }
       await saveStrategies();
@@ -4133,12 +4845,22 @@ export function createZylithWalletRuntime(
   async function materializeStrategyChildIfDue(
     strategy: PrivateStrategyRecord
   ) {
+    if (strategy.mode === "Resting") {
+      strategy.status = "paused";
+      strategy.last_error =
+        "Legacy resting liquidity automation is disabled; open a private liquidity position instead.";
+      strategy.updated_at_unix_ms = Date.now();
+      return;
+    }
     if (strategy.next_child_index > strategy.max_children) {
       strategy.status = "completed";
       strategy.updated_at_unix_ms = Date.now();
       return;
     }
-    const batch = await fetchCurrentPairBatch(strategy.pair);
+    const batch = await resolveSubmittablePairBatch(
+      strategy.pair,
+      strategy.batch_window_ms
+    );
     if (!batch || batch.status !== "Open") return;
     if (
       batch.epoch_id < strategy.start_epoch ||
@@ -4171,7 +4893,7 @@ export function createZylithWalletRuntime(
     const draft: PrivateOrderDraft = {
       pair: strategy.pair,
       side: strategy.side,
-      mode: strategy.mode === "Resting" ? "Maker Curve" : "Limit",
+      mode: "Limit",
       amount: amount.toString(),
       limitPrice: strategy.limit_price,
       priceBaseScale: strategy.price_base_scale,
@@ -4179,24 +4901,18 @@ export function createZylithWalletRuntime(
       fillOrKill: strategy.fill_or_kill,
       batchId: batch.batch_id,
       batchWindowMs: strategy.batch_window_ms,
-      makerCurvePoints:
-        strategy.mode === "Resting"
-          ? strategyMakerCurveDraftPoints(strategy)
-          : undefined,
-      makerCurveRotationBps:
-        strategy.mode === "Resting"
-          ? strategy.maker_curve_rotation_bps
-          : undefined,
-      makerInventoryCap:
-        strategy.mode === "Resting" ? strategy.maker_inventory_cap : undefined,
     };
     try {
       const registry = await fetchIngressRegistry();
       const childIndex = strategy.next_child_index;
-      const submitted = await submitSinglePrivateOrder(draft, batch, registry, {
-        material: strategy.parent,
-        childIndex,
-      });
+      const submitted = await submitSinglePrivateOrderWithFreshBatch(
+        draft,
+        registry,
+        {
+          material: strategy.parent,
+          childIndex,
+        }
+      );
       strategy.submitted_children.push({
         parent_child_index: childIndex,
         batch_id: submitted.batch_id,
@@ -4208,16 +4924,14 @@ export function createZylithWalletRuntime(
         funding_note_commitments: submitted.funding_note_commitments,
         submitted_at_unix_ms: Date.now(),
       });
-      if (strategy.mode !== "Resting") {
-        strategy.remaining_amount = (
-          BigInt(strategy.remaining_amount) - amount
-        ).toString();
-      }
+      strategy.remaining_amount = (
+        BigInt(strategy.remaining_amount) - amount
+      ).toString();
       strategy.next_child_index += 1;
       strategy.last_error = undefined;
       if (
         strategy.next_child_index > strategy.max_children ||
-        (strategy.mode !== "Resting" && BigInt(strategy.remaining_amount) <= 0n)
+        BigInt(strategy.remaining_amount) <= 0n
       ) {
         strategy.status = "completed";
       }
@@ -4231,12 +4945,12 @@ export function createZylithWalletRuntime(
     }
   }
 
-  async function submitHostedWithdrawal(rawRequest: unknown) {
+  async function submitStrk20Withdrawal(rawRequest: unknown) {
     const deployment = await loadDeploymentConfig();
-    if (!hostedWithdrawalEnabledForDeployment(deployment)) {
-      throw new Error("Withdrawals are disabled for this deployment.");
+    if (!strk20WithdrawalEnabledForDeployment(deployment)) {
+      throw new Error("STRK20 withdrawals are not configured for this deployment.");
     }
-    const request = rawRequest as HostedWithdrawalRequest;
+    const request = rawRequest as Strk20WithdrawalRequest;
     const { seedHex: unlockedSeed } = requireUnlocked();
     const note = selectWithdrawableNote(request.note_commitment);
     const noteCommitment = note.note_commitment;
@@ -4265,15 +4979,11 @@ export function createZylithWalletRuntime(
       "privacy_deposit_bridge_address"
     );
     const auctionVerifierAddress = requiredNonZeroFelt(
-      deployment.contracts?.auction_verifier ||
-        configuredAuctionVerifierAddress ||
-        request.auction_verifier_address,
+      deployment.contracts?.auction_verifier,
       "auction_verifier_address"
     );
     const shieldedAssetAdapterAddress = requiredNonZeroFelt(
-      deployment.funding?.starknet_privacy?.shielded_asset_adapter ||
-        deployment.contracts?.shielded_asset_adapter ||
-        request.shielded_asset_adapter_address,
+      fundingRail.shieldedAssetAdapter,
       "shielded_asset_adapter_address"
     );
     if (
@@ -4284,18 +4994,9 @@ export function createZylithWalletRuntime(
         "STRK20 open-note withdrawals require the privacy bridge to be the shielded adapter."
       );
     }
-    const chainId = requiredNonZeroFelt(
-      configuredChainId || deployment.chain_id || request.chain_id,
-      "chain_id"
-    );
-    const tokenAddress = requiredNonZeroFelt(
-      deployment.token_addresses?.[note.note.asset_id],
-      `${note.note.asset_id} token address`
-    );
-    const rpcUrl = requiredString(
-      deployment.rpc_url || ZAN_STARKNET_SEPOLIA_RPC_URL,
-      "rpc_url"
-    );
+    const chainId = requiredNonZeroFelt(deployment.chain_id, "chain_id");
+    const tokenAddress = fundingRailTokenAddress(deployment, note.note.asset_id);
+    const rpcUrl = requiredString(deployment.rpc_url, "rpc_url");
     const discoveryUrl = browserSafeServiceUrl(
       normalizeUrl(fundingRail.discoveryUrl),
       "/starknet-privacy-discovery"
@@ -4323,9 +5024,10 @@ export function createZylithWalletRuntime(
           output_note: outputNote,
           output_note_preimage: note.note,
           output_proof: outputProof,
-          recipient: "0x0",
           strk20_exit_commitment: strk20ExitCommitment,
-        }
+        },
+        {},
+        { timeoutMs: STRK20_WITHDRAWAL_PREPARE_TIMEOUT_MS }
       );
       const signedWitness = JSON.parse(
         core.zylith_wallet_sign_settlement_output_withdrawal_witness(
@@ -4336,7 +5038,6 @@ export function createZylithWalletRuntime(
               output_note: outputNote,
               output_note_preimage: note.note,
               output_proof: outputProof,
-              recipient: "0x0",
               strk20_exit_commitment: strk20ExitCommitment,
               auction_verifier_address: auctionVerifierAddress,
               shielded_asset_adapter_address: shieldedAssetAdapterAddress,
@@ -4349,7 +5050,9 @@ export function createZylithWalletRuntime(
       const result = await postJson<{ transaction_hash: string }>(
         proverUrl,
         "/api/private/withdrawals/submit",
-        { witness: signedWitness }
+        { witness: signedWitness },
+        {},
+        { timeoutMs: STRK20_WITHDRAWAL_SUBMIT_TIMEOUT_MS }
       );
       stagedTransactionHash = result.transaction_hash;
       const latestNote = currentWithdrawalNote();
@@ -4357,7 +5060,7 @@ export function createZylithWalletRuntime(
       latestNote.strk20_exit_commitment = strk20ExitCommitment;
       latestNote.withdrawal_requested_at_unix_ms = Date.now();
       await saveNotes();
-      await pushRecoverySnapshot(true);
+      await pushRecoverySnapshot(true).catch(() => false);
     }
     const confirmedStagedTransactionHash = requiredString(
       stagedTransactionHash,
@@ -4367,7 +5070,17 @@ export function createZylithWalletRuntime(
       confirmedStagedTransactionHash,
       deployment,
       "Zylith STRK20 exit staging"
-    );
+    ).catch(async (error) => {
+      const status = await fetchTransactionReceiptStatus(
+        confirmedStagedTransactionHash,
+        deployment
+      ).catch(() => null);
+      if (applyStrk20ExitStagingReceipt(currentWithdrawalNote(), status)) {
+        await saveNotes();
+        await pushRecoverySnapshot(true).catch(() => false);
+      }
+      throw error;
+    });
 
     const latestStagedNote = currentWithdrawalNote();
     if (latestStagedNote.pending_strk20_open_note_tx) {
@@ -4379,7 +5092,7 @@ export function createZylithWalletRuntime(
       if (status?.confirmed && !status.failed) {
         applyStrk20ExitClaimReceipt(currentWithdrawalNote(), status);
         await saveNotes();
-        await pushRecoverySnapshot(true);
+        await pushRecoverySnapshot(true).catch(() => false);
         return {
           transaction_hash: pendingClaimTx,
           staged_transaction_hash: confirmedStagedTransactionHash,
@@ -4393,7 +5106,7 @@ export function createZylithWalletRuntime(
       }
       applyStrk20ExitClaimReceipt(latestStagedNote, status);
       await saveNotes();
-      await pushRecoverySnapshot(true);
+      await pushRecoverySnapshot(true).catch(() => false);
     }
 
     const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
@@ -4408,9 +5121,15 @@ export function createZylithWalletRuntime(
       tokenAddress,
       discoveryUrl,
       provingUrl,
-      paymasterAddress:
-        fundingRail.paymasterAddress || configuredPaymasterAddress,
-      paymasterUrl: fundingRail.paymasterUrl || configuredPaymasterUrl,
+      provingOhttpEnabled: fundingRail.provingOhttpEnabled,
+      paymasterAddress: requiredNonZeroFelt(
+        fundingRail.paymasterAddress,
+        "privacy_paymaster_address"
+      ),
+      paymasterUrl: requiredString(
+        fundingRail.paymasterUrl,
+        "privacy_paymaster_url"
+      ),
       privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
       minProvingDelayBlocks:
         fundingRail.minProvingDelayBlocks ??
@@ -4440,7 +5159,7 @@ export function createZylithWalletRuntime(
     latestClaimNote.strk20_open_note_id = claimResult.openNoteId;
     await saveStarknetPrivacySdkRegistry(claimResult.sdkRegistry);
     await saveNotes();
-    await pushRecoverySnapshot(true);
+    await pushRecoverySnapshot(true).catch(() => false);
     try {
       await waitForStarknetTransaction(
         claimResult.transactionHash,
@@ -4455,7 +5174,7 @@ export function createZylithWalletRuntime(
       if (status?.failed) {
         applyStrk20ExitClaimReceipt(currentWithdrawalNote(), status);
         await saveNotes();
-        await pushRecoverySnapshot(true);
+        await pushRecoverySnapshot(true).catch(() => false);
       }
       throw error;
     }
@@ -4465,20 +5184,12 @@ export function createZylithWalletRuntime(
       confirmed: true,
     });
     await saveNotes();
-    await pushRecoverySnapshot(true);
+    await pushRecoverySnapshot(true).catch(() => false);
     return {
       transaction_hash: claimResult.transactionHash,
       staged_transaction_hash: confirmedStagedTransactionHash,
       open_note_id: claimResult.openNoteId,
     };
-  }
-
-  async function submitWithdrawalViaPaymaster(
-    _rawRequest: unknown
-  ): Promise<{ transaction_hash: string }> {
-    throw new Error(
-      "Paymaster withdrawals are not supported by this runtime."
-    );
   }
 
   function getBalances() {
@@ -4525,12 +5236,12 @@ export function createZylithWalletRuntime(
       }));
   }
 
-  function hostedWithdrawalAvailable() {
-    return hostedWithdrawalEnabledForDeployment(deploymentConfigCache ?? {});
+  function strk20WithdrawalAvailable() {
+    return strk20WithdrawalEnabledForDeployment(deploymentConfigCache ?? {});
   }
 
-  function hostedNoteConsolidationAvailable() {
-    return hostedNoteConsolidationEnabledForDeployment(
+  function noteConsolidationAvailable() {
+    return noteConsolidationEnabledForDeployment(
       deploymentConfigCache ?? {}
     );
   }
@@ -4556,7 +5267,7 @@ export function createZylithWalletRuntime(
           strk20_exit_commitment: record.strk20_exit_commitment,
           strk20_open_note_id: record.strk20_open_note_id,
           metadata_commitment: record.note.metadata_commitment,
-          maker_attribution: record.maker_attribution,
+          liquidity_provider_attribution: record.liquidity_provider_attribution,
         };
       });
   }
@@ -4576,8 +5287,6 @@ export function createZylithWalletRuntime(
       price_base_scale: strategy.price_base_scale,
       min_fill: strategy.min_fill,
       fill_or_kill: strategy.fill_or_kill,
-      maker_curve_points: strategy.maker_curve_points,
-      maker_inventory_cap: strategy.maker_inventory_cap,
       renewal_window_children: strategy.renewal_window_children,
       max_children: strategy.max_children,
       next_child_index: strategy.next_child_index,
@@ -4595,6 +5304,7 @@ export function createZylithWalletRuntime(
             parent_cancel_authority:
               strategy.offline_package.parent_cancel_authority,
             relay_authorization: strategy.offline_package.relay_authorization,
+            access_token: strategy.offline_package.access_token,
           }
         : undefined,
       parent_cancel_transaction_hash: strategy.parent_cancel_transaction_hash,
@@ -4617,15 +5327,19 @@ export function createZylithWalletRuntime(
   }
 
   function previewFundingNotes(draft: PrivateOrderDraft): FundingPreview {
-    const fundingDraft = makerCurveFundingSelectionDraft(draft);
-    const selected = selectFundingNotes(fundingDraft);
-    const required = fundingRequirement(fundingDraft);
+    if (draft.mode === "Liquidity Position" || draft.mode === "Resting") {
+      throw new Error(
+        "Private liquidity must be opened through the private liquidity position lifecycle"
+      );
+    }
+    const selected = selectFundingNotes(draft);
+    const required = fundingRequirement(draft);
     const selectedTotal = selected.reduce(
       (total, record) => total + BigInt(record.note.amount),
       0n
     );
     return {
-      asset: fundingAssetForDraft(fundingDraft),
+      asset: fundingAssetForDraft(draft),
       required: required.toString(),
       selected_total: selectedTotal.toString(),
       expected_change: (selectedTotal - required).toString(),
@@ -4638,19 +5352,655 @@ export function createZylithWalletRuntime(
     };
   }
 
-  setupSessionUnlockChannel();
-  void requestSessionUnlock();
+  function authorizePrivateLiquidityPositionLifecycle(
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest,
+    signer: (inputJson: string) => string
+  ): PrivateLiquidityPositionLifecycleAuthorization {
+    const { seedHex: unlockedSeed } = requireUnlocked();
+    return JSON.parse(
+      signer(
+        JSON.stringify({
+          seed_hex: unlockedSeed,
+          ...request,
+        })
+      )
+    ) as PrivateLiquidityPositionLifecycleAuthorization;
+  }
+
+  function authorizePrivateLiquidityPositionOpen(
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest
+  ): PrivateLiquidityPositionLifecycleAuthorization {
+    return authorizePrivateLiquidityPositionLifecycle(
+      request,
+      core.zylith_wallet_authorize_liquidity_position_open
+    );
+  }
+
+  function authorizePrivateLiquidityPositionReconfigure(
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest
+  ): PrivateLiquidityPositionLifecycleAuthorization {
+    return authorizePrivateLiquidityPositionLifecycle(
+      request,
+      core.zylith_wallet_authorize_liquidity_position_reconfigure
+    );
+  }
+
+  function authorizePrivateLiquidityPositionClose(
+    request: PrivateLiquidityPositionLifecycleAuthorizationRequest
+  ): PrivateLiquidityPositionLifecycleAuthorization {
+    return authorizePrivateLiquidityPositionLifecycle(
+      request,
+      core.zylith_wallet_authorize_liquidity_position_close
+    );
+  }
+
+  function getPrivateLiquidityPositions() {
+    return liquidityPositions.map((position) =>
+      normalizeLocalLiquidityPositionRecord(position)
+    );
+  }
+
+  async function reconfigurePrivateLiquidityPosition(
+    request: PrivateLiquidityPositionReconfigureRequest,
+    candidateBatch?: BatchSummary
+  ): Promise<PrivateLiquidityPositionLifecycleResult> {
+    const { seedHex: unlockedSeed } = requireUnlocked();
+    if (request.kind !== "ReconfigurePrivateLiquidityPosition") {
+      throw new Error("Unsupported liquidity position lifecycle request");
+    }
+    const record = await requireFreshLocalLiquidityPosition(request.positionId);
+    const { batch, submissionSafetyBufferMs } =
+      await resolveLiquidityPositionLifecycleBatch(record.pair_id, candidateBatch);
+    const lifecycleInput = {
+      seed_hex: unlockedSeed,
+      pair_id: record.pair_id,
+      batch_id: batch.batch_id,
+      epoch_id: batch.epoch_id.toString(),
+      prior_position: record.position,
+      price_lower_bound: request.priceLowerBoundAtomic,
+      price_upper_bound: request.priceUpperBoundAtomic,
+      max_fill_base_per_batch: request.maxFillBasePerBatchAtomic,
+      curve_policy: liquidityPositionCurvePolicyForWasm(request.curvePolicy),
+      oracle_guard: liquidityPositionOracleGuardForWasm(request.oracleGuard),
+      rotation_policy: liquidityPositionRotationPolicyForWasm(
+        request.rotationPolicy
+      ),
+      expiry_epoch: decimalString(
+        request.expiryEpoch ?? record.position.expiry_epoch,
+        "liquidity position expiry epoch"
+      ),
+      lifecycle_nonce: randomU64(),
+    };
+    const prepared = JSON.parse(
+      core.zylith_wallet_prepare_private_liquidity_position_reconfigure(
+        JSON.stringify(lifecycleInput)
+      )
+    ) as PrivateLiquidityPositionLifecycleBuild;
+    return submitPreparedLiquidityPositionLifecycle({
+      batch,
+      submissionSafetyBufferMs,
+      prepared,
+      lifecycleInput,
+      stateWitnessKind: "reconfigure",
+      builder: core.zylith_wallet_build_private_liquidity_position_reconfigure,
+      pendingStatus: "pending_reconfigure",
+    });
+  }
+
+  async function closePrivateLiquidityPosition(
+    request: PrivateLiquidityPositionCloseRequest,
+    candidateBatch?: BatchSummary
+  ): Promise<PrivateLiquidityPositionLifecycleResult> {
+    const { seedHex: unlockedSeed } = requireUnlocked();
+    if (request.kind !== "ClosePrivateLiquidityPosition") {
+      throw new Error("Unsupported liquidity position lifecycle request");
+    }
+    const record = await requireFreshLocalLiquidityPosition(request.positionId);
+    const { batch, submissionSafetyBufferMs } =
+      await resolveLiquidityPositionLifecycleBatch(record.pair_id, candidateBatch);
+    const lifecycleInput = {
+      seed_hex: unlockedSeed,
+      pair_id: record.pair_id,
+      batch_id: batch.batch_id,
+      epoch_id: batch.epoch_id.toString(),
+      prior_position: record.position,
+      lifecycle_nonce: randomU64(),
+    };
+    const prepared = JSON.parse(
+      core.zylith_wallet_prepare_private_liquidity_position_close(
+        JSON.stringify(lifecycleInput)
+      )
+    ) as PrivateLiquidityPositionLifecycleBuild;
+    return submitPreparedLiquidityPositionLifecycle({
+      batch,
+      submissionSafetyBufferMs,
+      prepared,
+      lifecycleInput,
+      stateWitnessKind: "close",
+      builder: core.zylith_wallet_build_private_liquidity_position_close,
+      pendingStatus: "pending_close",
+    });
+  }
+
+  async function resolveLiquidityPositionLifecycleBatch(
+    pairId: string,
+    candidateBatch?: BatchSummary
+  ) {
+    if (!coordinatorUrl || !proverUrl) {
+      throw new Error(
+        "Coordinator and private ingress URLs are required for liquidity position lifecycle operations"
+      );
+    }
+    const batchWindowMs =
+      (await fetchCoordinatorBatchWindowMs()) ??
+      coordinatorBatchWindowCache?.value ??
+      DEFAULT_LIQUIDITY_POSITION_BATCH_WINDOW_MS;
+    const batch =
+      candidateBatch ?? (await resolveSubmittablePairBatch(pairId, batchWindowMs));
+    if (!batch || batch.status !== "Open") {
+      throw new Error("Liquidity position auction window is no longer open");
+    }
+    if (batch.pair_id !== pairId) {
+      throw new Error(
+        "Liquidity position batch does not match the stored position pair"
+      );
+    }
+    const submissionSafetyBufferMs = batchSubmissionSafetyBufferMs(batchWindowMs);
+    if (
+      batch.close_time_unix_ms - Date.now() <=
+      submissionSafetyBufferMs
+    ) {
+      throw new Error(
+        "Liquidity position auction window is inside the submission safety buffer"
+      );
+    }
+    return { batch, batchWindowMs, submissionSafetyBufferMs };
+  }
+
+  async function submitPreparedLiquidityPositionLifecycle({
+    batch,
+    submissionSafetyBufferMs,
+    prepared,
+    lifecycleInput,
+    stateWitnessKind,
+    builder,
+    pendingStatus,
+  }: {
+    batch: BatchSummary;
+    submissionSafetyBufferMs: number;
+    prepared: PrivateLiquidityPositionLifecycleBuild;
+    lifecycleInput: Record<string, unknown>;
+    stateWitnessKind: "reconfigure" | "close";
+    builder: (inputJson: string) => string;
+    pendingStatus: LocalLiquidityPositionStatus;
+  }): Promise<PrivateLiquidityPositionLifecycleResult> {
+    const priorLiquidityPositionRoot = await fetchOnchainLiquidityPositionRoot();
+    const stateWitness =
+      await postJson<LiquidityPositionInsertionWitnessResponse>(
+        proverUrl,
+        "/api/private/liquidity-positions/state-update-witness",
+        {
+          kind: stateWitnessKind,
+          position_id: prepared.position_id,
+          prior_commitment: prepared.prior_position_commitment,
+          output_commitment: prepared.output_position_commitment,
+          prior_liquidity_position_root: priorLiquidityPositionRoot,
+          padding: randomPadding(2048),
+        }
+      );
+    const witnessedPriorRoot = normalizeFeltForComparison(
+      stateWitness.prior_liquidity_position_root
+    );
+    if (witnessedPriorRoot !== priorLiquidityPositionRoot) {
+      throw new Error(
+        "Liquidity position state witness was built against a stale root"
+      );
+    }
+    const built = JSON.parse(
+      builder(
+        JSON.stringify({
+          ...lifecycleInput,
+          prior_liquidity_position_root: priorLiquidityPositionRoot,
+          state_update: stateWitness.state_update,
+          padding: randomPadding(2048),
+        })
+      )
+    ) as PrivateLiquidityPositionLifecycleBuild;
+    const telemetryStart = performance.now();
+    const buildCompletedAt = telemetryStart;
+    let privateIngressStarted = false;
+    let coordinatorSubmissionStarted = false;
+    try {
+      const submissionDelayMs = privateSubmissionDelayMs(
+        batch.close_time_unix_ms,
+        submissionSafetyBufferMs
+      );
+      await delay(submissionDelayMs);
+      if (
+        batch.close_time_unix_ms - Date.now() <=
+        submissionSafetyBufferMs
+      ) {
+        throw new Error(
+          "Liquidity position auction window entered the submission safety buffer before private ingress submission"
+        );
+      }
+      const beforePrivateIngress = performance.now();
+      const ingressTelemetry: OrderIngressTelemetry = {
+        version: 1,
+        client_build_ms: elapsedMs(telemetryStart, buildCompletedAt),
+        private_submission_delay_ms: submissionDelayMs,
+        client_elapsed_before_private_ingress_ms: elapsedMs(
+          telemetryStart,
+          beforePrivateIngress
+        ),
+        batch_time_remaining_before_private_ingress_ms:
+          remainingBatchMs(batch.close_time_unix_ms),
+        submission_safety_buffer_ms: submissionSafetyBufferMs,
+      };
+      privateIngressStarted = true;
+      const ingress = await postJson<IngressResponse>(
+        proverUrl,
+        "/api/private/liquidity-positions/lifecycle",
+        attachOrderIngressTelemetry(built.ingress_request, ingressTelemetry)
+      );
+      const afterPrivateIngress = performance.now();
+      const coordinatorTelemetry: OrderIngressTelemetry = {
+        ...ingressTelemetry,
+        private_ingress_roundtrip_ms: elapsedMs(
+          beforePrivateIngress,
+          afterPrivateIngress
+        ),
+        client_elapsed_before_coordinator_ms: elapsedMs(
+          telemetryStart,
+          afterPrivateIngress
+        ),
+        batch_time_remaining_before_coordinator_ms:
+          remainingBatchMs(batch.close_time_unix_ms),
+      };
+      coordinatorSubmissionStarted = true;
+      const accepted = await postJson<LiquidityPositionLifecycleAccepted>(
+        coordinatorUrl,
+        "/api/liquidity-positions/lifecycle",
+        attachOrderIngressTelemetry(
+          ingress.coordinator_submission,
+          coordinatorTelemetry
+        )
+      );
+      updateLocalLiquidityPositionAfterLifecycle(
+        built,
+        pendingStatus,
+        accepted.lifecycle_id ?? built.lifecycle_id,
+        accepted.transition_commitment ?? built.transition_commitment,
+        accepted.batch_id ?? batch.batch_id,
+        batch.epoch_id
+      );
+      await saveLiquidityPositions();
+      scheduleRecoverySnapshot(true);
+      return liquidityPositionLifecycleResultFromBuild(
+        built,
+        batch,
+        accepted.lifecycle_id,
+        accepted.transition_commitment
+      );
+    } catch (error) {
+      if (
+        isAmbiguousPrivateLiquidityPositionSubmissionError(
+          error,
+          coordinatorSubmissionStarted
+            ? "coordinator_submission"
+            : privateIngressStarted
+              ? "private_ingress"
+              : "pre_ingress"
+        )
+      ) {
+        updateLocalLiquidityPositionAfterLifecycle(
+          built,
+          pendingStatus,
+          built.lifecycle_id,
+          built.transition_commitment,
+          batch.batch_id,
+          batch.epoch_id
+        );
+        await saveLiquidityPositions();
+        await pushRecoverySnapshot(true).catch(() => false);
+        return {
+          ...liquidityPositionLifecycleResultFromBuild(built, batch),
+          submission_ambiguous: true,
+        };
+      }
+      throw error;
+    }
+  }
+
+  function requireLocalLiquidityPosition(positionId: string) {
+    const normalized = normalizeFeltForComparison(positionId);
+    if (!normalized) throw new Error("Liquidity position id is invalid");
+    const record = liquidityPositions.find(
+      (position) => position.id === normalized
+    );
+    if (!record || record.status === "closed") {
+      throw new Error("Private liquidity position is not available locally");
+    }
+    if (record.status === "pending_close") {
+      throw new Error("Private liquidity position close is already pending");
+    }
+    return normalizeLocalLiquidityPositionRecord(record);
+  }
+
+  async function requireFreshLocalLiquidityPosition(positionId: string) {
+    const record = requireLocalLiquidityPosition(positionId);
+    if (!proverUrl) return record;
+    if (isPendingLiquidityPositionStatus(record.status)) return record;
+    return refreshLocalLiquidityPositionState(record);
+  }
+
+  async function refreshLocalLiquidityPositionState(
+    record: LocalLiquidityPositionRecord
+  ) {
+    const ownerAuthority =
+      typeof record.position.owner_authority === "string"
+        ? normalizeFeltForComparison(record.position.owner_authority)
+        : "";
+    if (!ownerAuthority) return record;
+    const priorLiquidityPositionRoot = await fetchOnchainLiquidityPositionRoot();
+    const response = await postJson<LiquidityPositionStateResponse>(
+      proverUrl,
+      "/api/private/liquidity-positions/state",
+      {
+        position_id: record.id,
+        owner_authority: ownerAuthority,
+        prior_liquidity_position_root: priorLiquidityPositionRoot,
+        padding: randomPadding(2048),
+      }
+    );
+    const witnessedPriorRoot = normalizeFeltForComparison(
+      response.prior_liquidity_position_root
+    );
+    if (witnessedPriorRoot !== priorLiquidityPositionRoot) {
+      throw new Error("Liquidity position state was built against a stale root");
+    }
+    const positionCommitment = normalizeCommitmentLike(
+      response.position_commitment
+    );
+    const position = normalizeProtocolPrivateLiquidityPosition(response.position);
+    const normalized = normalizeLocalLiquidityPositionRecord({
+      ...record,
+      id: protocolLiquidityPositionId(position),
+      position,
+      position_commitment: positionCommitment,
+      pair_id: protocolLiquidityPairId(position),
+      status: "active",
+      updated_at_unix_ms: Date.now(),
+    });
+    const index = liquidityPositions.findIndex(
+      (existing) => existing.id === normalized.id
+    );
+    if (index !== -1 && JSON.stringify(liquidityPositions[index]) !== JSON.stringify(normalized)) {
+      liquidityPositions[index] = normalized;
+      await saveLiquidityPositions();
+      scheduleRecoverySnapshot(false);
+    }
+    return normalized;
+  }
+
+  function applyLiquidityProviderAttributionArtifacts(
+    report: PrivateSettlementReport,
+    unlockedSeed: string
+  ) {
+    let changed = false;
+    for (const artifact of report.liquidity_provider_attribution_artifacts ?? []) {
+      let attribution: LiquidityAttributionPlaintext;
+      try {
+        attribution = normalizeLiquidityAttributionPlaintext(
+          JSON.parse(
+            core.zylith_wallet_decrypt_liquidity_attribution_artifact(
+              unlockedSeed,
+              JSON.stringify(artifact)
+            )
+          )
+        );
+      } catch {
+        continue;
+      }
+      if (attribution.batch_id !== report.batch_id) continue;
+      const priorCommitment = normalizeCommitmentLike(
+        attribution.attribution.funding_note_ref
+      );
+      const outputCommitment = normalizeCommitmentLike(
+        attribution.output_note_commitment
+      );
+      const transitionCommitment = normalizeFeltForComparison(
+        attribution.attribution.order_commitment
+      );
+      if (!priorCommitment || !outputCommitment || !transitionCommitment) {
+        continue;
+      }
+      for (let index = 0; index < liquidityPositions.length; index += 1) {
+        const position = liquidityPositions[index];
+        if (position.status === "closed" || position.pair_id !== attribution.pair_id) {
+          continue;
+        }
+        const knownCommitments = new Set(
+          [
+            normalizeFeltForComparison(position.position_commitment),
+            ...((position.fill_attributions ?? []).flatMap((entry) => [
+              normalizeCommitmentLike(entry.attribution.funding_note_ref),
+              normalizeCommitmentLike(entry.output_note_commitment),
+            ])),
+          ].filter((commitment): commitment is string => Boolean(commitment))
+        );
+        if (
+          !knownCommitments.has(priorCommitment) &&
+          !knownCommitments.has(outputCommitment)
+        ) {
+          continue;
+        }
+        const existing = position.fill_attributions ?? [];
+        if (
+          existing.some(
+            (entry) =>
+              entry.batch_id === attribution.batch_id &&
+              normalizeFeltForComparison(entry.attribution.order_commitment) ===
+                transitionCommitment
+          )
+        ) {
+          continue;
+        }
+        liquidityPositions[index] = normalizeLocalLiquidityPositionRecord({
+          ...position,
+          fill_attributions: [...existing, attribution].slice(-512),
+          updated_at_unix_ms: report.settled_at_unix_ms,
+        });
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  function applyLiquidityPositionLifecycleReports(
+    report: PrivateSettlementReport
+  ) {
+    let changed = false;
+    for (const lifecycle of report.liquidity_position_lifecycle_reports ?? []) {
+      const transitionCommitment = normalizeFeltForComparison(
+        lifecycle.transition_commitment
+      );
+      if (!transitionCommitment) continue;
+      const outputCommitment = normalizeCommitmentLike(
+        lifecycle.output_position_commitment
+      );
+      for (let index = 0; index < liquidityPositions.length; index += 1) {
+        const position = liquidityPositions[index];
+        if (!isPendingLiquidityPositionStatus(position.status)) continue;
+        if (
+          normalizeText(position.last_batch_id) !== report.batch_id ||
+          normalizeFeltForComparison(position.last_transition_commitment) !==
+            transitionCommitment
+        ) {
+          continue;
+        }
+        if (position.status === "pending_close") {
+          if (lifecycle.kind !== "Close" || outputCommitment) continue;
+          liquidityPositions[index] = {
+            ...position,
+            status: "closed",
+            updated_at_unix_ms: report.settled_at_unix_ms,
+          };
+          changed = true;
+          continue;
+        }
+        if (lifecycle.kind === "Close") continue;
+        if (
+          outputCommitment &&
+          outputCommitment !==
+            normalizeFeltForComparison(position.position_commitment)
+        ) {
+          continue;
+        }
+        liquidityPositions[index] = {
+          ...position,
+          status: "active",
+          updated_at_unix_ms: report.settled_at_unix_ms,
+        };
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  function storeLocalLiquidityPosition({
+    position,
+    positionCommitment,
+    status,
+    lifecycleId,
+    transitionCommitment,
+    batchId,
+    epochId,
+  }: {
+    position?: ProtocolPrivateLiquidityPosition;
+    positionCommitment: string;
+    status: LocalLiquidityPositionStatus;
+    lifecycleId: string;
+    transitionCommitment: string;
+    batchId?: string;
+    epochId?: number;
+  }) {
+    if (!position) {
+      throw new Error("Liquidity position build did not return a position");
+    }
+    const normalized = normalizeLocalLiquidityPositionRecord({
+      id: protocolLiquidityPositionId(position),
+      position,
+      position_commitment: positionCommitment,
+      pair_id: protocolLiquidityPairId(position),
+      status,
+      deployment_scope: deploymentScope,
+      last_lifecycle_id: lifecycleId,
+      last_transition_commitment: transitionCommitment,
+      last_batch_id: batchId,
+      last_epoch_id: epochId,
+      opened_at_unix_ms: Date.now(),
+      updated_at_unix_ms: Date.now(),
+    });
+    const index = liquidityPositions.findIndex(
+      (existing) => existing.id === normalized.id
+    );
+    if (index === -1) {
+      liquidityPositions.push(normalized);
+    } else {
+      liquidityPositions[index] = {
+        ...liquidityPositions[index],
+        ...normalized,
+        opened_at_unix_ms:
+          liquidityPositions[index].opened_at_unix_ms ??
+          normalized.opened_at_unix_ms,
+      };
+    }
+  }
+
+  function updateLocalLiquidityPositionAfterLifecycle(
+    built: PrivateLiquidityPositionLifecycleBuild,
+    status: LocalLiquidityPositionStatus,
+    lifecycleId: string,
+    transitionCommitment: string,
+    batchId?: string,
+    epochId?: number
+  ) {
+    const existing = requireLocalLiquidityPosition(built.position_id);
+    const nextPosition = built.output_position ?? existing.position;
+    const nextCommitment =
+      built.output_position_commitment ?? existing.position_commitment;
+    storeLocalLiquidityPosition({
+      position: nextPosition,
+      positionCommitment: nextCommitment,
+      status,
+      lifecycleId,
+      transitionCommitment,
+      batchId,
+      epochId,
+    });
+  }
+
+  function liquidityPositionLifecycleResultFromBuild(
+    built: PrivateLiquidityPositionLifecycleBuild,
+    batch: BatchSummary,
+    acceptedLifecycleId?: string,
+    acceptedTransitionCommitment?: string
+  ): PrivateLiquidityPositionLifecycleResult {
+    return {
+      lifecycle_id: acceptedLifecycleId ?? built.lifecycle_id,
+      position_id: built.position_id,
+      prior_position_commitment: built.prior_position_commitment,
+      output_position_commitment: built.output_position_commitment,
+      transition_commitment:
+        acceptedTransitionCommitment ?? built.transition_commitment,
+      output_notes: built.output_notes,
+      batch_id: batch.batch_id,
+      epoch_id: batch.epoch_id,
+    };
+  }
+
+  function liquidityPositionCurvePolicyForWasm(
+    policy: PrivateLiquidityPositionOpenRequest["curvePolicy"]
+  ) {
+    return {
+      kind: policy.kind,
+      band_count: policy.bandCount.toString(),
+      spread_bps: policy.spreadBps.toString(),
+      target_base_ratio_bps: policy.targetBaseRatioBps.toString(),
+      inventory_skew_bps: policy.inventorySkewBps.toString(),
+      max_price_deviation_bps: policy.maxPriceDeviationBps.toString(),
+    };
+  }
+
+  function liquidityPositionRotationPolicyForWasm(
+    policy: PrivateLiquidityPositionOpenRequest["rotationPolicy"]
+  ) {
+    return {
+      max_price_rotation_bps: policy.maxPriceRotationBps.toString(),
+      max_depth_rotation_bps: policy.maxDepthRotationBps.toString(),
+      skip_epoch_bps: policy.skipEpochBps.toString(),
+    };
+  }
+
+  function liquidityPositionOracleGuardForWasm(
+    guard: PrivateLiquidityPositionOpenRequest["oracleGuard"] | undefined
+  ) {
+    return guard
+      ? {
+          oracle_id: guard.oracleId,
+          max_staleness_ms: guard.maxStalenessMs.toString(),
+          max_divergence_bps: guard.maxDivergenceBps.toString(),
+        }
+      : undefined;
+  }
 
   return {
     hasVault,
+    vaultAuthMode,
     isReady: () => Boolean(seedHex && publicConfig),
-    createWallet,
-    replaceWithNewWallet,
-    importRecoverySeed,
-    replaceRecoverySeed,
-    unlockWithPassphrase,
-    requestSessionUnlock,
-    exportRecoverySeed,
+    createWalletWithWalletSignature,
+    unlockWithWalletSignature,
     syncRecoveryArtifacts,
     getPublicConfig: () => publicConfig,
     lock,
@@ -4658,8 +6008,8 @@ export function createZylithWalletRuntime(
     getPendingDeposits,
     getWithdrawableNotes,
     getPrivateStrategies,
-    hostedWithdrawalAvailable,
-    hostedNoteConsolidationAvailable,
+    strk20WithdrawalAvailable,
+    noteConsolidationAvailable,
     loadLocalOrders,
     saveLocalOrders,
     previewFundingNotes,
@@ -4670,7 +6020,6 @@ export function createZylithWalletRuntime(
     pruneUnsettledSettlementOutputs,
     syncSettlementOutputs,
     syncPrivateSettlementReports,
-    releaseUnreferencedNoteLocks,
     submitDepositViaWallet,
     submitPrivateOrder,
     cancelPrivateOrder,
@@ -4684,6 +6033,13 @@ export function createZylithWalletRuntime(
     recordOfflineRenewalRelayResults,
     settlePrivateOrderLock,
     createOfflineRenewalPackage,
+    openPrivateLiquidityPosition,
+    reconfigurePrivateLiquidityPosition,
+    closePrivateLiquidityPosition,
+    getPrivateLiquidityPositions,
+    authorizePrivateLiquidityPositionOpen,
+    authorizePrivateLiquidityPositionReconfigure,
+    authorizePrivateLiquidityPositionClose,
     getOfflineRenewalPackages: () =>
       strategies
         .filter((strategy) => strategy.status === "delegated")
@@ -4691,30 +6047,46 @@ export function createZylithWalletRuntime(
         .filter((offlinePackage): offlinePackage is OfflineRenewalPackage =>
           Boolean(offlinePackage)
         ),
-    submitHostedWithdrawal,
-    submitWithdrawalViaPaymaster,
+    submitStrk20Withdrawal,
   };
 
   async function fetchIngressRegistry() {
-    const registry = await fetchJson<unknown>(
-      proverUrl,
-      "/api/public/auction-keys"
-    );
-    if (!registry)
+    if (ingressRegistryCache) return ingressRegistryCache;
+    let registry: unknown | null = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      registry = await fetchJson<unknown>(
+        proverUrl,
+        "/api/public/auction-keys",
+        {},
+        { timeoutMs: 20_000 }
+      );
+      if (registry) break;
+      await delay(250 * (attempt + 1));
+    }
+    if (!registry) {
       throw new Error("Private ingress key registry is unavailable");
+    }
     const expectedFingerprint = await ingressRegistryFingerprintPin();
     if (!expectedFingerprint && !import.meta.env.DEV) {
       throw new Error("Private ingress key registry pin is not configured");
     }
     if (expectedFingerprint) {
-      const fingerprint = await fetchJson<{ fingerprint?: string }>(
-        proverUrl,
-        "/api/public/auction-keys/fingerprint"
-      );
+      let fingerprint: { fingerprint?: string } | null = null;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        fingerprint = await fetchJson<{ fingerprint?: string }>(
+          proverUrl,
+          "/api/public/auction-keys/fingerprint",
+          {},
+          { timeoutMs: 20_000 }
+        );
+        if (fingerprint) break;
+        await delay(250 * (attempt + 1));
+      }
       if (fingerprint?.fingerprint !== expectedFingerprint) {
         throw new Error("Private ingress key registry pin mismatch");
       }
     }
+    ingressRegistryCache = registry;
     return registry;
   }
 
@@ -4851,7 +6223,7 @@ export function createZylithWalletRuntime(
     if (nextNotes.length === notes.length) return false;
     notes = nextNotes;
     await saveNotes();
-    await pushRecoverySnapshot(true);
+    await pushRecoverySnapshot(true).catch(() => false);
     return true;
   }
 
@@ -4860,20 +6232,33 @@ export function createZylithWalletRuntime(
     if (latestEpochCache && latestEpochCache.expiresAt > now) {
       return latestEpochCache.value;
     }
-    const listedBatches = await fetchJson<BatchSummary[]>(
+    const listedBatches = await fetchJson<unknown>(
       coordinatorUrl,
       "/api/batches"
     ).catch(() => null);
     if (Array.isArray(listedBatches) && listedBatches.length > 0) {
       const epochs = listedBatches
-        .map((batch) => batch?.epoch_id)
+        .map((batch) => {
+          try {
+            return assertBatchSummary(batch, "Coordinator batch").epoch_id;
+          } catch {
+            return null;
+          }
+        })
         .filter((epoch): epoch is number => typeof epoch === "number");
       const value = epochs.length > 0 ? Math.max(...epochs) : null;
       latestEpochCache = { value, expiresAt: now + LATEST_EPOCH_CACHE_TTL_MS };
       return value;
     }
     const pairIds = await enabledPairIds();
-    const batches = await Promise.all(pairIds.map(fetchCurrentPairBatch));
+    const batches = (
+      await Promise.allSettled(pairIds.map(fetchSubmittablePairBatch))
+    )
+      .filter(
+        (entry): entry is PromiseFulfilledResult<BatchSummary> =>
+          entry.status === "fulfilled"
+      )
+      .map((entry) => entry.value);
     const epochs = batches
       .map((batch) => batch?.epoch_id)
       .filter((epoch): epoch is number => typeof epoch === "number");
@@ -4882,35 +6267,150 @@ export function createZylithWalletRuntime(
     return value;
   }
 
-  async function fetchCurrentPairBatch(pair: string) {
-    const [base, quote] = pair.split("/");
-    return fetchJson<BatchSummary>(
+  async function withCoordinatorBatchWindow(
+    draft: PrivateOrderDraft
+  ): Promise<PrivateOrderDraft> {
+    const parsed = Number(draft.batchWindowMs);
+    if (Number.isFinite(parsed) && parsed > 0) return draft;
+    const batchWindowMs = await fetchCoordinatorBatchWindowMs();
+    return batchWindowMs ? { ...draft, batchWindowMs } : draft;
+  }
+
+  async function fetchCoordinatorBatchWindowMs() {
+    const now = Date.now();
+    if (
+      coordinatorBatchWindowCache &&
+      coordinatorBatchWindowCache.expiresAt > now
+    ) {
+      return coordinatorBatchWindowCache.value;
+    }
+    const status = await fetchJson<{ batch_window_ms?: number }>(
       coordinatorUrl,
-      `/api/pairs/${base}/${quote}/batches/current`
+      "/health"
+    ).catch(() => null);
+    const parsed = Number(status?.batch_window_ms);
+    const value = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    coordinatorBatchWindowCache = {
+      value,
+      expiresAt: now + LATEST_EPOCH_CACHE_TTL_MS,
+    };
+    return value;
+  }
+
+  async function fetchSubmittablePairBatch(pair: string) {
+    const [base, quote] = pair.split("/");
+    const path = `/api/pairs/${encodeURIComponent(base)}/${encodeURIComponent(
+      quote
+    )}/batches/submittable`;
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        `${coordinatorUrl.replace(/\/+$/, "")}${path}`,
+        { headers: { accept: "application/json" } },
+        REQUIRED_COORDINATOR_FETCH_TIMEOUT_MS
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      if (
+        /runtime request timed out|signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted|failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
+          message
+        )
+      ) {
+        throw new Error("Network request failed. Check your connection and retry.");
+      }
+      throw error;
+    }
+    if (!response.ok) {
+      throw new RuntimeHttpStatusError(path, response.status, "");
+    }
+    const batch = await response.json();
+    return assertBatchSummary(batch, "Coordinator submittable batch");
+  }
+
+  async function fetchBatchById(batchId: string) {
+    const path = `/api/batches/${encodeURIComponent(batchId)}`;
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        `${coordinatorUrl.replace(/\/+$/, "")}${path}`,
+        { headers: { accept: "application/json" } },
+        REQUIRED_COORDINATOR_FETCH_TIMEOUT_MS
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : typeof error === "string" ? error : "";
+      if (
+        /runtime request timed out|signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted|failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
+          message
+        )
+      ) {
+        throw new Error("Network request failed. Check your connection and retry.");
+      }
+      throw error;
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new RuntimeHttpStatusError(path, response.status, "");
+    }
+    return assertBatchSummary(
+      await response.json(),
+      "Coordinator explicit batch"
     );
+  }
+
+  async function resolveExplicitPairBatch(draft: PrivateOrderDraft) {
+    const batchId = draft.batchId?.trim();
+    if (!batchId) throw new Error("Explicit auction batch ID is required");
+    const submissionSafetyBufferMs = batchSubmissionSafetyBufferMs(
+      draft.batchWindowMs
+    );
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      const batch = await fetchBatchById(batchId).catch((error) => {
+        lastError = error;
+        return null;
+      });
+      if (!batch) {
+        await delay(1_000);
+        continue;
+      }
+      if (batch.pair_id !== draft.pair) {
+        throw new Error("Explicit auction batch does not match the order pair");
+      }
+      if (batch.status !== "Open") {
+        throw new Error("Explicit auction batch is no longer open");
+      }
+      if (
+        batch.close_time_unix_ms - Date.now() <=
+        submissionSafetyBufferMs
+      ) {
+        throw new Error("Explicit auction batch is inside the submission safety buffer");
+      }
+      return batch;
+    }
+    if (lastError instanceof Error) throw lastError;
+    throw new Error("Explicit auction batch is not available for submission");
   }
 
   async function resolveSubmittablePairBatch(
     pair: string,
     batchWindowMs?: number
   ) {
-    const startedAt = Date.now();
-    const maxWaitMs =
-      Math.max(batchSubmissionSafetyBufferMs(batchWindowMs), 5_000) + 2_000;
-    let batch = await fetchCurrentPairBatch(pair);
-    while (Date.now() - startedAt <= maxWaitMs) {
+    let lastBatch: BatchSummary | null = null;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const batch = await fetchSubmittablePairBatch(pair).catch((error) => {
+        lastError = error;
+        return null;
+      });
+      if (batch) lastBatch = batch;
       if (isSubmittableBatch(batch, batchWindowMs)) return batch;
-      const waitMs =
-        batch?.status === "Open"
-          ? Math.max(
-              250,
-              Math.min(batch.close_time_unix_ms - Date.now() + 350, 1_000)
-            )
-          : 750;
-      await delay(waitMs);
-      batch = await fetchCurrentPairBatch(pair);
+      await delay(250 * (attempt + 1));
     }
-    return batch;
+    if (lastBatch) return null;
+    if (lastError instanceof Error) throw lastError;
+    return null;
   }
 
   function isSubmittableBatch(
@@ -4959,14 +6459,8 @@ export function createZylithWalletRuntime(
     batchIdText: string
   ): Promise<string | null> {
     const deployment = await loadDeploymentConfig();
-    const rpcUrl =
-      deployment.rpc_url ||
-      deployment.proof?.native_prover_rpc_url ||
-      deployment.proof_config?.native_prover_rpc_url ||
-      ZAN_STARKNET_SEPOLIA_RPC_URL;
-    const verifier = normalizeText(
-      deployment.contracts?.auction_verifier || configuredAuctionVerifierAddress
-    );
+    const rpcUrl = normalizeUrl(deployment.rpc_url);
+    const verifier = normalizeText(deployment.contracts?.auction_verifier);
     const batchId = await encodeStarknetFelt(
       batchIdText.startsWith("consolidation-")
         ? "note-consolidation-id"
@@ -4990,48 +6484,29 @@ export function createZylithWalletRuntime(
     return normalizeFeltForComparison(response.result?.[0]) || null;
   }
 
-  async function fetchMakerAttributionForScannedNotes(
-    unlockedSeed: string,
-    batchId: string,
-    scannedNotes: Array<{
-      note_commitment: string;
-      note: LocalNoteRecord["note"];
-    }>
-  ) {
-    const attributionByOutput = new Map<string, MakerBandAttribution>();
-    if (!indexerUrl || !scannedNotes.length) return attributionByOutput;
-    if (!publicMakerAttributionLookupEnabled) return attributionByOutput;
-    const makerPublicKeys = [
-      ...new Set(scannedNotes.map((note) => note.note.owner_public_key)),
-    ];
-    for (const makerPublicKey of makerPublicKeys) {
-      const list = await fetchJson<MakerAttributionArtifactList>(
-        indexerUrl,
-        `/api/attribution/${encodeURIComponent(batchId)}/${encodeURIComponent(
-          makerPublicKey
-        )}`
-      ).catch(() => null);
-      if (!list?.artifacts?.length) continue;
-      for (const artifact of list.artifacts) {
-        try {
-          const decrypted = JSON.parse(
-            core.zylith_wallet_decrypt_maker_attribution_artifact(
-              unlockedSeed,
-              JSON.stringify(artifact)
-            )
-          ) as MakerAttributionPlaintext;
-          if (decrypted?.output_note_commitment && decrypted?.attribution) {
-            attributionByOutput.set(
-              decrypted.output_note_commitment,
-              decrypted.attribution
-            );
-          }
-        } catch {
-          // Attribution artifacts are analytics-only. Ignore non-matching or malformed artifacts.
-        }
-      }
+  async function fetchOnchainLiquidityPositionRoot(): Promise<string> {
+    const deployment = await loadDeploymentConfig();
+    const rpcUrl = normalizeUrl(deployment.rpc_url);
+    const verifier = normalizeText(deployment.contracts?.auction_verifier);
+    if (!rpcUrl || !verifier) {
+      throw new Error(
+        "Deployment manifest is missing the RPC URL or auction verifier"
+      );
     }
-    return attributionByOutput;
+    const response = await starknetRpc<{ result?: string[]; error?: unknown }>(
+      rpcUrl,
+      "starknet_call",
+      {
+        request: {
+          contract_address: verifier,
+          entry_point_selector:
+            starknetHash.getSelectorFromName("current_liquidity_position_root"),
+          calldata: [],
+        },
+        block_id: "pre_confirmed",
+      }
+    );
+    return normalizeFeltForComparison(response.result?.[0]) || "0x0";
   }
 
   async function pullRecoverySnapshots() {
@@ -5077,6 +6552,12 @@ export function createZylithWalletRuntime(
         changed = mergeRecoveredStrategy(remoteStrategy) || changed;
       }
     }
+    if (Array.isArray(payload.liquidity_positions)) {
+      for (const remotePosition of payload.liquidity_positions) {
+        changed = mergeRecoveredLiquidityPosition(remotePosition) || changed;
+      }
+      if (changed) await saveLiquidityPositions();
+    }
     if (Array.isArray(payload.orders)) {
       const localOrders = await loadLocalOrders();
       const byCommitment = new Map(
@@ -5116,6 +6597,7 @@ export function createZylithWalletRuntime(
       version: 1,
       notes,
       strategies: recoverySnapshotStrategies(),
+      liquidity_positions: recoverySnapshotLiquidityPositions(),
       orders: await loadLocalOrders(),
       created_at_unix_ms: now,
     };
@@ -5147,8 +6629,6 @@ export function createZylithWalletRuntime(
         ...strategy,
         offline_package: {
           ...strategy.offline_package,
-          // Managed slots are already handed to Zylith Relay. Keep recovery
-          // artifacts bounded while preserving self-relay package payloads.
           slots: strategy.offline_package.slots.map((slot) => ({
             ...slot,
             ingress_request: undefined,
@@ -5156,6 +6636,15 @@ export function createZylithWalletRuntime(
         },
       };
     });
+  }
+
+  function recoverySnapshotLiquidityPositions(): LocalLiquidityPositionRecord[] {
+    return liquidityPositions.map((position) =>
+      normalizeLocalLiquidityPositionRecord({
+        ...position,
+        deployment_scope: deploymentScope,
+      })
+    );
   }
 
   function scheduleRecoverySnapshot(force: boolean) {
@@ -5241,31 +6730,55 @@ export function createZylithWalletRuntime(
     return false;
   }
 
+  function mergeRecoveredLiquidityPosition(remotePosition: unknown) {
+    const position = normalizeLocalLiquidityPositionRecord(remotePosition);
+    if (!position.id || position.deployment_scope !== deploymentScope)
+      return false;
+    const index = liquidityPositions.findIndex(
+      (existing) => existing.id === position.id
+    );
+    if (index === -1) {
+      liquidityPositions.push(position);
+      return true;
+    }
+    const local = liquidityPositions[index];
+    if ((position.updated_at_unix_ms ?? 0) > (local.updated_at_unix_ms ?? 0)) {
+      liquidityPositions[index] = position;
+      return true;
+    }
+    return false;
+  }
+
   async function loadDeploymentConfig() {
+    if (deploymentConfigCache) return deploymentConfigCache;
     try {
-      const response = await fetch("/deployment.json", {
-        headers: { accept: "application/json" },
-      });
-      if (!response.ok) return deploymentConfigCache ?? {};
-      const deployment = (await response.json()) as DeploymentConfig;
+      const deployment = await requestDeploymentConfig();
       deploymentConfigCache = deployment;
       return deployment;
-    } catch {
-      return deploymentConfigCache ?? {};
+    } catch (error) {
+      if (deploymentConfigCache) return deploymentConfigCache;
+      throw error instanceof Error
+        ? error
+        : new Error("Deployment manifest is unavailable");
     }
   }
 
   async function resolveDeploymentScope() {
     const deployment = await loadDeploymentConfig();
-    const chainId = configuredChainId || deployment.chain_id || "unknown-chain";
-    const verifier =
-      deployment.contracts?.auction_verifier ||
-      configuredAuctionVerifierAddress ||
-      "unknown-verifier";
+    const chainId = requiredString(deployment.chain_id, "chain_id");
+    const verifier = requiredNonZeroFelt(
+      deployment.contracts?.auction_verifier,
+      "auction_verifier_address"
+    );
     const fundingRail = selectedDepositFundingRail(deployment);
-    const privacyBridge = fundingRail.bridgeAdapter || "unknown-privacy-bridge";
-    const shieldedAssetAdapter =
-      fundingRail.shieldedAssetAdapter || "unknown-shielded-adapter";
+    const privacyBridge = requiredNonZeroFelt(
+      fundingRail.bridgeAdapter,
+      "privacy_deposit_bridge_address"
+    );
+    const shieldedAssetAdapter = requiredNonZeroFelt(
+      fundingRail.shieldedAssetAdapter,
+      "shielded_asset_adapter_address"
+    );
     return `${chainId}:${verifier}:${privacyBridge}:${shieldedAssetAdapter}`;
   }
 
@@ -5304,7 +6817,60 @@ export function createZylithWalletRuntime(
       });
     const selected = smallestSufficientNoteSet(candidates, required);
     if (selected.length === 0) {
-      throw new Error(`No unlocked ${asset} note can fund this order`);
+      throw new Error(`No available ${asset} balance can fund this order`);
+    }
+    return selected;
+  }
+
+  function selectLiquidityPositionFundingNotes(
+    request: PrivateLiquidityPositionOpenRequest
+  ) {
+    const requiredByAsset = new Map<string, bigint>();
+    addLiquidityPositionFundingRequirement(
+      requiredByAsset,
+      request.baseAssetId,
+      parseNonNegativeRawAmount(request.baseReserveAtomic, "base reserve")
+    );
+    addLiquidityPositionFundingRequirement(
+      requiredByAsset,
+      request.quoteAssetId,
+      parseNonNegativeRawAmount(request.quoteReserveAtomic, "quote reserve")
+    );
+    const selected: LocalNoteRecord[] = [];
+    const reserved = new Set<string>();
+    for (const [asset, required] of requiredByAsset) {
+      if (required <= 0n) continue;
+      const candidates = notes
+        .filter(
+          (record) =>
+            !record.spent &&
+            !record.locked_by_order &&
+            isSpendableLocalNote(record) &&
+            !reserved.has(record.note_commitment) &&
+            record.note.asset_id === asset
+        )
+        .sort((left, right) => {
+          const leftAmount = BigInt(left.note.amount);
+          const rightAmount = BigInt(right.note.amount);
+          if (leftAmount < rightAmount) return -1;
+          if (leftAmount > rightAmount) return 1;
+          return left.note_commitment.localeCompare(right.note_commitment);
+        });
+      const assetSelection = smallestSufficientNoteSet(candidates, required);
+      if (assetSelection.length === 0) {
+        throw new Error(
+          `No available ${asset} balance can fund this liquidity position`
+        );
+      }
+      for (const record of assetSelection) {
+        selected.push(record);
+        reserved.add(record.note_commitment);
+      }
+    }
+    if (selected.length === 0) {
+      throw new Error(
+        "Liquidity position requires a positive base or quote reserve"
+      );
     }
     return selected;
   }
@@ -5322,7 +6888,7 @@ export function createZylithWalletRuntime(
       throw new Error(
         noteCommitment
           ? "Selected note is not withdrawable"
-          : "No unlocked note is available to withdraw"
+          : "No available note can be withdrawn"
       );
     }
     return note;
@@ -5342,7 +6908,6 @@ export function createZylithWalletRuntime(
         JSON.stringify({
           seed_hex: unlockedSeed,
           registry,
-          funding_note: fundingNotes[0].note,
           funding_notes: fundingNotes.map((record) => record.note),
           order,
           padding: randomPadding(2048),
@@ -5362,45 +6927,20 @@ export function createZylithWalletRuntime(
     fundingNote: LocalNoteRecord,
     parent?: { material: StrategyParentMaterial; childIndex: number }
   ) {
-    const makerCurvePoints = normalizeMakerCurvePoints(draft);
-    if (
-      draft.mode === "Maker Curve" &&
-      makerCurvePoints.length < MIN_MAKER_CURVE_POINTS
-    ) {
+    if (draft.mode === "Liquidity Position" || draft.mode === "Resting") {
       throw new Error(
-        `Maker curve orders require at least ${MIN_MAKER_CURVE_POINTS} points`
+        "Private liquidity must be opened through the private liquidity position lifecycle"
       );
     }
-    const amount =
-      draft.mode === "Maker Curve" && makerCurvePoints.length > 0
-        ? makerCurvePoints.reduce(
-            (total, point) => total + point.base_amount,
-            0n
-          )
-        : parseRawAmount(draft.amount, "amount");
-    const limitPrice =
-      draft.mode === "Maker Curve" && makerCurvePoints.length > 0
-        ? makerCurveEnvelopePrice(draft.side, makerCurvePoints)
-        : parseRawAmount(draft.limitPrice, "limit price");
+    const amount = parseRawAmount(draft.amount, "amount");
+    const limitPrice = parseRawAmount(draft.limitPrice, "limit price");
     const minFill = normalizeOrderMinFill(draft, amount);
-    const orderType =
-      draft.mode === "Maker Curve" ? "MakerCurve" : "LimitBatch";
-    const makerCurve =
-      draft.mode === "Maker Curve"
-        ? {
-            points: makerCurvePoints.map((point) => ({
-              price: point.price.toString(),
-              base_amount: point.base_amount.toString(),
-            })),
-          }
-        : undefined;
     return {
       pair_id: draft.pair,
       batch_id: batch.batch_id,
       side: draft.side,
-      order_type: orderType,
+      order_type: "LimitBatch",
       relay_mode: draft.relayMode ?? "SelfRelay",
-      maker_curve: makerCurve,
       limit_price: limitPrice.toString(),
       amount: amount.toString(),
       min_fill: minFill.toString(),
@@ -5451,7 +6991,8 @@ export function transactionCalldataContainsDepositActivation(
   const depositRoot = normalizeOptionalFelt(activation.depositRoot);
   const encryptedActivation = normalizeOptionalFelt(activation.activation);
   return Boolean(
-    (!bridgeAddress || calldataSet.has(bridgeAddress)) &&
+    bridgeAddress &&
+      calldataSet.has(bridgeAddress) &&
       fundingCommitment &&
       depositRoot &&
       encryptedActivation &&
@@ -5467,22 +7008,12 @@ function fundingAssetForDraft(draft: PrivateOrderDraft) {
 }
 
 function fundingRequirement(draft: PrivateOrderDraft) {
-  const priceBaseScale = draftPriceBaseScale(draft);
-  const makerCurvePoints = normalizeMakerCurvePoints(draft);
-  if (draft.mode === "Maker Curve" && makerCurvePoints.length > 0) {
-    if (draft.side === "Sell") {
-      return makerCurvePoints.reduce(
-        (total, point) => total + point.base_amount,
-        0n
-      );
-    }
-    return makerCurvePoints.reduce(
-      (total, point) =>
-        total +
-        quoteAmountForBase(point.base_amount, point.price, priceBaseScale),
-      0n
+  if (draft.mode === "Liquidity Position" || draft.mode === "Resting") {
+    throw new Error(
+      "Private liquidity must be opened through the private liquidity position lifecycle"
     );
   }
+  const priceBaseScale = draftPriceBaseScale(draft);
   const amount = parseRawAmount(draft.amount, "amount");
   if (draft.side === "Sell") return amount;
   return quoteAmountForBase(
@@ -5634,171 +7165,13 @@ function pairPriceBaseScale(pair: string) {
   return 10n ** BigInt(assetDecimals(base));
 }
 
-function assetDecimals(asset: string) {
-  if (asset === "USDC" || asset === "USDT") return 6;
-  if (asset === "strkBTC" || asset === "WBTC") return 8;
-  return 18;
-}
-
 function normalizeJitterBps(value: number | undefined) {
   if (!Number.isFinite(value ?? NaN)) return 1_500;
   return Math.max(0, Math.min(5_000, Math.round(value ?? 0)));
 }
 
-export type NormalizedMakerCurvePoint = { price: bigint; base_amount: bigint };
-
-function normalizeMakerCurvePoints(draft: PrivateOrderDraft) {
-  return (draft.makerCurvePoints ?? [])
-    .filter((point) => point.price.trim() && point.baseAmount.trim())
-    .map((point) => ({
-      price: parseRawAmount(point.price, "maker curve price"),
-      base_amount: parseRawAmount(point.baseAmount, "maker curve base amount"),
-    }))
-    .sort((left, right) =>
-      left.price < right.price ? -1 : left.price > right.price ? 1 : 0
-    );
-}
-
-function materializeMakerCurveDraft(
-  draft: PrivateOrderDraft
-): PrivateOrderDraft {
-  if (draft.mode !== "Maker Curve") return draft;
-  const points = normalizeMakerCurvePoints(draft);
-  if (points.length < MIN_MAKER_CURVE_POINTS) {
-    throw new Error(
-      `Maker curve orders require at least ${MIN_MAKER_CURVE_POINTS} points`
-    );
-  }
-  const rotated = rotateMakerCurvePoints(points, makerCurveRotationBps(draft));
-  const amount = makerCurveTotalBaseAmount(rotated);
-  const minFill = normalizeOrderMinFill(draft, amount);
-  return {
-    ...draft,
-    amount: amount.toString(),
-    limitPrice: makerCurveEnvelopePrice(draft.side, rotated).toString(),
-    minFill: minFill.toString(),
-    makerCurvePoints: rotated.map((point) => ({
-      price: point.price.toString(),
-      baseAmount: point.base_amount.toString(),
-    })),
-  };
-}
-
-function makerCurveFundingSelectionDraft(
-  draft: PrivateOrderDraft
-): PrivateOrderDraft {
-  if (draft.mode !== "Maker Curve") return draft;
-  const points = normalizeMakerCurvePoints(draft);
-  if (points.length === 0) return draft;
-  const reservePoints = makerCurveFundingReservePoints(
-    points,
-    draft.side,
-    makerCurveRotationBps(draft)
-  );
-  const amount = makerCurveTotalBaseAmount(reservePoints);
-  const minFill = normalizeOrderMinFill(draft, amount);
-  return {
-    ...draft,
-    amount: amount.toString(),
-    limitPrice: makerCurveEnvelopePrice(draft.side, reservePoints).toString(),
-    minFill: minFill.toString(),
-    makerCurvePoints: reservePoints.map((point) => ({
-      price: point.price.toString(),
-      baseAmount: point.base_amount.toString(),
-    })),
-  };
-}
-
-export function rotateMakerCurvePoints(
-  points: NormalizedMakerCurvePoint[],
-  maxAbsoluteBps: number
-): NormalizedMakerCurvePoint[] {
-  if (maxAbsoluteBps <= 0) return enforceStrictMakerCurvePrices(points);
-  const priceFactor = BigInt(randomBasisPointsJitter(maxAbsoluteBps));
-  return enforceStrictMakerCurvePrices(
-    points.map((point) => ({
-      price: applyBasisPointFactor(point.price, priceFactor),
-      base_amount: point.base_amount,
-    }))
-  );
-}
-
-export function makerCurveFundingReservePoints(
-  points: NormalizedMakerCurvePoint[],
-  side: Side,
-  maxAbsoluteBps: number
-): NormalizedMakerCurvePoint[] {
-  if (side !== "Buy" || maxAbsoluteBps <= 0)
-    return enforceStrictMakerCurvePrices(points);
-  const maxPriceFactor = 10_000n + BigInt(maxAbsoluteBps);
-  return enforceStrictMakerCurvePrices(
-    points.map((point) => ({
-      price: applyBasisPointFactor(point.price, maxPriceFactor),
-      base_amount: point.base_amount,
-    }))
-  );
-}
-
-function enforceStrictMakerCurvePrices(points: NormalizedMakerCurvePoint[]) {
-  const sorted = points
-    .map((point) => ({
-      price: point.price <= 0n ? 1n : point.price,
-      base_amount: point.base_amount <= 0n ? 1n : point.base_amount,
-    }))
-    .sort((left, right) =>
-      left.price < right.price ? -1 : left.price > right.price ? 1 : 0
-    );
-  for (let index = 1; index < sorted.length; index += 1) {
-    if (sorted[index].price <= sorted[index - 1].price) {
-      sorted[index] = { ...sorted[index], price: sorted[index - 1].price + 1n };
-    }
-  }
-  return sorted;
-}
-
-function applyBasisPointFactor(value: bigint, factorBps: bigint) {
-  const adjusted = (value * factorBps) / 10_000n;
-  return adjusted <= 0n ? 1n : adjusted;
-}
-
-function makerCurveTotalBaseAmount(points: NormalizedMakerCurvePoint[]) {
-  return points.reduce((total, point) => total + point.base_amount, 0n);
-}
-
-function serializeMakerCurvePoints(points: NormalizedMakerCurvePoint[]) {
-  return points.map((point) => ({
-    price: point.price.toString(),
-    base_amount: point.base_amount.toString(),
-  }));
-}
-
-function strategyMakerCurveDraftPoints(strategy: PrivateStrategyRecord) {
-  return (strategy.maker_curve_points ?? []).map((point) => ({
-    price: point.price,
-    baseAmount: point.base_amount,
-  }));
-}
-
 function strategyFundingLockRef(strategy: PrivateStrategyRecord) {
   return normalizeFeltForComparison(strategy.parent.parent_order_commitment);
-}
-
-function makerCurveRotationBps(draft: PrivateOrderDraft) {
-  return boundedInteger(
-    draft.makerCurveRotationBps,
-    DEFAULT_MAKER_CURVE_ROTATION_BPS,
-    0,
-    1_000
-  );
-}
-
-function makerCurveEnvelopePrice(
-  side: Side,
-  points: NormalizedMakerCurvePoint[]
-) {
-  const envelope = side === "Buy" ? points[points.length - 1] : points[0];
-  if (!envelope) throw new Error("Maker curve must contain at least one point");
-  return envelope.price;
 }
 
 function syntheticBatchForEpoch(pair: string, epoch: number): BatchSummary {
@@ -5819,19 +7192,6 @@ function batchIdForPairEpoch(pair: string, epoch: number) {
 function strategyChildAmount(strategy: PrivateStrategyRecord) {
   const remaining = BigInt(strategy.remaining_amount);
   if (remaining <= 0n) return 0n;
-  if (strategy.mode === "Resting") {
-    const points = strategyMakerCurveDraftPoints(strategy);
-    const total = makerCurveTotalBaseAmount(
-      points.map((point) => ({
-        price: parseRawAmount(point.price, "maker curve price"),
-        base_amount: parseRawAmount(
-          point.baseAmount,
-          "maker curve base amount"
-        ),
-      }))
-    );
-    return total > 0n ? total : BigInt(strategy.child_amount);
-  }
   const remainingSlots = Math.max(
     1,
     strategy.max_children - strategy.next_child_index + 1
@@ -5859,7 +7219,6 @@ function strategyChildAmount(strategy: PrivateStrategyRecord) {
 }
 
 function defaultStrategyChildren(mode: OrderMode) {
-  if (mode === "Resting") return 24;
   if (mode === "Repeat") return 8;
   return 6;
 }
@@ -5890,11 +7249,53 @@ function parseRawAmount(value: string, label: string) {
   return parsed;
 }
 
+function parseNonNegativeRawAmount(value: string, label: string) {
+  const trimmed = value.trim();
+  const field = label ? label[0].toUpperCase() + label.slice(1) : "Value";
+  if (!/^[0-9]+$/.test(trimmed)) {
+    throw new Error(`${field} must be a raw integer amount`);
+  }
+  return BigInt(trimmed);
+}
+
 function parseOptionalRawAmount(value: string | undefined, label: string) {
   if (value === undefined) return null;
   const trimmed = value.trim();
   if (trimmed === "" || /^0+$/.test(trimmed)) return null;
   return parseRawAmount(value, label);
+}
+
+function addLiquidityPositionFundingRequirement(
+  requiredByAsset: Map<string, bigint>,
+  asset: string,
+  amount: bigint
+) {
+  if (amount <= 0n) return;
+  const current = requiredByAsset.get(asset) ?? 0n;
+  requiredByAsset.set(asset, current + amount);
+}
+
+function liquidityPositionDurationBatches(
+  request: PrivateLiquidityPositionOpenRequest,
+  batchWindowMs: number
+) {
+  const durationHours = Number(request.durationHours);
+  if (!Number.isFinite(durationHours) || durationHours <= 0) {
+    throw new Error("Liquidity position duration must be positive");
+  }
+  const parsedWindow = Number(batchWindowMs);
+  const effectiveWindowMs =
+    Number.isFinite(parsedWindow) && parsedWindow > 0
+      ? parsedWindow
+      : DEFAULT_LIQUIDITY_POSITION_BATCH_WINDOW_MS;
+  return Math.max(
+    1,
+    Math.ceil((durationHours * 3_600_000) / effectiveWindowMs)
+  );
+}
+
+function liquidityPositionLifecycleLockRef(lifecycleId: string) {
+  return `liquidity-position:${lifecycleId}`;
 }
 
 function parseHumanAmount(value: string, asset: string) {
@@ -5909,6 +7310,246 @@ function parseHumanAmount(value: string, asset: string) {
   );
 }
 
+async function zylithWalletAuthDeploymentId(
+  deployment: DeploymentConfig,
+  chainId: string
+) {
+  const fundingRail = selectedDepositFundingRail(deployment);
+  return sha256Hex(
+    stableJsonStringify({
+      chain_id: chainId,
+      auction_verifier: requiredNonZeroFelt(
+        deployment.contracts?.auction_verifier,
+        "auction_verifier_address"
+      ),
+      privacy_deposit_bridge: requiredNonZeroFelt(
+        fundingRail.bridgeAdapter,
+        "privacy_deposit_bridge_address"
+      ),
+      shielded_asset_adapter: requiredNonZeroFelt(
+        fundingRail.shieldedAssetAdapter,
+        "shielded_asset_adapter_address"
+      ),
+      funding_primary: deployment.funding?.primary,
+      auth_message_version: 2,
+    })
+  );
+}
+
+async function buildZylithWalletAuthTypedData(input: {
+  walletAddress: string;
+  chainId: string;
+  deploymentId: string;
+  origin: string;
+}) {
+  return {
+    types: {
+      StarkNetDomain: [
+        { name: "name", type: "felt" },
+        { name: "version", type: "felt" },
+        { name: "chainId", type: "felt" },
+      ],
+      ZylithSession: [
+        { name: "action", type: "felt" },
+        { name: "wallet", type: "felt" },
+        { name: "origin", type: "felt" },
+        { name: "deployment", type: "felt" },
+        { name: "version", type: "felt" },
+      ],
+    },
+    primaryType: "ZylithSession",
+    domain: {
+      name: shortStringFelt("Zylith"),
+      version: shortStringFelt("1"),
+      chainId: input.chainId,
+    },
+    message: {
+      action: shortStringFelt("Authorize"),
+      wallet: input.walletAddress,
+      origin: await feltHashForText(input.origin),
+      deployment: feltFromHexHash(input.deploymentId),
+      version: "2",
+    },
+  };
+}
+
+async function requestStarknetWalletTypedSignature(
+  provider: StarknetInjectedProvider,
+  typedData: unknown
+) {
+  if (provider.request) {
+    const requests = [
+      { type: "wallet_signTypedData", params: typedData },
+      { method: "wallet_signTypedData", params: typedData },
+      { method: "starknet_signTypedData", params: typedData },
+    ];
+    for (const request of requests) {
+      try {
+        const result = await withWalletSignatureTimeout(
+          provider.request.call(provider, request)
+        );
+        if (result !== null && result !== undefined) return result;
+      } catch (error) {
+        if (isUserRejectedWalletError(error) || !isWalletSignRequestShapeError(error)) {
+          throw error;
+        }
+      }
+    }
+  }
+  if (typeof provider.account?.signMessage === "function") {
+    try {
+      return await withWalletSignatureTimeout(
+        provider.account.signMessage(typedData)
+      );
+    } catch (error) {
+      if (isWalletSignRequestShapeError(error)) {
+        throw new Error("Selected Starknet wallet cannot sign Zylith messages");
+      }
+      throw error;
+    }
+  }
+  throw new Error("Selected Starknet wallet cannot sign Zylith messages");
+}
+
+async function withWalletSignatureTimeout<T>(request: Promise<T>): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(
+        new Error(
+          "Wallet signature request timed out. Open your Starknet wallet, approve the signature, and retry."
+        )
+      );
+    }, WALLET_SIGNATURE_REQUEST_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  }
+}
+
+function isBatchRolloverError(error: unknown) {
+  if (
+    error instanceof RuntimeHttpStatusError &&
+    error.path === "/api/orders" &&
+    error.status === 409
+  ) {
+    return true;
+  }
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /submission window moved|auction window.*(no longer open|safety buffer|rolled forward)|submission safety buffer|no safe auction window is available/i.test(message);
+}
+
+function isDefiniteCoordinatorOrderRejection(error: unknown) {
+  return (
+    error instanceof RuntimeHttpStatusError &&
+    error.path === "/api/orders" &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
+function isDefiniteCoordinatorLiquidityPositionRejection(error: unknown) {
+  return (
+    error instanceof RuntimeHttpStatusError &&
+    error.path === "/api/liquidity-positions/lifecycle" &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
+function isDefinitePrivateIngressRejection(error: unknown) {
+  return (
+    error instanceof RuntimeHttpStatusError &&
+    error.path === "/api/private/orders" &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
+function isDefinitePrivateLiquidityPositionIngressRejection(error: unknown) {
+  return (
+    error instanceof RuntimeHttpStatusError &&
+    error.path === "/api/private/liquidity-positions/lifecycle" &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
+export function isDefiniteNoteConsolidationSubmitRejection(error: unknown) {
+  return (
+    error instanceof RuntimeHttpStatusError &&
+    error.path === "/api/private/note-consolidations/submit" &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
+export function isAmbiguousPrivateOrderSubmissionError(
+  error: unknown,
+  phase: "pre_ingress" | "private_ingress" | "coordinator_submission"
+) {
+  if (phase === "pre_ingress") return false;
+  if (phase === "private_ingress") {
+    return !isDefinitePrivateIngressRejection(error);
+  }
+  return !isDefiniteCoordinatorOrderRejection(error);
+}
+
+function isAmbiguousPrivateLiquidityPositionSubmissionError(
+  error: unknown,
+  phase: "pre_ingress" | "private_ingress" | "coordinator_submission"
+) {
+  if (phase === "pre_ingress") return false;
+  if (phase === "private_ingress") {
+    return !isDefinitePrivateLiquidityPositionIngressRejection(error);
+  }
+  return !isDefiniteCoordinatorLiquidityPositionRejection(error);
+}
+
+function isWalletSignRequestShapeError(error: unknown) {
+  return /method not found|not supported|unsupported|not implemented|unknown method|invalid input|invalid_union|typed.?data|sign.?message/i.test(
+    walletErrorMessage(error)
+  );
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value)
+  );
+  return `0x${bytesToHex(new Uint8Array(digest))}`;
+}
+
+async function feltHashForText(value: string) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value)
+  );
+  return `0x${bytesToHex(new Uint8Array(digest).slice(0, 31))}`;
+}
+
+function feltFromHexHash(value: string) {
+  const normalized = value.trim().replace(/^0x/i, "").toLowerCase();
+  return `0x${normalized.slice(0, 62) || "0"}`;
+}
+
+function shortStringFelt(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  if (bytes.length > 31) {
+    throw new Error("Wallet auth label is too long");
+  }
+  return `0x${bytesToHex(bytes) || "0"}`;
+}
+
+function bytesToHex(bytes: Uint8Array) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    ""
+  );
+}
+
 function normalizeRecoverySeed(value: string) {
   const normalized = value
     .trim()
@@ -5919,12 +7560,6 @@ function normalizeRecoverySeed(value: string) {
     throw new Error("Recovery seed must be 64 hex characters");
   }
   return normalized;
-}
-
-function validateWalletPassphrase(passphrase: string) {
-  if (typeof passphrase !== "string" || passphrase.trim().length === 0) {
-    throw new Error("Zylith wallet passphrase cannot be blank");
-  }
 }
 
 function normalizeAssetId(value: string) {
@@ -5966,7 +7601,7 @@ function normalizeLocalNoteRecord(record: LocalNoteRecord): LocalNoteRecord {
   };
 }
 
-function mergeLocalNoteRecord(
+export function mergeLocalNoteRecord(
   existing: LocalNoteRecord,
   incoming: LocalNoteRecord
 ): boolean {
@@ -6011,8 +7646,8 @@ function mergeLocalNoteRecord(
     existing.output_proof = normalizedIncoming.output_proof;
     changed = true;
   }
-  if (normalizedIncoming.maker_attribution && !existing.maker_attribution) {
-    existing.maker_attribution = normalizedIncoming.maker_attribution;
+  if (normalizedIncoming.liquidity_provider_attribution && !existing.liquidity_provider_attribution) {
+    existing.liquidity_provider_attribution = normalizedIncoming.liquidity_provider_attribution;
     changed = true;
   }
   if (normalizedIncoming.pending_deposit_tx && !existing.pending_deposit_tx) {
@@ -6037,9 +7672,15 @@ function mergeLocalNoteRecord(
   }
   if (normalizedIncoming.deposit_confirmed && !existing.deposit_confirmed) {
     existing.deposit_confirmed = true;
+    existing.deposit_failed = undefined;
+    existing.deposit_failure_reason = undefined;
     changed = true;
   }
-  if (normalizedIncoming.deposit_failed && !existing.deposit_failed) {
+  if (
+    normalizedIncoming.deposit_failed &&
+    !existing.deposit_failed &&
+    existing.deposit_confirmed !== true
+  ) {
     existing.deposit_failed = true;
     existing.deposit_failure_reason = normalizedIncoming.deposit_failure_reason;
     changed = true;
@@ -6047,6 +7688,12 @@ function mergeLocalNoteRecord(
   if (normalizedIncoming.spent && !existing.spent) {
     existing.spent = true;
     existing.locked_by_order = undefined;
+    existing.pending_consolidation = undefined;
+    existing.pending_withdrawal_tx = undefined;
+    existing.pending_strk20_open_note_tx = undefined;
+    existing.withdrawal_requested_at_unix_ms = undefined;
+    existing.strk20_open_note_id =
+      normalizedIncoming.strk20_open_note_id ?? existing.strk20_open_note_id;
     changed = true;
   }
   if (
@@ -6059,11 +7706,26 @@ function mergeLocalNoteRecord(
   }
   if (
     normalizedIncoming.pending_withdrawal_tx &&
-    !existing.pending_withdrawal_tx
+    !existing.pending_withdrawal_tx &&
+    !existing.spent
   ) {
     existing.pending_withdrawal_tx = normalizedIncoming.pending_withdrawal_tx;
     existing.withdrawal_requested_at_unix_ms =
       normalizedIncoming.withdrawal_requested_at_unix_ms;
+    changed = true;
+  }
+  if (
+    normalizedIncoming.pending_strk20_open_note_tx &&
+    !existing.pending_strk20_open_note_tx &&
+    !existing.spent
+  ) {
+    existing.pending_strk20_open_note_tx =
+      normalizedIncoming.pending_strk20_open_note_tx;
+    existing.strk20_open_note_id =
+      normalizedIncoming.strk20_open_note_id ?? existing.strk20_open_note_id;
+    existing.withdrawal_requested_at_unix_ms =
+      normalizedIncoming.withdrawal_requested_at_unix_ms ??
+      existing.withdrawal_requested_at_unix_ms;
     changed = true;
   }
   if (
@@ -6131,7 +7793,7 @@ async function executeInjectedStarknetCalls(
       calldata: call.calldata,
     }));
     const result = provider.request
-      ? await requestWalletInvokeWithAccountFallback(
+      ? await requestWalletInvokeWithAccountExecuteRecovery(
           provider,
           walletCalls,
           accountCalls
@@ -6172,22 +7834,26 @@ async function executeWalletCalls(
   walletCalls: WalletRequestInvokeCall[]
 ) {
   try {
-    return await provider.account?.execute?.(accountCalls);
+    return await withStarknetWalletInvokeTimeout(
+      provider.account?.execute?.(accountCalls)
+    );
   } catch (error) {
     if (!isWalletCallShapeError(error)) throw error;
-    return provider.account?.execute?.(
-      walletCalls as unknown as StarknetWalletCall[]
+    return withStarknetWalletInvokeTimeout(
+      provider.account?.execute?.(
+        walletCalls as unknown as StarknetWalletCall[]
+      )
     );
   }
 }
 
-async function requestWalletInvokeWithAccountFallback(
+async function requestWalletInvokeWithAccountExecuteRecovery(
   provider: StarknetInjectedProvider,
   walletCalls: WalletRequestInvokeCall[],
   accountCalls: StarknetWalletCall[]
 ) {
   try {
-    return await requestWalletInvoke(provider, walletCalls, accountCalls);
+    return await requestWalletInvoke(provider, walletCalls);
   } catch (error) {
     if (
       !provider.account?.execute ||
@@ -6202,31 +7868,46 @@ async function requestWalletInvokeWithAccountFallback(
 
 async function requestWalletInvoke(
   provider: StarknetInjectedProvider,
-  walletCalls: WalletRequestInvokeCall[],
-  accountCalls: StarknetWalletCall[]
+  walletCalls: WalletRequestInvokeCall[]
 ) {
   if (!provider.request) return undefined;
-  const attempts = [
-    { type: "wallet_addInvokeTransaction", params: { calls: walletCalls } },
-    { type: "wallet_addInvokeTransaction", params: { calls: accountCalls } },
-    { method: "wallet_addInvokeTransaction", params: [{ calls: walletCalls }] },
-    { method: "wallet_addInvokeTransaction", params: [{ calls: accountCalls }] },
-  ];
-  let lastError: unknown = null;
-  for (const request of attempts) {
-    try {
-      return await provider.request(request);
-    } catch (error) {
-      lastError = error;
-      if (isUserRejectedWalletError(error)) throw error;
-      if (!isWalletCallShapeError(error) && !isWalletRequestUnavailableError(error)) {
-        throw error;
-      }
+  try {
+    return await withStarknetWalletInvokeTimeout(
+      provider.request({
+        type: "wallet_addInvokeTransaction",
+        params: { calls: walletCalls },
+      })
+    );
+  } catch (error) {
+    if (isUserRejectedWalletError(error)) throw error;
+    if (!isWalletCallShapeError(error) && !isWalletRequestUnavailableError(error)) {
+      throw error;
     }
+    throw error instanceof Error
+      ? error
+      : new Error("Selected Starknet wallet rejected the transaction shape");
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Selected Starknet wallet rejected the transaction shape");
+}
+
+async function withStarknetWalletInvokeTimeout<T>(
+  request: Promise<T | undefined> | undefined
+): Promise<T | undefined> {
+  if (!request) return undefined;
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(
+        new Error(
+          "Starknet wallet transaction timed out. Open your wallet, approve the transaction, and retry."
+        )
+      );
+    }, STARKNET_WALLET_INVOKE_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  }
 }
 
 function runtimeAddressFromUnknown(value: unknown): string | null {
@@ -6248,13 +7929,6 @@ function runtimeAddressFromUnknown(value: unknown): string | null {
   );
 }
 
-function providerHasConnectedAddress(provider: StarknetInjectedProvider) {
-  return Boolean(
-    runtimeAddressFromUnknown(provider.account?.address) ??
-      runtimeAddressFromUnknown(provider.selectedAddress)
-  );
-}
-
 function connectedProviderAddress(provider: StarknetInjectedProvider) {
   return (
     runtimeAddressFromUnknown(provider.account?.address) ??
@@ -6262,261 +7936,27 @@ function connectedProviderAddress(provider: StarknetInjectedProvider) {
   );
 }
 
-function rememberProviderAddress(
-  provider: StarknetInjectedProvider,
-  address: string
-) {
-  try {
-    provider.selectedAddress = provider.selectedAddress || address;
-  } catch {
-    // Some injected wallet objects expose read-only properties.
-  }
-  if (provider.account && !provider.account.address) {
-    try {
-      provider.account.address = address;
-    } catch {
-      // Some account wrappers expose read-only properties.
-    }
-  }
-  try {
-    window.sessionStorage.setItem(
-      SELECTED_STARKNET_WALLET_STORAGE_KEY,
-      providerIdFor("selected", provider)
-    );
-    window.sessionStorage.setItem(
-      CONNECTED_STARKNET_ADDRESS_STORAGE_KEY,
-      address
-    );
-  } catch {
-    // Storage can be unavailable; mutating the in-memory provider is sufficient for this session.
-  }
-}
-
-async function ensureWalletAccountAccess(provider: StarknetInjectedProvider) {
-  const existing = connectedProviderAddress(provider);
-  if (existing) return existing;
-  if (provider.request) {
-    const attempts: Array<{
-      request: { type?: string; method?: string; params?: unknown };
-      interactive: boolean;
-    }> = [
-      { request: { type: "wallet_requestAccounts", params: { silent_mode: true } }, interactive: false },
-      { request: { type: "wallet_requestAccounts", params: { silentMode: true } }, interactive: false },
-      { request: { method: "wallet_requestAccounts", params: [{ silent_mode: true }] }, interactive: false },
-      { request: { type: "wallet_requestAccounts", params: { silent_mode: false } }, interactive: true },
-      { request: { type: "wallet_requestAccounts", params: { silentMode: false } }, interactive: true },
-      { request: { type: "wallet_requestAccounts" }, interactive: true },
-      { request: { method: "wallet_requestAccounts", params: [] }, interactive: true },
-      { request: { method: "starknet_requestAccounts", params: [] }, interactive: true },
-    ];
-    for (const { request, interactive } of attempts) {
-      const result = await provider.request(request).catch((error) => {
-        if (isUserRejectedWalletError(error)) throw error;
-        return undefined;
-      });
-      const address =
-        runtimeAddressFromUnknown(result) || connectedProviderAddress(provider);
-      if (address) {
-        rememberProviderAddress(provider, address);
-        return address;
-      }
-      if (interactive && result !== undefined) break;
-    }
-  } else if (provider.enable) {
-    const enabled = await provider.enable().catch(() => null);
-    const enabledAddress =
-      runtimeAddressFromUnknown(enabled) || connectedProviderAddress(provider);
-    if (enabledAddress) {
-      rememberProviderAddress(provider, enabledAddress);
-      return enabledAddress;
-    }
-  }
-  throw new Error(
-    "Connect a Starknet wallet before submitting this transaction"
-  );
-}
-
-function providerSearchText(key: string, provider: StarknetInjectedProvider) {
-  return `${key} ${provider.id ?? ""} ${provider.name ?? ""}`.toLowerCase();
-}
-
-const READY_PROVIDER_ALIAS = ["arg", "ent"].join("");
-const LEGACY_READY_PROVIDER_KEYS = [
-  `starknet_${READY_PROVIDER_ALIAS}X`,
-  `${READY_PROVIDER_ALIAS}X`,
-  `starknet_${READY_PROVIDER_ALIAS}`,
-  READY_PROVIDER_ALIAS,
-];
-
-function providerIdFor(key: string, provider: StarknetInjectedProvider) {
-  const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return "ready";
-  if (normalized.includes("xverse")) return "xverse";
-  return provider.id?.trim() || key;
-}
-
-function providerPriorityFor(key: string, provider: StarknetInjectedProvider) {
-  const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready") || normalized.includes(READY_PROVIDER_ALIAS)) return 0;
-  if (normalized.includes("xverse")) return 1;
-  if (key === "starknet") return 4;
-  return 2;
-}
-
-function isSupportedRuntimeWalletProvider(
-  key: string,
-  provider: StarknetInjectedProvider
-) {
-  const normalized = providerSearchText(key, provider);
-  return (
-    normalized.includes("ready") ||
-    normalized.includes(READY_PROVIDER_ALIAS) ||
-    normalized.includes("xverse")
-  );
-}
-
-function selectedWalletId() {
-  try {
-    return (
-      window.sessionStorage.getItem(SELECTED_STARKNET_WALLET_STORAGE_KEY) ??
-      window.localStorage.getItem(SELECTED_STARKNET_WALLET_STORAGE_KEY)
-    );
-  } catch {
-    return null;
-  }
-}
-
-function discoverRuntimeStarknetProviders() {
-  const win = window as unknown as Window & Record<string, unknown>;
-  const candidates: Array<{
-    key: string;
-    provider: StarknetInjectedProvider;
-    order: number;
-  }> = [];
-  const safeWindowValue = (key: string) => {
-    try {
-      return win[key];
-    } catch {
-      return undefined;
-    }
-  };
-  const windowPropertyNames = () => {
-    try {
-      return Object.getOwnPropertyNames(win);
-    } catch {
-      return Object.keys(win);
-    }
-  };
-  const add = (key: string, value: unknown) => {
-    if (!value || typeof value !== "object") return;
-    const provider = value as StarknetInjectedProvider;
-    if (
-      typeof provider.request !== "function" &&
-      typeof provider.enable !== "function"
-    )
-      return;
-    if (candidates.some((entry) => entry.provider === provider)) return;
-    candidates.push({ key, provider, order: candidates.length });
-  };
-  const addRegistryEntry = (key: string, value: unknown) => {
-    add(key, value);
-    if (!value || typeof value !== "object") return;
-    const record = value as Record<string, unknown>;
-    for (const nestedKey of [
-      "provider",
-      "wallet",
-      "starknet",
-      "connector",
-      "walletProvider",
-      "starknetProvider",
-    ]) {
-      add(`${key}_${nestedKey}`, record[nestedKey]);
-      const nested = record[nestedKey];
-      if (nested && typeof nested === "object") {
-        const nestedRecord = nested as Record<string, unknown>;
-        add(`${key}_${nestedKey}_provider`, nestedRecord.provider);
-        add(`${key}_${nestedKey}_starknet`, nestedRecord.starknet);
-      }
-    }
-  };
-
-  add("selected", window.zylithSelectedStarknetProvider);
-  addRegistryEntry("starknet_ready", safeWindowValue("starknet_ready"));
-  addRegistryEntry("readyWallet", safeWindowValue("readyWallet"));
-  addRegistryEntry("ready", safeWindowValue("ready"));
-  addRegistryEntry("starknet_xverse", safeWindowValue("starknet_xverse"));
-  addRegistryEntry("xverseStarknet", safeWindowValue("xverseStarknet"));
-  addRegistryEntry("xverse", safeWindowValue("xverse"));
-  for (const key of LEGACY_READY_PROVIDER_KEYS) {
-    addRegistryEntry(key, safeWindowValue(key));
-  }
-  const providerRegistry = win.starknetProviders;
-  if (Array.isArray(providerRegistry)) {
-    providerRegistry.forEach((provider, index) => {
-      const meta = provider as StarknetInjectedProvider;
-      addRegistryEntry(
-        `starknet_provider_${meta?.id || meta?.name || index}`,
-        provider
-      );
-    });
-  } else if (providerRegistry && typeof providerRegistry === "object") {
-    Object.entries(providerRegistry as Record<string, unknown>).forEach(
-      ([key, provider]) => {
-        addRegistryEntry(`starknet_provider_${key}`, provider);
-      }
-    );
-  }
-  for (const key of windowPropertyNames()) {
-    const normalizedKey = key.toLowerCase();
-    if (
-      key.startsWith("starknet") ||
-      normalizedKey.includes("ready") ||
-      normalizedKey.includes("xverse") ||
-      normalizedKey.includes(READY_PROVIDER_ALIAS)
-    ) {
-      addRegistryEntry(key, safeWindowValue(key));
-    }
-  }
-  add("starknet", window.starknet);
-
-  const storedId = selectedWalletId();
-  return candidates
-    .filter(({ key, provider }) =>
-      isSupportedRuntimeWalletProvider(key, provider)
-    )
-    .sort((left, right) => {
-      const leftSelected =
-        storedId && providerIdFor(left.key, left.provider) === storedId;
-      const rightSelected =
-        storedId && providerIdFor(right.key, right.provider) === storedId;
-      if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
-      const leftPriority = providerPriorityFor(left.key, left.provider);
-      const rightPriority = providerPriorityFor(right.key, right.provider);
-      return leftPriority === rightPriority
-        ? left.order - right.order
-        : leftPriority - rightPriority;
-    });
-}
-
 async function selectInjectedStarknetProvider() {
   const preferredProvider = selectedStarknetProvider();
-  const discovered = discoverRuntimeStarknetProviders();
+  const discovered = discoverStarknetWallets();
+  const deployment = await loadWalletDeploymentConfig();
+  const preferredWallet = preferredProvider
+    ? discovered.find(({ provider }) => provider === preferredProvider) ?? null
+    : null;
   const orderedProviders = preferredProvider
     ? [
-        { provider: preferredProvider },
+        { id: preferredWallet?.id, provider: preferredProvider },
         ...discovered.filter(({ provider }) => provider !== preferredProvider),
       ]
     : discovered;
-  for (const { provider } of orderedProviders) {
+  for (const { id, provider } of orderedProviders) {
     try {
-      await ensureWalletAccountAccess(provider);
+      await connectStarknetProvider(provider as never, id);
     } catch (error) {
       if (isUserRejectedWalletError(error)) throw error;
       continue;
     }
     if (provider.account?.execute || provider.request) {
-      const deployment = await loadWalletDeploymentConfig();
-      await syncWalletRpcProvider(provider, deployment).catch(() => undefined);
       await ensureWalletChain(provider, deployment);
       return provider;
     }
@@ -6527,84 +7967,41 @@ async function selectInjectedStarknetProvider() {
 }
 
 function setRuntimePrivacyFundingStage(stage: string) {
-  try {
-    (globalThis as typeof globalThis & {
-      __zylithPrivacyFundingStage?: { stage: string; at: number };
-    }).__zylithPrivacyFundingStage = { stage, at: Date.now() };
-  } catch {}
+  setPrivacyFundingStage(stage);
 }
 
 async function loadWalletDeploymentConfig(): Promise<DeploymentConfig> {
-  try {
-    const response = await fetch("/deployment.json", {
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) return {};
-    return (await response.json()) as DeploymentConfig;
-  } catch {
-    return {};
-  }
+  return requestDeploymentConfig();
 }
 
-async function syncWalletRpcProvider(
-  provider: StarknetInjectedProvider,
-  deployment?: DeploymentConfig
-) {
-  if (!provider.request) return;
-  if (rpcSyncedProviders.has(provider)) return;
-  deployment = deployment ?? (await loadWalletDeploymentConfig());
-  const chainId = deployment.chain_id || "0x534e5f5345504f4c4941";
-  const rpcUrl =
-    deployment.rpc_url ||
-    deployment.proof?.native_prover_rpc_url ||
-    deployment.proof_config?.native_prover_rpc_url ||
-    ZAN_STARKNET_SEPOLIA_RPC_URL;
-  if (!chainId || !rpcUrl || !/^https?:\/\//i.test(rpcUrl)) return;
-  const expectedChain = normalizeRuntimeChainId(chainId);
-  const currentChain = normalizeRuntimeChainId(await requestWalletChainId(provider));
-  if (expectedChain && currentChain === expectedChain) {
-    rpcSyncedProviders.add(provider);
-    return;
-  }
-  setRuntimePrivacyFundingStage("Switching Starknet wallet network");
-  const switchRequests = [
-    { type: "wallet_switchStarknetChain", params: { chainId } },
-    { type: "wallet_switchStarknetChain", params: { chain_id: chainId } },
-    { method: "wallet_switchStarknetChain", params: [{ chainId }] },
-    { method: "wallet_switchStarknetChain", params: [{ chain_id: chainId }] },
-  ];
-  await requestWalletBestEffort(provider, switchRequests);
-  if (
-    normalizeRuntimeChainId(await requestWalletChainId(provider)) === expectedChain
-  ) {
-    rpcSyncedProviders.add(provider);
-    return;
-  }
-  const network = deployment.network || "starknet";
-  const chainParamsSnake = {
-    id: `zylith-${network}`,
-    chain_id: chainId,
-    chain_name: `Zylith ${network}`,
-    rpc_urls: [rpcUrl],
-  };
-  const chainParamsCamel = {
-    id: `zylith-${network}`,
-    chainId,
-    chainName: `Zylith ${network}`,
-    rpcUrls: [rpcUrl],
-  };
-  setRuntimePrivacyFundingStage("Registering Starknet network in wallet");
-  await requestWalletBestEffort(provider, [
-    { type: "wallet_addStarknetChain", params: chainParamsSnake },
-    { type: "wallet_addStarknetChain", params: chainParamsCamel },
-    { method: "wallet_addStarknetChain", params: [chainParamsSnake] },
-    { method: "wallet_addStarknetChain", params: [chainParamsCamel] },
-  ]);
-  setRuntimePrivacyFundingStage("Switching Starknet wallet network");
-  await requestWalletBestEffort(provider, switchRequests);
-  setRuntimePrivacyFundingStage("Waiting for Starknet wallet network");
-  if (await waitForWalletChain(provider, chainId)) {
-    rpcSyncedProviders.add(provider);
+async function requestDeploymentConfig(): Promise<DeploymentConfig> {
+  try {
+    const response = await fetchWithTimeout(
+      "/deployment.json",
+      { headers: { accept: "application/json" } },
+      DEPLOYMENT_MANIFEST_REQUEST_TIMEOUT_MS
+    );
+    if (!response.ok) {
+      throw new Error(`Deployment manifest request failed with HTTP ${response.status}`);
+    }
+    const deployment = await response.json();
+    assertCurrentDeploymentManifestShape(deployment);
+    return deployment as DeploymentConfig;
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : typeof error === "string" ? error : "";
+    if (
+      /runtime request timed out|signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted|failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
+        message
+      )
+    ) {
+      throw new Error(
+        "Deployment manifest is unavailable. Check your connection and retry."
+      );
+    }
+    throw error instanceof Error
+      ? error
+      : new Error("Deployment manifest is unavailable");
   }
 }
 
@@ -6612,71 +8009,124 @@ async function ensureWalletChain(
   provider: StarknetInjectedProvider,
   deployment: DeploymentConfig
 ) {
-  const expected = normalizeRuntimeChainId(
-    deployment.chain_id || "0x534e5f5345504f4c4941"
-  );
-  const actual = normalizeRuntimeChainId(await requestWalletChainId(provider));
-  if (!expected || !actual || actual === expected) return;
+  const expected = normalizeRuntimeChainId(deployment.chain_id);
+  if (!expected) {
+    throw new Error("Deployment manifest is missing the Starknet chain ID.");
+  }
+  const current = await requestWalletChainId(provider);
+  if (normalizeRuntimeChainId(current) === expected) return;
+  const switchAccepted = await requestWalletChainSwitch(provider, expected);
+  const switched = await requestWalletChainId(provider);
+  if (normalizeRuntimeChainId(switched) === expected) return;
+  if (!normalizeRuntimeChainId(current) && !normalizeRuntimeChainId(switched) && switchAccepted) {
+    return;
+  }
+  validateWalletChainMatch(deployment.chain_id, switched, deployment.network);
+}
+
+export function validateWalletChainMatch(
+  deploymentChainId: unknown,
+  walletChainId: unknown,
+  deploymentNetwork?: string
+) {
+  const expected = normalizeRuntimeChainId(deploymentChainId);
+  const actual = normalizeRuntimeChainId(walletChainId);
+  if (!expected) {
+    throw new Error("Deployment manifest is missing the Starknet chain ID.");
+  }
+  if (!actual) {
+    throw new Error("Connected Starknet wallet did not report its network.");
+  }
+  if (actual === expected) return;
   const networkName =
-    deployment.network === "sepolia"
+    deploymentNetwork === "sepolia"
       ? "Starknet Sepolia"
-      : deployment.network || "the configured Starknet network";
+      : deploymentNetwork || "the configured Starknet network";
   throw new Error(
-    `Wrong Starknet network. Select ${networkName} in your wallet and retry.`
+    `Wrong Starknet network. Switch to ${networkName} in your wallet and retry.`
   );
+}
+
+async function requestWalletChainSwitch(
+  provider: StarknetInjectedProvider,
+  chainId: string
+): Promise<boolean> {
+  if (!provider.request) return false;
+  const requests = [
+    { type: "wallet_switchStarknetChain", params: { chainId } },
+    { method: "wallet_switchStarknetChain", params: { chainId } },
+  ];
+  for (const request of requests) {
+    try {
+      await withStarknetWalletRequestTimeout(
+        provider.request.call(provider, request),
+        STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
+      );
+      return true;
+    } catch (error) {
+      if (isUserRejectedWalletError(error)) throw error;
+      if (!isWalletRequestUnavailableError(error) && !isWalletCallShapeError(error)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function requestWalletChainId(
   provider: StarknetInjectedProvider
 ): Promise<string | null> {
   if (provider.request) {
-    const attempts = [
+    const requests = [
       { type: "wallet_requestChainId" },
       { method: "wallet_requestChainId" },
-      { type: "starknet_requestChainId" },
-      { method: "starknet_requestChainId" },
+      { type: "starknet_chainId" },
+      { method: "starknet_chainId" },
     ];
-    for (const request of attempts) {
-      const result = await provider.request(request).catch(() => null);
+    for (const request of requests) {
+      const result = await withStarknetWalletRequestTimeout(
+        provider.request.call(provider, request),
+        STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
+      ).catch(() => null);
       const chainId = chainIdFromUnknown(result);
       if (chainId) return chainId;
     }
   }
+  if (provider.getChainId) {
+    const value = await withStarknetWalletRequestTimeout(
+      Promise.resolve(provider.getChainId()),
+      STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
+    ).catch(() => null);
+    const chainId = chainIdFromUnknown(value);
+    if (chainId) return chainId;
+  }
   if (provider.account?.getChainId) {
-    const value = await provider.account.getChainId().catch(() => null);
+    const value = await withStarknetWalletRequestTimeout(
+      provider.account.getChainId(),
+      STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
+    ).catch(() => null);
     const chainId = chainIdFromUnknown(value);
     if (chainId) return chainId;
   }
   return chainIdFromUnknown(provider.chainId);
 }
 
-async function requestWalletBestEffort(
-  provider: StarknetInjectedProvider,
-  requests: Array<{ type?: string; method?: string; params?: unknown }>
-) {
-  for (const request of requests) {
-    try {
-      await provider.request?.(request);
-      return;
-    } catch (error) {
-      if (isUserRejectedWalletError(error)) throw error;
-    }
+async function withStarknetWalletRequestTimeout<T>(
+  request: Promise<T | undefined> | undefined,
+  timeoutMs: number
+): Promise<T | undefined> {
+  if (!request) return undefined;
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error("Starknet wallet request timed out"));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
   }
-}
-
-async function waitForWalletChain(
-  provider: StarknetInjectedProvider,
-  expectedChainId: string
-) {
-  const expected = normalizeRuntimeChainId(expectedChainId);
-  if (!expected) return true;
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const actual = normalizeRuntimeChainId(await requestWalletChainId(provider));
-    if (actual === expected) return true;
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-  }
-  return false;
 }
 
 function chainIdFromUnknown(value: unknown): string | null {
@@ -6715,11 +8165,26 @@ function walletErrorMessage(error: unknown) {
   }
 }
 
+function safeDebugErrorMessage(error: unknown) {
+  const message = walletErrorMessage(error)
+    .replace(/0x[0-9a-fA-F]{33,}/g, "<felt>")
+    .replace(/\b[0-9]{32,}\b/g, "<number>")
+    .replace(/\s+/g, " ")
+    .trim();
+  return message ? message.slice(0, 240) : "unknown error";
+}
+
 function normalizeWalletTransactionError(error: unknown) {
   if (import.meta.env.DEV) {
-    console.warn("Zylith wallet transaction failed", error);
+    console.warn(
+      "Wallet transaction failed",
+      safeDebugErrorMessage(error)
+    );
   }
   const message = walletErrorMessage(error);
+  if (isUserRejectedWalletError(error)) {
+    return new Error("Request cancelled in wallet.");
+  }
   if (/too many requests|onfinality|rate limit|-32029/i.test(message)) {
     return new Error(
       "Wallet could not prepare the transaction. Please retry later."
@@ -6731,10 +8196,24 @@ function normalizeWalletTransactionError(error: unknown) {
     )
   ) {
     return new Error(
-      "Zylith contracts are unavailable on the selected wallet network. Select Starknet Sepolia and retry."
+      "Zylith contracts are unavailable on the selected wallet network. Switch to Starknet Sepolia and retry."
     );
   }
-  return error instanceof Error ? error : new Error(message);
+  if (
+    /signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted/i.test(
+      message
+    )
+  ) {
+    return new Error("Starknet wallet transaction timed out. Open your wallet and retry.");
+  }
+  if (
+    /failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
+      message
+    )
+  ) {
+    return new Error("Starknet wallet transaction failed. Check your connection and retry.");
+  }
+  return new Error("Starknet wallet could not submit the transaction. Please retry.");
 }
 
 function extractTransactionHash(result: unknown): string | null {
@@ -6752,11 +8231,7 @@ async function fetchTransactionReceiptStatus(
   transactionHash: string,
   deployment: DeploymentConfig
 ): Promise<TransactionReceiptStatus | null> {
-  const rpcUrl =
-    deployment.rpc_url ||
-    deployment.proof?.native_prover_rpc_url ||
-    deployment.proof_config?.native_prover_rpc_url ||
-    ZAN_STARKNET_SEPOLIA_RPC_URL;
+  const rpcUrl = deployment.rpc_url;
   if (!rpcUrl || !/^https?:\/\//i.test(rpcUrl)) return null;
 
   type ReceiptResponse = {
@@ -6828,11 +8303,7 @@ async function fetchTransactionCalldata(
   transactionHash: string,
   deployment: DeploymentConfig
 ): Promise<string[] | null> {
-  const rpcUrl =
-    deployment.rpc_url ||
-    deployment.proof?.native_prover_rpc_url ||
-    deployment.proof_config?.native_prover_rpc_url ||
-    ZAN_STARKNET_SEPOLIA_RPC_URL;
+  const rpcUrl = deployment.rpc_url;
   if (!rpcUrl || !/^https?:\/\//i.test(rpcUrl)) return null;
 
   type TransactionResponse = {
@@ -6906,12 +8377,263 @@ function readJson<T>(key: string): T | null {
   }
 }
 
+function normalizeLocalLiquidityPositionRecord(
+  value: unknown
+): LocalLiquidityPositionRecord {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid private liquidity position record");
+  }
+  const record = value as Partial<LocalLiquidityPositionRecord>;
+  const position = normalizeProtocolPrivateLiquidityPosition(record.position);
+  const id = normalizeFeltForComparison(
+    record.id || protocolLiquidityPositionId(position)
+  );
+  const positionCommitment = normalizeFeltForComparison(
+    record.position_commitment
+  );
+  const pairId = normalizeText(record.pair_id || protocolLiquidityPairId(position));
+  if (!id || !positionCommitment || !pairId) {
+    throw new Error("Invalid private liquidity position record");
+  }
+  return {
+    id,
+    position,
+    position_commitment: positionCommitment,
+    pair_id: pairId,
+    status: normalizeLiquidityPositionStatus(record.status),
+    deployment_scope: normalizeText(record.deployment_scope),
+    last_lifecycle_id: normalizeText(record.last_lifecycle_id),
+    last_transition_commitment: normalizeFeltForComparison(
+      record.last_transition_commitment
+    ),
+    last_batch_id: normalizeText(record.last_batch_id),
+    last_epoch_id: nonNegativeInteger(record.last_epoch_id, 0),
+    opened_at_unix_ms: nonNegativeInteger(record.opened_at_unix_ms, 0),
+    updated_at_unix_ms: nonNegativeInteger(record.updated_at_unix_ms, 0),
+    fill_attributions: Array.isArray(record.fill_attributions)
+      ? record.fill_attributions
+          .map((entry) => {
+            try {
+              return normalizeLiquidityAttributionPlaintext(entry);
+            } catch {
+              return null;
+            }
+          })
+          .filter((entry): entry is LiquidityAttributionPlaintext =>
+            Boolean(entry)
+          )
+          .slice(-512)
+      : undefined,
+  };
+}
+
+function normalizeProtocolPrivateLiquidityPosition(
+  value: unknown
+): ProtocolPrivateLiquidityPosition {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid private liquidity position preimage");
+  }
+  const position = { ...(value as ProtocolPrivateLiquidityPosition) };
+  const positionId = normalizeFeltForComparison(position.position_id);
+  if (!positionId) {
+    throw new Error("Private liquidity position preimage is missing position_id");
+  }
+  position.position_id = positionId;
+  return position;
+}
+
+function protocolLiquidityPositionId(
+  position: ProtocolPrivateLiquidityPosition
+) {
+  const positionId = normalizeFeltForComparison(position.position_id);
+  if (!positionId) {
+    throw new Error("Private liquidity position preimage is missing position_id");
+  }
+  return positionId;
+}
+
+function protocolLiquidityPairId(position: ProtocolPrivateLiquidityPosition) {
+  const pairId = normalizeText(position.pair_id);
+  if (!pairId) {
+    throw new Error("Private liquidity position preimage is missing pair_id");
+  }
+  return pairId;
+}
+
+function normalizeLiquidityPositionStatus(
+  status: unknown
+): LocalLiquidityPositionStatus {
+  if (
+    status === "pending_open" ||
+    status === "active" ||
+    status === "pending_reconfigure" ||
+    status === "pending_close" ||
+    status === "closed"
+  ) {
+    return status;
+  }
+  return "active";
+}
+
+function isPendingLiquidityPositionStatus(status: LocalLiquidityPositionStatus) {
+  return (
+    status === "pending_open" ||
+    status === "pending_reconfigure" ||
+    status === "pending_close"
+  );
+}
+
+export function shouldReleasePendingLiquidityPositionOpen(
+  batch: BatchSummary | null | undefined,
+  now: number
+) {
+  if (!batch) return false;
+  if (batch.status === "Cancelled") return true;
+  if (batch.status !== "Closed") return false;
+  return (
+    now - batch.close_time_unix_ms >=
+    PENDING_LIQUIDITY_POSITION_OPEN_RELEASE_GRACE_MS
+  );
+}
+
+function normalizeCommitmentLike(value: unknown) {
+  if (typeof value === "string") return normalizeFeltForComparison(value);
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const candidate = record["0"] ?? record.value;
+    return typeof candidate === "string"
+      ? normalizeFeltForComparison(candidate)
+      : "";
+  }
+  return "";
+}
+
+function normalizeLiquidityAttributionPlaintext(
+  value: unknown
+): LiquidityAttributionPlaintext {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid liquidity attribution plaintext");
+  }
+  const record = value as Partial<LiquidityAttributionPlaintext>;
+  const attribution = normalizeLiquidityBandAttribution(record.attribution);
+  const batchId = normalizeText(record.batch_id);
+  const pairId = normalizeText(record.pair_id);
+  const owner = normalizeText(record.liquidity_provider_public_key);
+  const curveCommitment = normalizeFeltForComparison(record.curve_commitment);
+  const outputNoteCommitment = normalizeCommitmentLike(
+    record.output_note_commitment
+  );
+  const epochId = nonNegativeInteger(record.epoch_id, -1);
+  if (
+    record.version !== 1 ||
+    !batchId ||
+    !pairId ||
+    !owner ||
+    !curveCommitment ||
+    !outputNoteCommitment ||
+    epochId < 0 ||
+    attribution.pair_id !== pairId
+  ) {
+    throw new Error("Invalid liquidity attribution plaintext");
+  }
+  return {
+    version: 1,
+    batch_id: batchId,
+    pair_id: pairId,
+    epoch_id: epochId,
+    liquidity_provider_public_key: owner,
+    curve_commitment: curveCommitment,
+    output_note_commitment: outputNoteCommitment,
+    attribution,
+  };
+}
+
+function normalizeLiquidityBandAttribution(
+  value: unknown
+): LiquidityBandAttribution {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid liquidity band attribution");
+  }
+  const record = value as Partial<LiquidityBandAttribution>;
+  const side = record.side === "Buy" || record.side === "Sell" ? record.side : null;
+  const pairId = normalizeText(record.pair_id);
+  const orderCommitment = normalizeCommitmentLike(record.order_commitment);
+  const fundingNoteRef = normalizeCommitmentLike(record.funding_note_ref);
+  const clearingPrice = decimalString(record.clearing_price, "clearing price");
+  const filledBaseAmount = decimalString(
+    record.filled_base_amount,
+    "filled base amount"
+  );
+  const bands = Array.isArray(record.bands)
+    ? record.bands.map((band) => normalizeLiquidityBandFillAttribution(band))
+    : [];
+  if (
+    record.version !== 1 ||
+    !pairId ||
+    !orderCommitment ||
+    !fundingNoteRef ||
+    !side ||
+    bands.length === 0
+  ) {
+    throw new Error("Invalid liquidity band attribution");
+  }
+  bands.sort((left, right) => left.band_index - right.band_index);
+  return {
+    version: 1,
+    pair_id: pairId,
+    order_commitment: orderCommitment,
+    funding_note_ref: fundingNoteRef,
+    side,
+    clearing_price: clearingPrice,
+    filled_base_amount: filledBaseAmount,
+    bands,
+  };
+}
+
+function normalizeLiquidityBandFillAttribution(
+  value: unknown
+): LiquidityBandAttribution["bands"][number] {
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid liquidity band fill attribution");
+  }
+  const record = value as Partial<LiquidityBandAttribution["bands"][number]>;
+  const bandIndex = nonNegativeInteger(record.band_index, -1);
+  const bandPrice = decimalString(record.band_price, "band price");
+  const bandBaseAmount = decimalString(record.band_base_amount, "band amount");
+  const filledBaseAmount = decimalString(
+    record.filled_base_amount,
+    "band filled amount"
+  );
+  if (bandIndex < 0 || filledBaseAmount === "0" || bandBaseAmount === "0") {
+    throw new Error("Invalid liquidity band fill attribution");
+  }
+  return {
+    band_index: bandIndex,
+    band_price: bandPrice,
+    band_base_amount: bandBaseAmount,
+    filled_base_amount: filledBaseAmount,
+  };
+}
+
+function decimalString(value: unknown, label: string) {
+  const normalized =
+    typeof value === "bigint"
+      ? value.toString()
+      : typeof value === "number"
+        ? Number.isSafeInteger(value)
+          ? value.toString()
+          : ""
+        : typeof value === "string"
+          ? value.trim()
+          : "";
+  if (!/^(0|[1-9][0-9]*)$/.test(normalized)) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return normalized;
+}
+
 function quarantineLocalStore(key: string) {
   try {
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      localStorage.setItem(`${key}.corrupt.${Date.now()}`, raw);
-    }
     localStorage.removeItem(key);
   } catch {
     // Local cache is recoverable from recovery artifacts or rescanning visible outputs.

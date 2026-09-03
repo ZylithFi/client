@@ -1,37 +1,68 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
+
+const MAX_OUTPUT_RECOVERY_KEY_TAGS_PER_CALL: u32 = 4_096;
 use zylith_core::hash::{normalize_felt_hex, tagged_field_hex};
 use zylith_core::{
-    AssetId, BatchId, DepositIntent, DepositSubmissionPlan, EncryptedMakerAttributionArtifact,
-    ManagedMakerAuthorization, ManagedMakerPolicy, Note, NoteConsolidationWitness,
-    NullifierHistoryBatch, NullifierSparseUpdateWitness, OrderCommitment, OrderIntent,
+    AssetId, BatchId, DepositIntent, DepositSubmissionPlan, EncryptedLiquidityAttributionArtifact,
+    LiquidityPositionBacking, LiquidityPositionCommitment, LiquidityPositionCurvePolicy,
+    LiquidityPositionLifecycleAuthorization, LiquidityPositionOpenFunding,
+    LiquidityPositionOracleGuard, LiquidityPositionRotationPolicy, LiquidityPositionState,
+    LiquidityPositionStateUpdate, LiquidityPositionStatus, LiquidityPositionTransitionKind,
+    LiquidityPositionTransitionWitness, Note, NoteConsolidationWitness, NullifierHistoryBatch,
+    NullifierSparseUpdateWitness, OrderCommitment, OrderIngressClientTelemetry, OrderIntent,
     OrderSubmission, OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord,
-    OutputRecoveryRecord, PrivateExecutionKeyRegistry, PrivateOrderPayload, RecoveryArtifact,
-    RecoveryArtifactKind, RecoverySeed, RenewalParentCancelPlanRequest,
-    RenewalParentCancelSubmissionPlan, SettlementOutputWithdrawalPlanRequest,
-    SettlementOutputWithdrawalSubmissionPlan, SettlementOutputWithdrawalWitness,
-    SpendAuthorization, Strk20ExitClaimMessage, TrustedOrderIngressRequest,
-    WithdrawalSubmissionPlan, build_deposit_submission_plan, build_order_submission,
+    OutputRecoveryRecord, PairId, PrivateExecutionKeyRegistry, PrivateLiquidityPosition,
+    PrivateOrderPayload, RecoveryArtifact, RecoveryArtifactKind, RecoverySeed,
+    RenewalParentCancelPlanRequest, RenewalParentCancelSubmissionPlan,
+    SettlementOutputWithdrawalPlanRequest, SettlementOutputWithdrawalSubmissionPlan,
+    SettlementOutputWithdrawalWitness, SpendAuthorization, Strk20ExitClaimMessage,
+    TrustedLiquidityPositionIngressRequest, TrustedOrderIngressRequest,
+    build_deposit_submission_plan, build_order_submission,
     build_renewal_parent_cancel_submission_plan,
-    build_settlement_output_withdrawal_submission_plan, build_withdrawal_submission_plan,
-    create_recovery_artifact, decrypt_maker_attribution_artifact, decrypt_output_note_for_owner,
-    decrypt_output_recovery_record, decrypt_recovery_artifact_payload, derive_account_id,
-    derive_order_cancellation_secret, derive_recovery_auth_tag, derive_user_keys,
-    encrypt_output_note_for_owner, funding_input_set_commitment, funding_nullifier_set_commitment,
+    build_settlement_output_withdrawal_submission_plan, close_liquidity_position,
+    create_recovery_artifact, decrypt_liquidity_attribution_artifact,
+    decrypt_output_note_for_owner, decrypt_output_recovery_record,
+    decrypt_recovery_artifact_payload, derive_account_id, derive_order_cancellation_secret,
+    derive_recovery_auth_tag, derive_user_keys, encrypt_output_note_for_owner,
+    funding_input_set_commitment, funding_nullifier_set_commitment,
+    liquidity_position_lifecycle_id, liquidity_position_private_authority,
+    liquidity_position_root_transition, liquidity_position_transition_commitment,
     note_consolidation_commitment, note_recognition_public_key_from_raw_key_hex,
-    nullifier_from_note_secret, output_note_merkle_proof, output_note_merkle_root,
-    output_note_metadata_commitment, output_recovery_key_tag_for_spend_authority,
+    nullifier_from_note_secret, open_liquidity_position, output_note_merkle_proof,
+    output_note_merkle_root, output_note_metadata_commitment,
+    output_recovery_key_tag_for_spend_authority, reconfigure_liquidity_position,
     renewal_cancel_auth_key_felt_for_parent_from_raw_key_hex,
     renewal_cancel_authority_for_parent_from_raw_key_hex, renewal_parent_commitment,
-    renewal_parent_secret_commitment, sign_managed_maker_policy_authorization,
+    renewal_parent_secret_commitment, sign_liquidity_position_transition,
     sign_note_consolidation_authorization, sign_order_authorization,
     sign_renewal_relay_package_authorization, sign_settlement_output_withdrawal_witness,
     sign_strk20_exit_claim_authorization, spend_auth_key_felt_from_raw_key_hex,
-    spend_authority_from_raw_key_hex, spend_authority_from_spend_auth_key_felt,
-    verify_output_note_membership, verify_renewal_relay_package_authorization,
-    withdraw_auth_key_felt_from_raw_key_hex, withdraw_authority_from_raw_key_hex,
+    spend_authority_from_raw_key_hex, verify_liquidity_position_state_update,
+    verify_liquidity_position_transition_witness, verify_output_note_membership,
+    verify_renewal_relay_package_authorization, withdraw_auth_key_felt_from_raw_key_hex,
+    withdraw_authority_from_raw_key_hex,
 };
+
+fn empty_order_ingress_telemetry() -> OrderIngressClientTelemetry {
+    OrderIngressClientTelemetry {
+        version: 1,
+        client_build_ms: None,
+        private_submission_delay_ms: None,
+        client_elapsed_before_private_ingress_ms: None,
+        private_ingress_roundtrip_ms: None,
+        client_elapsed_before_coordinator_ms: None,
+        batch_time_remaining_before_private_ingress_ms: None,
+        batch_time_remaining_before_coordinator_ms: None,
+        submission_safety_buffer_ms: None,
+    }
+}
+
+fn secret_hex(bytes: &[u8]) -> Zeroizing<String> {
+    Zeroizing::new(hex::encode(bytes))
+}
 
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -44,23 +75,6 @@ pub fn zylith_wallet_generate_seed_hex() -> String {
 }
 
 #[wasm_bindgen]
-pub fn zylith_wallet_generate_mnemonic() -> Result<String, JsValue> {
-    RecoverySeed::generate().to_mnemonic().map_err(js_error)
-}
-
-#[wasm_bindgen]
-pub fn zylith_wallet_seed_hex_to_mnemonic(seed_hex: &str) -> Result<String, JsValue> {
-    let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
-    seed.to_mnemonic().map_err(js_error)
-}
-
-#[wasm_bindgen]
-pub fn zylith_wallet_mnemonic_to_seed_hex(phrase: &str) -> Result<String, JsValue> {
-    let seed = RecoverySeed::from_mnemonic(phrase).map_err(js_error)?;
-    Ok(seed.to_hex())
-}
-
-#[wasm_bindgen]
 pub fn zylith_wallet_derive_public_config(seed_hex: &str) -> Result<String, JsValue> {
     to_json(&derive_public_config(seed_hex)?)
 }
@@ -69,9 +83,10 @@ pub fn zylith_wallet_derive_public_config(seed_hex: &str) -> Result<String, JsVa
 pub fn zylith_wallet_recovery_auth_tag(seed_hex: &str) -> Result<String, JsValue> {
     let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
+    let recovery_key_hex = secret_hex(&keys.recovery_key);
     Ok(derive_recovery_auth_tag(
         &derive_account_id(&seed),
-        &hex::encode(keys.recovery_key),
+        &recovery_key_hex,
     ))
 }
 
@@ -80,9 +95,9 @@ pub fn zylith_wallet_build_deposit_submission_plan(input_json: &str) -> Result<S
     let request: BuildDepositSubmissionPlanRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let owner_key_hex = hex::encode(keys.note_recognition_key);
-    let spend_key_hex = hex::encode(keys.spend_auth_key);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let owner_key_hex = secret_hex(&keys.note_recognition_key);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
     let intent = DepositIntent {
         asset_id: request.asset_id,
         amount: request.amount,
@@ -109,21 +124,20 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
     let request: BuildPrivateOrderSubmissionRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let spend_key_hex = hex::encode(keys.spend_auth_key);
-    let owner_key_hex = hex::encode(keys.note_recognition_key);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
-    let order_cancel_key_hex = hex::encode(keys.order_cancellation_key);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let owner_key_hex = secret_hex(&keys.note_recognition_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
+    let order_cancel_key_hex = secret_hex(&keys.order_cancellation_key);
     let spend_auth_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
     let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
     let owner_public_key =
         note_recognition_public_key_from_raw_key_hex(&owner_key_hex).map_err(js_error)?;
     let withdraw_authority =
         withdraw_authority_from_raw_key_hex(&withdraw_key_hex).map_err(js_error)?;
-    let funding_notes = if request.funding_notes.is_empty() {
-        vec![request.funding_note.clone()]
-    } else {
-        request.funding_notes.clone()
-    };
+    if request.funding_notes.is_empty() {
+        return Err(js_error("private order requires at least one funding note"));
+    }
+    let funding_notes = request.funding_notes.clone();
     let funding_commitments = funding_notes
         .iter()
         .map(|note| note.commitment())
@@ -162,10 +176,9 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
         sign_order_authorization(&spend_auth_key_felt, &order_commitment).map_err(js_error)?;
     let payload = PrivateOrderPayload {
         order,
-        funding_note: request.funding_note,
+        funding_note: funding_notes[0].clone(),
         funding_notes,
         funding_authorization,
-        managed_maker_authorization: None,
     };
     let order_submission =
         build_order_submission(&payload, &request.registry, &order_cancel_key_hex)
@@ -178,7 +191,11 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
         renewal_package_id: None,
         renewal_package_commitment: None,
         renewal_relay_mode: None,
-        ingress_telemetry: None,
+        renewal_slot_order_commitment: None,
+        renewal_slot_pair: None,
+        renewal_slot_batch_id: None,
+        renewal_slot_epoch_id: None,
+        ingress_telemetry: empty_order_ingress_telemetry(),
         padding: request.padding,
     };
     to_json(&BuildPrivateOrderSubmissionResponse {
@@ -195,132 +212,937 @@ pub fn zylith_wallet_build_private_order_submission(input_json: &str) -> Result<
 }
 
 #[wasm_bindgen]
-pub fn zylith_wallet_authorize_managed_maker_policy(input_json: &str) -> Result<String, JsValue> {
-    let request: AuthorizeManagedMakerPolicyRequest = from_json(input_json)?;
-    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
-    let keys = derive_user_keys(&seed);
-    let spend_key_hex = hex::encode(keys.spend_auth_key);
-    let owner_key_hex = hex::encode(keys.note_recognition_key);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
-    let spend_auth_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
-    let mut policy = request.policy;
-    policy.recipient_owner_public_key =
-        note_recognition_public_key_from_raw_key_hex(&owner_key_hex).map_err(js_error)?;
-    policy.recipient_spend_authority =
-        spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
-    let withdraw_authority =
-        withdraw_authority_from_raw_key_hex(&withdraw_key_hex).map_err(js_error)?;
-    policy.recipient_withdraw_authority = withdraw_authority.clone();
-    policy.recipient_residual_withdraw_authority = withdraw_authority;
-    policy.commitment().map_err(js_error)?;
-    let owner_authorization =
-        sign_managed_maker_policy_authorization(&spend_auth_key_felt, &policy).map_err(js_error)?;
-    to_json(&ManagedMakerAuthorization {
-        policy,
-        owner_authorization,
-    })
-}
-
-#[wasm_bindgen]
-pub fn zylith_wallet_build_delegated_private_order_submission(
+pub fn zylith_wallet_build_private_liquidity_position_open(
     input_json: &str,
 ) -> Result<String, JsValue> {
-    let request: BuildDelegatedPrivateOrderSubmissionRequest = from_json(input_json)?;
-    let expected_delegate =
-        spend_authority_from_spend_auth_key_felt(&request.delegate_private_key_felt)
-            .map_err(js_error)?;
-    if normalize_felt_hex(&expected_delegate).map_err(js_error)?
-        != normalize_felt_hex(
-            &request
-                .managed_maker_authorization
-                .policy
-                .delegate_public_key,
-        )
-        .map_err(js_error)?
-    {
-        return Err(js_error("managed maker delegate key does not match policy"));
+    let request: BuildPrivateLiquidityPositionOpenRequest = from_json(input_json)?;
+    if request.epoch_id == 0 {
+        return Err(js_error("liquidity position epoch must be non-zero"));
     }
-    let funding_notes = if request.funding_notes.is_empty() {
-        vec![request.funding_note.clone()]
-    } else {
-        request.funding_notes.clone()
-    };
-    let funding_commitments = funding_notes
-        .iter()
-        .map(|note| note.commitment())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(js_error)?;
-    let funding_nullifiers = funding_notes
-        .iter()
-        .zip(funding_commitments.iter())
-        .map(|(note, commitment)| nullifier_from_note_secret(commitment, &note.blinding))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(js_error)?;
-    let funding_note_ref = funding_input_set_commitment(&funding_commitments).map_err(js_error)?;
-    let funding_nullifier =
-        funding_nullifier_set_commitment(&funding_nullifiers).map_err(js_error)?;
+    if request.expiry_epoch <= request.epoch_id {
+        return Err(js_error(
+            "liquidity position expiry must be after its open epoch",
+        ));
+    }
+    if request.funding_notes.is_empty() {
+        return Err(js_error(
+            "liquidity position open requires private funding notes",
+        ));
+    }
 
-    let mut order = request.order;
-    let policy = &request.managed_maker_authorization.policy;
-    order.funding_note_ref = funding_note_ref;
-    order.funding_nullifier = funding_nullifier;
-    order.recipient_owner_public_key = policy.recipient_owner_public_key.clone();
-    order.recipient_spend_authority = policy.recipient_spend_authority.clone();
-    order.recipient_withdraw_authority = policy.recipient_withdraw_authority.clone();
-    order.recipient_residual_withdraw_authority =
-        policy.recipient_residual_withdraw_authority.clone();
-    order.auditor_view_allowed = policy.auditor_view_allowed;
-    validate_order_before_signing(&order).map_err(js_error)?;
-    policy.validate_order(&order).map_err(js_error)?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let account_id = derive_account_id(&seed);
+    let owner_key_hex = secret_hex(&keys.note_recognition_key);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
+    let spend_auth_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
+    let owner_authority =
+        liquidity_position_private_authority(&spend_auth_key_felt).map_err(js_error)?;
+    let owner_public_key =
+        note_recognition_public_key_from_raw_key_hex(&owner_key_hex).map_err(js_error)?;
+    let withdraw_authority =
+        withdraw_authority_from_raw_key_hex(&withdraw_key_hex).map_err(js_error)?;
 
-    let order_commitment = order.commitment().map_err(js_error)?;
-    let expected_output_metadata_commitment = output_note_metadata_commitment(
-        &order.batch_id.0,
-        &order_commitment,
-        &order.funding_note_ref,
-        &order.pair_id,
-        &order.recipient_spend_authority,
-        &order.recipient_withdraw_authority,
+    let mut input_base = 0_u128;
+    let mut input_quote = 0_u128;
+    let mut funding_note_commitments = Vec::with_capacity(request.funding_notes.len());
+    for note in &request.funding_notes {
+        note.nullifier(&keys).map_err(js_error)?;
+        if note.owner_public_key != owner_public_key {
+            return Err(js_error(
+                "liquidity position funding note owner does not match wallet",
+            ));
+        }
+        if note.spend_authority != owner_authority {
+            return Err(js_error(
+                "liquidity position funding note spend authority does not match wallet",
+            ));
+        }
+        let note_commitment = note.commitment().map_err(js_error)?;
+        funding_note_commitments.push(note_commitment.0);
+        if note.asset_id == request.base_asset_id {
+            input_base = input_base
+                .checked_add(note.amount)
+                .ok_or_else(|| js_error("liquidity position base input total overflows"))?;
+        } else if note.asset_id == request.quote_asset_id {
+            input_quote = input_quote
+                .checked_add(note.amount)
+                .ok_or_else(|| js_error("liquidity position quote input total overflows"))?;
+        } else {
+            return Err(js_error(
+                "liquidity position funding note asset is not in the pair",
+            ));
+        }
+    }
+    if input_base < request.base_reserve || input_quote < request.quote_reserve {
+        return Err(js_error(
+            "liquidity position funding notes do not cover requested reserves",
+        ));
+    }
+
+    let position_id = tagged_field_hex(
+        "zylith/liquidity-position-id-v1",
+        &serde_json::json!({
+            "account_id": account_id,
+            "pair_id": request.pair_id.0,
+            "batch_id": request.batch_id.0,
+            "epoch_id": request.epoch_id,
+            "position_nonce": request.position_nonce,
+            "funding_note_commitments": funding_note_commitments,
+        }),
     )
     .map_err(js_error)?;
-    let funding_authorization =
-        sign_order_authorization(&request.delegate_private_key_felt, &order_commitment)
-            .map_err(js_error)?;
-    let payload = PrivateOrderPayload {
-        order,
-        funding_note: request.funding_note,
-        funding_notes,
-        funding_authorization,
-        managed_maker_authorization: Some(request.managed_maker_authorization),
-    };
-    let order_submission = build_order_submission(
-        &payload,
-        &request.registry,
-        &request.order_cancellation_key_hex,
+    let position_blinding = tagged_field_hex(
+        "zylith/liquidity-position-blinding-v1",
+        &serde_json::json!({
+            "spend_key": spend_auth_key_felt,
+            "position_id": position_id,
+            "position_nonce": request.position_nonce,
+        }),
     )
     .map_err(js_error)?;
-    let cancellation_secret =
-        derive_order_cancellation_secret(&request.order_cancellation_key_hex, &order_commitment)
-            .map_err(js_error)?;
-    let ingress_request = TrustedOrderIngressRequest {
-        order_submission: order_submission.clone(),
-        renewal_package_id: None,
-        renewal_package_commitment: None,
-        renewal_relay_mode: None,
-        ingress_telemetry: None,
+    let position_metadata_commitment = tagged_field_hex(
+        "zylith/liquidity-position-metadata-v1",
+        &serde_json::json!({
+            "account_id": account_id,
+            "pair_id": request.pair_id.0,
+            "batch_id": request.batch_id.0,
+            "epoch_id": request.epoch_id,
+            "position_nonce": request.position_nonce,
+        }),
+    )
+    .map_err(js_error)?;
+    let position = PrivateLiquidityPosition {
+        version: zylith_core::LIQUIDITY_POSITION_VERSION,
+        position_id,
+        backing: LiquidityPositionBacking::PrivateReserve,
+        status: LiquidityPositionStatus::Active,
+        pair_id: request.pair_id.clone(),
+        base_asset_id: request.base_asset_id.clone(),
+        quote_asset_id: request.quote_asset_id.clone(),
+        owner_authority: owner_authority.clone(),
+        base_reserve: request.base_reserve,
+        quote_reserve: request.quote_reserve,
+        price_lower_bound: request.price_lower_bound,
+        price_upper_bound: request.price_upper_bound,
+        max_fill_base_per_batch: request.max_fill_base_per_batch,
+        curve_policy: request.curve_policy.clone(),
+        oracle_guard: request.oracle_guard.clone(),
+        rotation_policy: request.rotation_policy.clone(),
+        opened_epoch: request.epoch_id,
+        expiry_epoch: request.expiry_epoch,
+        blinding: position_blinding,
+        metadata_commitment: position_metadata_commitment,
+    };
+    let position_commitment = position.commitment().map_err(js_error)?;
+    let transition = liquidity_position_root_transition(
+        LiquidityPositionTransitionKind::Open,
+        None,
+        Some(&position),
+    )
+    .map_err(js_error)?;
+    let authorization = sign_liquidity_position_transition(
+        &spend_auth_key_felt,
+        LiquidityPositionTransitionKind::Open,
+        &position.position_id,
+        None,
+        Some(&position_commitment),
+        request.epoch_id,
+        0,
+        0,
+    )
+    .map_err(js_error)?;
+    let change_note_context = LiquidityPositionOpenChangeNoteContext {
+        seed: &seed,
+        request: &request,
+        owner_public_key: &owner_public_key,
+        spend_authority: &owner_authority,
+        withdraw_authority: &withdraw_authority,
+        position_id: &position.position_id,
+    };
+    let change_notes = build_liquidity_position_open_change_notes(
+        &change_note_context,
+        input_base - request.base_reserve,
+        input_quote - request.quote_reserve,
+    )?;
+    let open_funding = LiquidityPositionOpenFunding {
+        input_notes: request.funding_notes,
+        change_notes: change_notes.clone(),
+        authorization,
+    };
+    open_liquidity_position(&position, &open_funding).map_err(js_error)?;
+
+    let prior_root = request
+        .prior_liquidity_position_root
+        .clone()
+        .unwrap_or_else(|| "0x0".into());
+    let state_update = match request.state_update {
+        Some(update) => {
+            let new_root =
+                verify_liquidity_position_state_update(&prior_root, &update).map_err(js_error)?;
+            if update.prior_commitment.is_some()
+                || update.output_commitment.as_ref() != Some(&position_commitment)
+                || update.position_id != position.position_id
+            {
+                return Err(js_error(
+                    "liquidity position open state witness does not match the position",
+                ));
+            }
+            if new_root == prior_root {
+                return Err(js_error(
+                    "liquidity position open state witness did not advance the root",
+                ));
+            }
+            update
+        }
+        None => {
+            if zylith_core::hash::normalize_felt_hex(&prior_root).map_err(js_error)? != "0x0" {
+                return Err(js_error(
+                    "liquidity position open requires a sparse state witness for non-empty roots",
+                ));
+            }
+            let mut state = LiquidityPositionState::new();
+            let (_empty_root, _new_root, update) = state.open(&position).map_err(js_error)?;
+            update
+        }
+    };
+    let transition_witness = LiquidityPositionTransitionWitness {
+        transition,
+        prior_position: None,
+        output_position: Some(position.clone()),
+        state_update,
+        epoch: request.epoch_id,
+        fill: None,
+        open_funding: Some(open_funding),
+        output_notes: Vec::new(),
+        base_amount: 0,
+        quote_amount: 0,
+        lifecycle_authorization: None,
+    };
+    let transition_commitment =
+        liquidity_position_transition_commitment(&transition_witness).map_err(js_error)?;
+    let lifecycle_id = liquidity_position_lifecycle_id(
+        &request.pair_id,
+        &request.batch_id,
+        request.epoch_id,
+        &transition_commitment,
+    )
+    .map_err(js_error)?;
+    let ingress_request = TrustedLiquidityPositionIngressRequest {
+        pair_id: request.pair_id,
+        batch_id: request.batch_id,
+        epoch_id: request.epoch_id,
+        transition_witness: transition_witness.clone(),
+        ingress_telemetry: empty_order_ingress_telemetry(),
         padding: request.padding,
     };
-    to_json(&BuildPrivateOrderSubmissionResponse {
-        order_commitment,
-        cancellation_secret,
-        expected_output_metadata_commitment,
-        funding_note_commitments: funding_commitments
-            .into_iter()
-            .map(|commitment| commitment.0)
-            .collect(),
-        order_submission,
+
+    to_json(&BuildPrivateLiquidityPositionOpenResponse {
+        lifecycle_id,
+        position,
+        position_commitment,
+        transition_commitment,
+        funding_note_commitments,
+        change_notes,
+        transition_witness,
         ingress_request,
     })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_authorize_liquidity_position_open(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    authorize_liquidity_position_lifecycle(input_json, LiquidityPositionTransitionKind::Open)
+}
+
+struct LiquidityPositionOpenChangeNoteContext<'a> {
+    seed: &'a RecoverySeed,
+    request: &'a BuildPrivateLiquidityPositionOpenRequest,
+    owner_public_key: &'a str,
+    spend_authority: &'a str,
+    withdraw_authority: &'a str,
+    position_id: &'a str,
+}
+
+fn build_liquidity_position_open_change_notes(
+    context: &LiquidityPositionOpenChangeNoteContext<'_>,
+    base_change: u128,
+    quote_change: u128,
+) -> Result<Vec<Note>, JsValue> {
+    let mut notes = Vec::new();
+    if base_change > 0 {
+        notes.push(liquidity_position_open_change_note(
+            context.seed,
+            context.request,
+            &context.request.base_asset_id,
+            base_change,
+            context.owner_public_key,
+            context.spend_authority,
+            context.withdraw_authority,
+            context.position_id,
+            0,
+        )?);
+    }
+    if quote_change > 0 {
+        notes.push(liquidity_position_open_change_note(
+            context.seed,
+            context.request,
+            &context.request.quote_asset_id,
+            quote_change,
+            context.owner_public_key,
+            context.spend_authority,
+            context.withdraw_authority,
+            context.position_id,
+            notes.len() as u64,
+        )?);
+    }
+    Ok(notes)
+}
+
+fn derived_child_note_nonce(parent_nonce: u64, output_index: u64) -> u64 {
+    let nonce = parent_nonce.wrapping_mul(10).wrapping_add(output_index + 1);
+    if nonce == 0 { output_index + 1 } else { nonce }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn liquidity_position_open_change_note(
+    seed: &RecoverySeed,
+    request: &BuildPrivateLiquidityPositionOpenRequest,
+    asset_id: &AssetId,
+    amount: u128,
+    owner_public_key: &str,
+    spend_authority: &str,
+    withdraw_authority: &str,
+    position_id: &str,
+    output_index: u64,
+) -> Result<Note, JsValue> {
+    let nonce = derived_child_note_nonce(request.position_nonce, output_index);
+    let blinding = tagged_field_hex(
+        "zylith/liquidity-position-open-change-blinding-v1",
+        &serde_json::json!({
+            "account_id": derive_account_id(seed),
+            "position_id": position_id,
+            "asset_id": asset_id.0,
+            "amount": amount,
+            "output_index": output_index,
+            "position_nonce": request.position_nonce,
+        }),
+    )
+    .map_err(js_error)?;
+    let metadata_commitment = tagged_field_hex(
+        "zylith/liquidity-position-open-change-metadata-v1",
+        &serde_json::json!({
+            "position_id": position_id,
+            "asset_id": asset_id.0,
+            "amount": amount,
+            "output_index": output_index,
+            "spend_authority": spend_authority,
+            "withdraw_authority": withdraw_authority,
+        }),
+    )
+    .map_err(js_error)?;
+    Ok(Note {
+        asset_id: asset_id.clone(),
+        amount,
+        owner_public_key: owner_public_key.into(),
+        spend_authority: spend_authority.into(),
+        withdraw_authority: withdraw_authority.into(),
+        blinding,
+        nonce,
+        metadata_commitment,
+    })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_prepare_private_liquidity_position_reconfigure(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    let request: PreparePrivateLiquidityPositionReconfigureRequest = from_json(input_json)?;
+    let prepared = prepare_liquidity_position_reconfigure(&request)?;
+    to_json(&prepared)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_build_private_liquidity_position_reconfigure(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    let request: BuildPrivateLiquidityPositionReconfigureRequest = from_json(input_json)?;
+    let prepared = prepare_liquidity_position_reconfigure(&request.lifecycle)?;
+    build_liquidity_position_lifecycle_response(
+        LiquidityPositionTransitionKind::Reconfigure,
+        &request.lifecycle.seed_hex,
+        &request.lifecycle.pair_id,
+        &request.lifecycle.batch_id,
+        request.lifecycle.epoch_id,
+        prepared.prior_position.clone(),
+        prepared.output_position.clone(),
+        Vec::new(),
+        0,
+        0,
+        request.prior_liquidity_position_root,
+        request.state_update,
+        request.padding,
+        prepared.lifecycle_authorization,
+    )
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_prepare_private_liquidity_position_close(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    let request: PreparePrivateLiquidityPositionCloseRequest = from_json(input_json)?;
+    let prepared = prepare_liquidity_position_close(&request)?;
+    to_json(&prepared)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_build_private_liquidity_position_close(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    let request: BuildPrivateLiquidityPositionCloseRequest = from_json(input_json)?;
+    let prepared = prepare_liquidity_position_close(&request.lifecycle)?;
+    build_liquidity_position_lifecycle_response(
+        LiquidityPositionTransitionKind::Close,
+        &request.lifecycle.seed_hex,
+        &request.lifecycle.pair_id,
+        &request.lifecycle.batch_id,
+        request.lifecycle.epoch_id,
+        prepared.prior_position.clone(),
+        None,
+        prepared.output_notes.clone(),
+        0,
+        0,
+        request.prior_liquidity_position_root,
+        request.state_update,
+        request.padding,
+        prepared.lifecycle_authorization,
+    )
+}
+
+fn prepare_liquidity_position_reconfigure(
+    request: &PreparePrivateLiquidityPositionReconfigureRequest,
+) -> Result<PreparedPrivateLiquidityPositionLifecycleResponse, JsValue> {
+    let material = wallet_liquidity_position_material(&request.seed_hex)?;
+    validate_lifecycle_envelope(
+        &request.pair_id,
+        &request.batch_id,
+        request.epoch_id,
+        &request.prior_position,
+        &material,
+    )?;
+    if request.expiry_epoch < request.epoch_id {
+        return Err(js_error(
+            "liquidity position reconfigure expiry must cover the lifecycle epoch",
+        ));
+    }
+    let prior_commitment = request.prior_position.commitment().map_err(js_error)?;
+    let mut output_position = request.prior_position.clone();
+    output_position.price_lower_bound = request.price_lower_bound;
+    output_position.price_upper_bound = request.price_upper_bound;
+    output_position.max_fill_base_per_batch = request.max_fill_base_per_batch;
+    output_position.curve_policy = request.curve_policy.clone();
+    output_position.oracle_guard = request.oracle_guard.clone();
+    output_position.rotation_policy = request.rotation_policy.clone();
+    output_position.expiry_epoch = request.expiry_epoch;
+    output_position.blinding = lifecycle_position_blinding(
+        "reconfigure",
+        &material.account_id,
+        &request.batch_id,
+        request.epoch_id,
+        request.lifecycle_nonce,
+        &request.prior_position,
+        &prior_commitment,
+    )?;
+    output_position.metadata_commitment = lifecycle_position_metadata(
+        "reconfigure",
+        &material.account_id,
+        &request.batch_id,
+        request.epoch_id,
+        request.lifecycle_nonce,
+        &output_position,
+    )?;
+    let output_commitment = output_position.commitment().map_err(js_error)?;
+    let authorization = sign_liquidity_position_transition(
+        &material.spend_auth_key_felt,
+        LiquidityPositionTransitionKind::Reconfigure,
+        &request.prior_position.position_id,
+        Some(&prior_commitment),
+        Some(&output_commitment),
+        request.epoch_id,
+        0,
+        0,
+    )
+    .map_err(js_error)?;
+    reconfigure_liquidity_position(
+        &request.prior_position,
+        &output_position,
+        request.epoch_id,
+        &authorization,
+    )
+    .map_err(js_error)?;
+    Ok(PreparedPrivateLiquidityPositionLifecycleResponse {
+        kind: "reconfigure".into(),
+        position_id: normalize_felt_hex(&request.prior_position.position_id).map_err(js_error)?,
+        prior_position: request.prior_position.clone(),
+        prior_position_commitment: prior_commitment,
+        output_position: Some(output_position),
+        output_position_commitment: Some(output_commitment),
+        output_notes: Vec::new(),
+        base_amount: 0,
+        quote_amount: 0,
+        lifecycle_authorization: authorization,
+    })
+}
+
+fn prepare_liquidity_position_close(
+    request: &PreparePrivateLiquidityPositionCloseRequest,
+) -> Result<PreparedPrivateLiquidityPositionLifecycleResponse, JsValue> {
+    let material = wallet_liquidity_position_material(&request.seed_hex)?;
+    validate_lifecycle_envelope(
+        &request.pair_id,
+        &request.batch_id,
+        request.epoch_id,
+        &request.prior_position,
+        &material,
+    )?;
+    let prior_commitment = request.prior_position.commitment().map_err(js_error)?;
+    let base_amount = request.prior_position.base_reserve;
+    let quote_amount = request.prior_position.quote_reserve;
+    let output_notes = build_liquidity_position_lifecycle_output_notes(
+        "close",
+        &material,
+        &request.batch_id,
+        request.epoch_id,
+        request.lifecycle_nonce,
+        &request.prior_position,
+        base_amount,
+        quote_amount,
+    )?;
+    let authorization = sign_liquidity_position_transition(
+        &material.spend_auth_key_felt,
+        LiquidityPositionTransitionKind::Close,
+        &request.prior_position.position_id,
+        Some(&prior_commitment),
+        None,
+        request.epoch_id,
+        base_amount,
+        quote_amount,
+    )
+    .map_err(js_error)?;
+    close_liquidity_position(
+        &request.prior_position,
+        request.epoch_id,
+        output_notes.clone(),
+        &authorization,
+    )
+    .map_err(js_error)?;
+    Ok(PreparedPrivateLiquidityPositionLifecycleResponse {
+        kind: "close".into(),
+        position_id: normalize_felt_hex(&request.prior_position.position_id).map_err(js_error)?,
+        prior_position: request.prior_position.clone(),
+        prior_position_commitment: prior_commitment,
+        output_position: None,
+        output_position_commitment: None,
+        output_notes,
+        base_amount,
+        quote_amount,
+        lifecycle_authorization: authorization,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_liquidity_position_lifecycle_response(
+    kind: LiquidityPositionTransitionKind,
+    seed_hex: &str,
+    pair_id: &PairId,
+    batch_id: &BatchId,
+    epoch_id: u64,
+    prior_position: PrivateLiquidityPosition,
+    output_position: Option<PrivateLiquidityPosition>,
+    output_notes: Vec<Note>,
+    witness_base_amount: u128,
+    witness_quote_amount: u128,
+    prior_liquidity_position_root: String,
+    state_update: LiquidityPositionStateUpdate,
+    padding: Option<String>,
+    lifecycle_authorization: LiquidityPositionLifecycleAuthorization,
+) -> Result<String, JsValue> {
+    let material = wallet_liquidity_position_material(seed_hex)?;
+    validate_lifecycle_envelope(pair_id, batch_id, epoch_id, &prior_position, &material)?;
+    let transition =
+        liquidity_position_root_transition(kind, Some(&prior_position), output_position.as_ref())
+            .map_err(js_error)?;
+    let prior_root = normalize_felt_hex(&prior_liquidity_position_root).map_err(js_error)?;
+    let new_root =
+        verify_liquidity_position_state_update(&prior_root, &state_update).map_err(js_error)?;
+    if normalize_felt_hex(&state_update.position_id).map_err(js_error)?
+        != normalize_felt_hex(&prior_position.position_id).map_err(js_error)?
+        || state_update.prior_commitment != transition.consumed_position_commitment
+        || state_update.output_commitment != transition.output_position_commitment
+    {
+        return Err(js_error(
+            "liquidity position lifecycle state witness does not match the transition",
+        ));
+    }
+    if new_root == prior_root {
+        return Err(js_error(
+            "liquidity position lifecycle state witness did not advance the root",
+        ));
+    }
+    let transition_witness = LiquidityPositionTransitionWitness {
+        transition,
+        prior_position: Some(prior_position),
+        output_position,
+        state_update,
+        epoch: epoch_id,
+        fill: None,
+        open_funding: None,
+        output_notes,
+        base_amount: witness_base_amount,
+        quote_amount: witness_quote_amount,
+        lifecycle_authorization: Some(lifecycle_authorization),
+    };
+    verify_liquidity_position_transition_witness(&prior_root, &transition_witness)
+        .map_err(js_error)?;
+    let transition_commitment =
+        liquidity_position_transition_commitment(&transition_witness).map_err(js_error)?;
+    let lifecycle_id =
+        liquidity_position_lifecycle_id(pair_id, batch_id, epoch_id, &transition_commitment)
+            .map_err(js_error)?;
+    let ingress_request = TrustedLiquidityPositionIngressRequest {
+        pair_id: pair_id.clone(),
+        batch_id: batch_id.clone(),
+        epoch_id,
+        transition_witness: transition_witness.clone(),
+        ingress_telemetry: empty_order_ingress_telemetry(),
+        padding,
+    };
+    to_json(&BuildPrivateLiquidityPositionLifecycleResponse {
+        lifecycle_id,
+        position_id: normalize_felt_hex(
+            &transition_witness
+                .prior_position
+                .as_ref()
+                .expect("transition witness has prior position")
+                .position_id,
+        )
+        .map_err(js_error)?,
+        prior_position_commitment: transition_witness
+            .transition
+            .consumed_position_commitment
+            .clone()
+            .ok_or_else(|| js_error("liquidity position lifecycle is missing prior commitment"))?,
+        output_position: transition_witness.output_position.clone(),
+        output_position_commitment: transition_witness
+            .transition
+            .output_position_commitment
+            .clone(),
+        transition_commitment,
+        output_notes: transition_witness.output_notes.clone(),
+        transition_witness,
+        ingress_request,
+    })
+}
+
+struct WalletLiquidityPositionMaterial {
+    account_id: String,
+    owner_public_key: String,
+    spend_authority: String,
+    withdraw_authority: String,
+    spend_auth_key_felt: String,
+}
+
+fn wallet_liquidity_position_material(
+    seed_hex: &str,
+) -> Result<WalletLiquidityPositionMaterial, JsValue> {
+    let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let owner_key_hex = secret_hex(&keys.note_recognition_key);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
+    let spend_auth_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
+    let spend_authority =
+        liquidity_position_private_authority(&spend_auth_key_felt).map_err(js_error)?;
+    Ok(WalletLiquidityPositionMaterial {
+        account_id: derive_account_id(&seed),
+        owner_public_key: note_recognition_public_key_from_raw_key_hex(&owner_key_hex)
+            .map_err(js_error)?,
+        spend_authority,
+        withdraw_authority: withdraw_authority_from_raw_key_hex(&withdraw_key_hex)
+            .map_err(js_error)?,
+        spend_auth_key_felt,
+    })
+}
+
+fn validate_lifecycle_envelope(
+    pair_id: &PairId,
+    batch_id: &BatchId,
+    epoch_id: u64,
+    prior_position: &PrivateLiquidityPosition,
+    material: &WalletLiquidityPositionMaterial,
+) -> Result<(), JsValue> {
+    if epoch_id == 0 {
+        return Err(js_error(
+            "liquidity position lifecycle epoch must be non-zero",
+        ));
+    }
+    if batch_id.0.trim().is_empty() {
+        return Err(js_error(
+            "liquidity position lifecycle batch id is required",
+        ));
+    }
+    if &prior_position.pair_id != pair_id {
+        return Err(js_error(
+            "liquidity position lifecycle pair does not match the prior position",
+        ));
+    }
+    if epoch_id < prior_position.opened_epoch {
+        return Err(js_error(
+            "liquidity position lifecycle epoch is before the position opened",
+        ));
+    }
+    if normalize_felt_hex(&prior_position.owner_authority).map_err(js_error)?
+        != normalize_felt_hex(&material.spend_authority).map_err(js_error)?
+    {
+        return Err(js_error(
+            "liquidity position lifecycle prior position is not owned by this wallet",
+        ));
+    }
+    prior_position.validate().map_err(js_error)
+}
+
+fn lifecycle_position_blinding(
+    kind: &str,
+    account_id: &str,
+    batch_id: &BatchId,
+    epoch_id: u64,
+    lifecycle_nonce: u64,
+    prior_position: &PrivateLiquidityPosition,
+    prior_commitment: &LiquidityPositionCommitment,
+) -> Result<String, JsValue> {
+    tagged_field_hex(
+        "zylith/liquidity-position-lifecycle-blinding-v1",
+        &serde_json::json!({
+            "kind": kind,
+            "account_id": account_id,
+            "batch_id": batch_id.0,
+            "epoch_id": epoch_id,
+            "lifecycle_nonce": lifecycle_nonce,
+            "position_id": &prior_position.position_id,
+            "prior_commitment": prior_commitment.0,
+        }),
+    )
+    .map_err(js_error)
+}
+
+fn lifecycle_position_metadata(
+    kind: &str,
+    account_id: &str,
+    batch_id: &BatchId,
+    epoch_id: u64,
+    lifecycle_nonce: u64,
+    output_position: &PrivateLiquidityPosition,
+) -> Result<String, JsValue> {
+    tagged_field_hex(
+        "zylith/liquidity-position-lifecycle-metadata-v1",
+        &serde_json::json!({
+            "kind": kind,
+            "account_id": account_id,
+            "batch_id": batch_id.0,
+            "epoch_id": epoch_id,
+            "lifecycle_nonce": lifecycle_nonce,
+            "position_id": &output_position.position_id,
+            "price_lower_bound": output_position.price_lower_bound.to_string(),
+            "price_upper_bound": output_position.price_upper_bound.to_string(),
+            "max_fill_base_per_batch": output_position.max_fill_base_per_batch.to_string(),
+            "expiry_epoch": output_position.expiry_epoch,
+        }),
+    )
+    .map_err(js_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_liquidity_position_lifecycle_output_notes(
+    kind: &str,
+    material: &WalletLiquidityPositionMaterial,
+    batch_id: &BatchId,
+    epoch_id: u64,
+    lifecycle_nonce: u64,
+    position: &PrivateLiquidityPosition,
+    base_amount: u128,
+    quote_amount: u128,
+) -> Result<Vec<Note>, JsValue> {
+    let mut notes = Vec::new();
+    if base_amount > 0 {
+        notes.push(liquidity_position_lifecycle_output_note(
+            kind,
+            material,
+            batch_id,
+            epoch_id,
+            lifecycle_nonce,
+            position,
+            &position.base_asset_id,
+            base_amount,
+            0,
+        )?);
+    }
+    if quote_amount > 0 {
+        notes.push(liquidity_position_lifecycle_output_note(
+            kind,
+            material,
+            batch_id,
+            epoch_id,
+            lifecycle_nonce,
+            position,
+            &position.quote_asset_id,
+            quote_amount,
+            notes.len() as u64,
+        )?);
+    }
+    Ok(notes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn liquidity_position_lifecycle_output_note(
+    kind: &str,
+    material: &WalletLiquidityPositionMaterial,
+    batch_id: &BatchId,
+    epoch_id: u64,
+    lifecycle_nonce: u64,
+    position: &PrivateLiquidityPosition,
+    asset_id: &AssetId,
+    amount: u128,
+    output_index: u64,
+) -> Result<Note, JsValue> {
+    let nonce = derived_child_note_nonce(lifecycle_nonce, output_index);
+    let position_commitment = position.commitment().map_err(js_error)?;
+    let blinding = tagged_field_hex(
+        "zylith/liquidity-position-lifecycle-output-blinding-v1",
+        &serde_json::json!({
+            "kind": kind,
+            "account_id": &material.account_id,
+            "batch_id": batch_id.0,
+            "epoch_id": epoch_id,
+            "lifecycle_nonce": lifecycle_nonce,
+            "position_id": &position.position_id,
+            "position_commitment": position_commitment.0,
+            "asset_id": asset_id.0,
+            "amount": amount.to_string(),
+            "output_index": output_index,
+        }),
+    )
+    .map_err(js_error)?;
+    let metadata_commitment = tagged_field_hex(
+        "zylith/liquidity-position-lifecycle-output-metadata-v1",
+        &serde_json::json!({
+            "kind": kind,
+            "position_id": &position.position_id,
+            "asset_id": asset_id.0,
+            "amount": amount.to_string(),
+            "output_index": output_index,
+            "spend_authority": &material.spend_authority,
+            "withdraw_authority": &material.withdraw_authority,
+        }),
+    )
+    .map_err(js_error)?;
+    Ok(Note {
+        asset_id: asset_id.clone(),
+        amount,
+        owner_public_key: material.owner_public_key.clone(),
+        spend_authority: material.spend_authority.clone(),
+        withdraw_authority: material.withdraw_authority.clone(),
+        blinding,
+        nonce,
+        metadata_commitment,
+    })
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_authorize_liquidity_position_reconfigure(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    authorize_liquidity_position_lifecycle(input_json, LiquidityPositionTransitionKind::Reconfigure)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_authorize_liquidity_position_close(
+    input_json: &str,
+) -> Result<String, JsValue> {
+    authorize_liquidity_position_lifecycle(input_json, LiquidityPositionTransitionKind::Close)
+}
+
+fn authorize_liquidity_position_lifecycle(
+    input_json: &str,
+    kind: LiquidityPositionTransitionKind,
+) -> Result<String, JsValue> {
+    let request: AuthorizeLiquidityPositionLifecycleRequest = from_json(input_json)?;
+    validate_liquidity_position_lifecycle_request(&kind, &request)?;
+    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
+    let keys = derive_user_keys(&seed);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let spend_auth_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
+    let authorization = sign_liquidity_position_transition(
+        &spend_auth_key_felt,
+        kind,
+        &request.position_id,
+        request.prior_position_commitment.as_ref(),
+        request.output_position_commitment.as_ref(),
+        request.epoch,
+        request.base_amount,
+        request.quote_amount,
+    )
+    .map_err(js_error)?;
+    to_json(&authorization)
+}
+
+fn validate_liquidity_position_lifecycle_request(
+    kind: &LiquidityPositionTransitionKind,
+    request: &AuthorizeLiquidityPositionLifecycleRequest,
+) -> Result<(), JsValue> {
+    let has_prior = request.prior_position_commitment.is_some();
+    let has_output = request.output_position_commitment.is_some();
+    let has_amount = request.base_amount > 0 || request.quote_amount > 0;
+    match kind {
+        LiquidityPositionTransitionKind::Open => {
+            if has_prior || !has_output {
+                return Err(js_error(
+                    "liquidity position open requires only an output position commitment",
+                ));
+            }
+            if has_amount {
+                return Err(js_error(
+                    "liquidity position open authorization amounts must be zero",
+                ));
+            }
+        }
+        LiquidityPositionTransitionKind::Reconfigure => {
+            if !has_prior || !has_output {
+                return Err(js_error(
+                    "liquidity position reconfigure requires prior and output commitments",
+                ));
+            }
+            if has_amount {
+                return Err(js_error(
+                    "liquidity position reconfigure authorization amounts must be zero",
+                ));
+            }
+        }
+        LiquidityPositionTransitionKind::Close => {
+            if !has_prior || has_output {
+                return Err(js_error(
+                    "liquidity position close requires only a prior position commitment",
+                ));
+            }
+        }
+        LiquidityPositionTransitionKind::Update => {
+            return Err(js_error(
+                "liquidity position auction fills are protocol-derived and are not wallet lifecycle actions",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[wasm_bindgen]
@@ -328,7 +1150,7 @@ pub fn zylith_wallet_build_strategy_parent(input_json: &str) -> Result<String, J
     let request: BuildStrategyParentRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let order_cancel_key_hex = hex::encode(keys.order_cancellation_key);
+    let order_cancel_key_hex = secret_hex(&keys.order_cancellation_key);
     let parent_secret_commitment =
         renewal_parent_secret_commitment(&request.parent_authorization_secret).map_err(js_error)?;
     let parent_cancel_authority = renewal_cancel_authority_for_parent_from_raw_key_hex(
@@ -354,7 +1176,7 @@ pub fn zylith_wallet_build_renewal_parent_cancel_submission_plan(
     let request: BuildRenewalParentCancelSubmissionPlanRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let order_cancel_key_hex = hex::encode(keys.order_cancellation_key);
+    let order_cancel_key_hex = secret_hex(&keys.order_cancellation_key);
     let renewal_cancel_auth_key = renewal_cancel_auth_key_felt_for_parent_from_raw_key_hex(
         &order_cancel_key_hex,
         &request.parent_secret_commitment,
@@ -379,7 +1201,7 @@ pub fn zylith_wallet_sign_renewal_relay_package_authorization(
     let request: BuildRenewalRelayPackageAuthorizationRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let order_cancel_key_hex = hex::encode(keys.order_cancellation_key);
+    let order_cancel_key_hex = secret_hex(&keys.order_cancellation_key);
     let parent_cancel_authority = renewal_cancel_authority_for_parent_from_raw_key_hex(
         &order_cancel_key_hex,
         &request.parent_secret_commitment,
@@ -469,9 +1291,9 @@ pub fn zylith_wallet_build_note_consolidation_draft(input_json: &str) -> Result<
         .collect::<Result<Vec<_>, _>>()?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let owner_key_hex = hex::encode(keys.note_recognition_key);
-    let spend_key_hex = hex::encode(keys.spend_auth_key);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let owner_key_hex = secret_hex(&keys.note_recognition_key);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
     let owner_public_key =
         note_recognition_public_key_from_raw_key_hex(&owner_key_hex).map_err(js_error)?;
     let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
@@ -645,9 +1467,9 @@ pub fn zylith_wallet_sign_note_consolidation_witness(input_json: &str) -> Result
     let request: SignNoteConsolidationWitnessRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let spend_key_felt = spend_auth_key_felt_from_raw_key_hex(&hex::encode(keys.spend_auth_key));
-    let spend_authority =
-        spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key)).map_err(js_error)?;
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let spend_key_felt = spend_auth_key_felt_from_raw_key_hex(&spend_key_hex);
+    let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
     let mut witness = request.witness;
     validate_note_consolidation_witness_intent(
         &witness,
@@ -684,11 +1506,26 @@ pub fn zylith_wallet_output_recovery_key_tags(
     batch_id: &str,
     max_output_count: u32,
 ) -> Result<String, JsValue> {
+    zylith_wallet_output_recovery_key_tags_range(seed_hex, batch_id, 0, max_output_count)
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_output_recovery_key_tags_range(
+    seed_hex: &str,
+    batch_id: &str,
+    start_output_index: u32,
+    output_count: u32,
+) -> Result<String, JsValue> {
+    if output_count > MAX_OUTPUT_RECOVERY_KEY_TAGS_PER_CALL {
+        return Err(js_error("too many output recovery key tags requested"));
+    }
     let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let spend_authority =
-        spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key)).map_err(js_error)?;
-    let key_tags = (0..max_output_count as usize)
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
+    let start = start_output_index as usize;
+    let count = output_count as usize;
+    let key_tags = (start..start + count)
         .map(|output_index| {
             output_recovery_key_tag_for_spend_authority(&spend_authority, batch_id, output_index)
         })
@@ -707,12 +1544,12 @@ pub fn zylith_wallet_decrypt_output_recovery_record(
 ) -> Result<String, JsValue> {
     let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let note_recognition_key_hex = hex::encode(keys.note_recognition_key);
+    let note_recognition_key_hex = secret_hex(&keys.note_recognition_key);
     let note_owner_public_key =
         note_recognition_public_key_from_raw_key_hex(&note_recognition_key_hex)
             .map_err(js_error)?;
-    let spend_authority =
-        spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key)).map_err(js_error)?;
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
     let record: OutputRecoveryRecord = from_json(record_json)?;
     let payload = decrypt_output_recovery_record(
         &spend_authority,
@@ -741,12 +1578,12 @@ fn scan_output_bundle(
 ) -> Result<String, JsValue> {
     let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let note_recognition_key_hex = hex::encode(keys.note_recognition_key);
+    let note_recognition_key_hex = secret_hex(&keys.note_recognition_key);
     let note_owner_public_key =
         note_recognition_public_key_from_raw_key_hex(&note_recognition_key_hex)
             .map_err(js_error)?;
-    let spend_authority =
-        spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key)).map_err(js_error)?;
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let spend_authority = spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?;
     let bundle: OutputCiphertextBundle = from_json(bundle_json)?;
     let mut notes = Vec::new();
     for (output_index, ciphertext) in bundle.ciphertexts.iter().enumerate() {
@@ -818,36 +1655,18 @@ pub fn zylith_wallet_decrypt_recovery_artifact(
 }
 
 #[wasm_bindgen]
-pub fn zylith_wallet_decrypt_maker_attribution_artifact(
+pub fn zylith_wallet_decrypt_liquidity_attribution_artifact(
     seed_hex: &str,
     artifact_json: &str,
 ) -> Result<String, JsValue> {
     let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let note_recognition_key_hex = hex::encode(keys.note_recognition_key);
-    let artifact: EncryptedMakerAttributionArtifact = from_json(artifact_json)?;
-    let payload = decrypt_maker_attribution_artifact(&note_recognition_key_hex, &artifact)
+    let note_recognition_key_hex = secret_hex(&keys.note_recognition_key);
+    let artifact: EncryptedLiquidityAttributionArtifact = from_json(artifact_json)?;
+    let payload = decrypt_liquidity_attribution_artifact(&note_recognition_key_hex, &artifact)
         .map_err(js_error)?
-        .ok_or_else(|| js_error("maker attribution artifact does not belong to this wallet"))?;
+        .ok_or_else(|| js_error("liquidity attribution artifact does not belong to this wallet"))?;
     to_json(&payload)
-}
-
-#[wasm_bindgen]
-pub fn zylith_wallet_build_withdrawal_submission_plan(input_json: &str) -> Result<String, JsValue> {
-    let request: BuildWithdrawalSubmissionPlanRequest = from_json(input_json)?;
-    let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
-    let keys = derive_user_keys(&seed);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
-    let withdraw_auth_key_felt = withdraw_auth_key_felt_from_raw_key_hex(&withdraw_key_hex);
-    let plan = build_withdrawal_submission_plan(
-        &request.note_commitment,
-        &withdraw_auth_key_felt,
-        &request.recipient,
-        &request.shielded_asset_adapter_address,
-        &request.chain_id,
-    )
-    .map_err(js_error)?;
-    to_json(&plan)
 }
 
 #[wasm_bindgen]
@@ -857,7 +1676,7 @@ pub fn zylith_wallet_build_settlement_output_withdrawal_submission_plan(
     let request: BuildSettlementOutputWithdrawalSubmissionPlanRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
     let withdraw_auth_key_felt = withdraw_auth_key_felt_from_raw_key_hex(&withdraw_key_hex);
     let plan =
         build_settlement_output_withdrawal_submission_plan(SettlementOutputWithdrawalPlanRequest {
@@ -871,8 +1690,7 @@ pub fn zylith_wallet_build_settlement_output_withdrawal_submission_plan(
             new_nullifier_root: &request.new_nullifier_root,
             proof_artifact_commitment: &request.proof_artifact_commitment,
             withdraw_auth_key_felt: &withdraw_auth_key_felt,
-            recipient: &request.recipient,
-            strk20_exit_commitment: request.strk20_exit_commitment.as_deref(),
+            strk20_exit_commitment: &request.strk20_exit_commitment,
             auction_verifier_address: &request.auction_verifier_address,
             shielded_asset_adapter_address: &request.shielded_asset_adapter_address,
             chain_id: &request.chain_id,
@@ -888,7 +1706,7 @@ pub fn zylith_wallet_sign_settlement_output_withdrawal_witness(
     let request: SignSettlementOutputWithdrawalWitnessRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
     let withdraw_auth_key_felt = withdraw_auth_key_felt_from_raw_key_hex(&withdraw_key_hex);
     let withdraw_authority =
         withdraw_authority_from_raw_key_hex(&withdraw_key_hex).map_err(js_error)?;
@@ -909,7 +1727,7 @@ pub fn zylith_wallet_sign_strk20_exit_claim(input_json: &str) -> Result<String, 
     let request: SignStrk20ExitClaimRequest = from_json(input_json)?;
     let seed = RecoverySeed::from_hex(&request.seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
     let withdraw_auth_key_felt = withdraw_auth_key_felt_from_raw_key_hex(&withdraw_key_hex);
     let signed = sign_strk20_exit_claim_authorization(
         &withdraw_auth_key_felt,
@@ -1038,24 +1856,10 @@ fn validate_settlement_output_withdrawal_witness_intent(
         "withdrawal witness changed chain id",
     )?;
     ensure_normalized_eq(
-        &witness.recipient,
-        &expected.recipient,
-        "withdrawal witness changed recipient",
+        &witness.strk20_exit_commitment,
+        &expected.strk20_exit_commitment,
+        "withdrawal witness changed STRK20 exit commitment",
     )?;
-    match (
-        witness.strk20_exit_commitment.as_ref(),
-        expected.strk20_exit_commitment.as_ref(),
-    ) {
-        (Some(actual), Some(expected_exit)) => ensure_normalized_eq(
-            actual,
-            expected_exit,
-            "withdrawal witness changed STRK20 exit commitment",
-        )?,
-        (None, None) => {}
-        _ => {
-            return Err(js_error("withdrawal witness changed STRK20 exit mode"));
-        }
-    }
     ensure_output_matches(
         &witness.output_note,
         &expected.output_note,
@@ -1207,9 +2011,9 @@ fn ensure_output_matches(
 fn derive_public_config(seed_hex: &str) -> Result<WalletPublicConfig, JsValue> {
     let seed = RecoverySeed::from_hex(seed_hex).map_err(js_error)?;
     let keys = derive_user_keys(&seed);
-    let spend_key_hex = hex::encode(keys.spend_auth_key);
-    let note_key_hex = hex::encode(keys.note_recognition_key);
-    let withdraw_key_hex = hex::encode(keys.withdraw_auth_key);
+    let spend_key_hex = secret_hex(&keys.spend_auth_key);
+    let note_key_hex = secret_hex(&keys.note_recognition_key);
+    let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
     Ok(WalletPublicConfig {
         account_id: derive_account_id(&seed),
         spend_authority: spend_authority_from_raw_key_hex(&spend_key_hex).map_err(js_error)?,
@@ -1249,6 +2053,7 @@ fn renewal_package_commitment_from_json(package: &serde_json::Value) -> Result<S
         .ok_or_else(|| "renewal package must be an object".to_string())?;
     object.remove("package_commitment");
     object.remove("relay_authorization");
+    object.remove("access_token");
     let canonical = stable_json_string(&value)?;
     let digest = Sha256::digest(canonical.as_bytes());
     Ok(format!("0x{}", hex::encode(digest)))
@@ -1407,6 +2212,7 @@ mod u64_decimal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalletPublicConfig {
     pub account_id: String,
     pub spend_authority: String,
@@ -1414,7 +2220,8 @@ pub struct WalletPublicConfig {
     pub withdraw_authority: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildDepositSubmissionPlanRequest {
     pub seed_hex: String,
     pub asset_id: AssetId,
@@ -1427,39 +2234,177 @@ pub struct BuildDepositSubmissionPlanRequest {
     pub shielded_asset_adapter_address: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildPrivateOrderSubmissionRequest {
     pub seed_hex: String,
     pub registry: PrivateExecutionKeyRegistry,
-    pub funding_note: Note,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub funding_notes: Vec<Note>,
     pub order: OrderIntent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub padding: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AuthorizeManagedMakerPolicyRequest {
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPrivateLiquidityPositionOpenRequest {
     pub seed_hex: String,
-    pub policy: ManagedMakerPolicy,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BuildDelegatedPrivateOrderSubmissionRequest {
-    pub delegate_private_key_felt: String,
-    pub order_cancellation_key_hex: String,
-    pub managed_maker_authorization: ManagedMakerAuthorization,
-    pub registry: PrivateExecutionKeyRegistry,
-    pub funding_note: Note,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pair_id: PairId,
+    pub batch_id: BatchId,
+    #[serde(with = "u64_decimal")]
+    pub epoch_id: u64,
     pub funding_notes: Vec<Note>,
-    pub order: OrderIntent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_asset_id: AssetId,
+    pub quote_asset_id: AssetId,
+    #[serde(with = "u128_decimal")]
+    pub base_reserve: u128,
+    #[serde(with = "u128_decimal")]
+    pub quote_reserve: u128,
+    #[serde(with = "u128_decimal")]
+    pub price_lower_bound: u128,
+    #[serde(with = "u128_decimal")]
+    pub price_upper_bound: u128,
+    #[serde(with = "u128_decimal")]
+    pub max_fill_base_per_batch: u128,
+    pub curve_policy: LiquidityPositionCurvePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle_guard: Option<LiquidityPositionOracleGuard>,
+    pub rotation_policy: LiquidityPositionRotationPolicy,
+    #[serde(with = "u64_decimal")]
+    pub expiry_epoch: u64,
+    #[serde(with = "u64_decimal")]
+    pub position_nonce: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_liquidity_position_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_update: Option<LiquidityPositionStateUpdate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub padding: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
+pub struct BuildPrivateLiquidityPositionOpenResponse {
+    pub lifecycle_id: String,
+    pub position: PrivateLiquidityPosition,
+    pub position_commitment: LiquidityPositionCommitment,
+    pub transition_commitment: String,
+    pub funding_note_commitments: Vec<String>,
+    pub change_notes: Vec<Note>,
+    pub transition_witness: LiquidityPositionTransitionWitness,
+    pub ingress_request: TrustedLiquidityPositionIngressRequest,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparePrivateLiquidityPositionReconfigureRequest {
+    pub seed_hex: String,
+    pub pair_id: PairId,
+    pub batch_id: BatchId,
+    #[serde(with = "u64_decimal")]
+    pub epoch_id: u64,
+    pub prior_position: PrivateLiquidityPosition,
+    #[serde(with = "u128_decimal")]
+    pub price_lower_bound: u128,
+    #[serde(with = "u128_decimal")]
+    pub price_upper_bound: u128,
+    #[serde(with = "u128_decimal")]
+    pub max_fill_base_per_batch: u128,
+    pub curve_policy: LiquidityPositionCurvePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle_guard: Option<LiquidityPositionOracleGuard>,
+    pub rotation_policy: LiquidityPositionRotationPolicy,
+    #[serde(with = "u64_decimal")]
+    pub expiry_epoch: u64,
+    #[serde(with = "u64_decimal")]
+    pub lifecycle_nonce: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPrivateLiquidityPositionReconfigureRequest {
+    #[serde(flatten)]
+    pub lifecycle: PreparePrivateLiquidityPositionReconfigureRequest,
+    pub prior_liquidity_position_root: String,
+    pub state_update: LiquidityPositionStateUpdate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub padding: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparePrivateLiquidityPositionCloseRequest {
+    pub seed_hex: String,
+    pub pair_id: PairId,
+    pub batch_id: BatchId,
+    #[serde(with = "u64_decimal")]
+    pub epoch_id: u64,
+    pub prior_position: PrivateLiquidityPosition,
+    #[serde(with = "u64_decimal")]
+    pub lifecycle_nonce: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPrivateLiquidityPositionCloseRequest {
+    #[serde(flatten)]
+    pub lifecycle: PreparePrivateLiquidityPositionCloseRequest,
+    pub prior_liquidity_position_root: String,
+    pub state_update: LiquidityPositionStateUpdate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub padding: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PreparedPrivateLiquidityPositionLifecycleResponse {
+    pub kind: String,
+    pub position_id: String,
+    pub prior_position: PrivateLiquidityPosition,
+    pub prior_position_commitment: LiquidityPositionCommitment,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_position: Option<PrivateLiquidityPosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_position_commitment: Option<LiquidityPositionCommitment>,
+    pub output_notes: Vec<Note>,
+    #[serde(with = "u128_decimal")]
+    pub base_amount: u128,
+    #[serde(with = "u128_decimal")]
+    pub quote_amount: u128,
+    pub lifecycle_authorization: LiquidityPositionLifecycleAuthorization,
+}
+
+#[derive(Clone, Serialize)]
+pub struct BuildPrivateLiquidityPositionLifecycleResponse {
+    pub lifecycle_id: String,
+    pub position_id: String,
+    pub prior_position_commitment: LiquidityPositionCommitment,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_position: Option<PrivateLiquidityPosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_position_commitment: Option<LiquidityPositionCommitment>,
+    pub transition_commitment: String,
+    pub output_notes: Vec<Note>,
+    pub transition_witness: LiquidityPositionTransitionWitness,
+    pub ingress_request: TrustedLiquidityPositionIngressRequest,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizeLiquidityPositionLifecycleRequest {
+    pub seed_hex: String,
+    pub position_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_position_commitment: Option<LiquidityPositionCommitment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_position_commitment: Option<LiquidityPositionCommitment>,
+    #[serde(with = "u64_decimal")]
+    pub epoch: u64,
+    #[serde(with = "u128_decimal")]
+    pub base_amount: u128,
+    #[serde(with = "u128_decimal")]
+    pub quote_amount: u128,
+}
+
+#[derive(Clone, Serialize)]
 pub struct BuildPrivateOrderSubmissionResponse {
     pub order_commitment: OrderCommitment,
     pub cancellation_secret: String,
@@ -1469,13 +2414,14 @@ pub struct BuildPrivateOrderSubmissionResponse {
     pub ingress_request: TrustedOrderIngressRequest,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildStrategyParentRequest {
     pub seed_hex: String,
     pub parent_authorization_secret: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct BuildStrategyParentResponse {
     pub parent_authorization_secret: String,
     pub parent_secret_commitment: String,
@@ -1483,20 +2429,20 @@ pub struct BuildStrategyParentResponse {
     pub parent_order_commitment: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildRenewalParentCancelSubmissionPlanRequest {
     pub seed_hex: String,
     pub chain_id: String,
     pub auction_verifier_address: String,
     pub parent_secret_commitment: String,
     pub parent_cancel_authority: String,
-    #[serde(default)]
     pub prior_renewal_entries: Vec<String>,
-    #[serde(default)]
     pub renewal_cancel_sparse_witness: Option<zylith_core::NullifierSparseUpdateWitness>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildRenewalRelayPackageAuthorizationRequest {
     pub seed_hex: String,
     pub package_commitment: String,
@@ -1505,22 +2451,24 @@ pub struct BuildRenewalRelayPackageAuthorizationRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildRenewalRelayPackageAuthorizationResponse {
     pub signer_public_key: String,
     pub signature_r: String,
     pub signature_s: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildNoteConsolidationDraftRequest {
     pub seed_hex: String,
     pub consolidation_id: BatchId,
     pub input_notes: Vec<Note>,
-    #[serde(default)]
     pub target_amounts: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildNoteConsolidationDraftResponse {
     pub consolidation_id: BatchId,
     pub input_notes: Vec<Note>,
@@ -1534,14 +2482,16 @@ pub struct BuildNoteConsolidationDraftResponse {
     pub outputs: Vec<ScannedNote>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignNoteConsolidationWitnessRequest {
     pub seed_hex: String,
     pub expected_draft: BuildNoteConsolidationDraftResponse,
     pub witness: NoteConsolidationWitness,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateRecoverySnapshotRequest {
     pub seed_hex: String,
     pub sequence: u64,
@@ -1549,7 +2499,8 @@ pub struct CreateRecoverySnapshotRequest {
     pub payload_json: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScannedNote {
     pub batch_id: BatchId,
     pub note_commitment: String,
@@ -1558,26 +2509,20 @@ pub struct ScannedNote {
     pub output_proof: OutputNoteMerkleProof,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScannedNoteList {
     pub notes: Vec<ScannedNote>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputRecoveryKeyTagList {
     pub key_tags: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BuildWithdrawalSubmissionPlanRequest {
-    pub seed_hex: String,
-    pub note_commitment: String,
-    pub recipient: String,
-    pub shielded_asset_adapter_address: String,
-    pub chain_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildSettlementOutputWithdrawalSubmissionPlanRequest {
     pub seed_hex: String,
     pub batch_id: BatchId,
@@ -1585,28 +2530,26 @@ pub struct BuildSettlementOutputWithdrawalSubmissionPlanRequest {
     pub output_note_preimage: Note,
     pub output_proof: OutputNoteMerkleProof,
     pub prior_nullifier_root: String,
-    #[serde(default)]
     pub nullifier_history: Vec<NullifierHistoryBatch>,
-    #[serde(default)]
     pub nullifier_sparse_witness: Option<NullifierSparseUpdateWitness>,
     pub new_nullifier_root: String,
     pub proof_artifact_commitment: String,
-    pub recipient: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strk20_exit_commitment: Option<String>,
+    pub strk20_exit_commitment: String,
     pub auction_verifier_address: String,
     pub shielded_asset_adapter_address: String,
     pub chain_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignSettlementOutputWithdrawalWitnessRequest {
     pub seed_hex: String,
     pub expected: ExpectedSettlementOutputWithdrawalWitness,
     pub witness: SettlementOutputWithdrawalWitness,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SignStrk20ExitClaimRequest {
     pub seed_hex: String,
     pub chain_id: String,
@@ -1620,15 +2563,14 @@ pub struct SignStrk20ExitClaimRequest {
     pub open_note_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExpectedSettlementOutputWithdrawalWitness {
     pub batch_id: BatchId,
     pub output_note: OutputNoteRecord,
     pub output_note_preimage: Note,
     pub output_proof: OutputNoteMerkleProof,
-    pub recipient: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strk20_exit_commitment: Option<String>,
+    pub strk20_exit_commitment: String,
     pub auction_verifier_address: String,
     pub shielded_asset_adapter_address: String,
     pub chain_id: String,
@@ -1637,7 +2579,6 @@ pub struct ExpectedSettlementOutputWithdrawalWitness {
 #[allow(dead_code)]
 fn _assert_wasm_return_types(
     _: DepositSubmissionPlan,
-    _: WithdrawalSubmissionPlan,
     _: SettlementOutputWithdrawalSubmissionPlan,
     _: RenewalParentCancelSubmissionPlan,
     _: SpendAuthorization,
@@ -1647,34 +2588,212 @@ fn _assert_wasm_return_types(
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorizeManagedMakerPolicyRequest, BuildDelegatedPrivateOrderSubmissionRequest,
+        AuthorizeLiquidityPositionLifecycleRequest, BuildNoteConsolidationDraftRequest,
         BuildNoteConsolidationDraftResponse, BuildPrivateOrderSubmissionRequest,
-        derive_public_config, renewal_package_commitment_from_json, validate_order_before_signing,
-        verify_renewal_relay_package_value, zylith_wallet_authorize_managed_maker_policy,
-        zylith_wallet_build_delegated_private_order_submission,
+        BuildRenewalParentCancelSubmissionPlanRequest,
+        BuildRenewalRelayPackageAuthorizationResponse,
+        BuildSettlementOutputWithdrawalSubmissionPlanRequest, BuildStrategyParentRequest,
+        SignStrk20ExitClaimRequest, derive_public_config, renewal_package_commitment_from_json,
+        secret_hex, validate_order_before_signing, verify_renewal_relay_package_value,
+        zylith_wallet_authorize_liquidity_position_close,
+        zylith_wallet_authorize_liquidity_position_open,
         zylith_wallet_build_deposit_submission_plan, zylith_wallet_build_note_consolidation_draft,
+        zylith_wallet_build_private_liquidity_position_close,
+        zylith_wallet_build_private_liquidity_position_open,
+        zylith_wallet_build_private_liquidity_position_reconfigure,
         zylith_wallet_build_private_order_submission, zylith_wallet_build_strategy_parent,
         zylith_wallet_create_recovery_snapshot, zylith_wallet_decrypt_recovery_artifact,
-        zylith_wallet_generate_mnemonic, zylith_wallet_mnemonic_to_seed_hex,
+        zylith_wallet_output_recovery_key_tags, zylith_wallet_output_recovery_key_tags_range,
+        zylith_wallet_prepare_private_liquidity_position_close,
+        zylith_wallet_prepare_private_liquidity_position_reconfigure,
         zylith_wallet_recovery_auth_tag, zylith_wallet_scan_output_bundle,
-        zylith_wallet_seed_hex_to_mnemonic, zylith_wallet_sign_note_consolidation_witness,
+        zylith_wallet_sign_note_consolidation_witness,
         zylith_wallet_sign_renewal_relay_package_authorization,
         zylith_wallet_sign_settlement_output_withdrawal_witness,
         zylith_wallet_sign_strk20_exit_claim, zylith_wallet_verify_renewal_relay_package,
     };
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use zylith_core::{
-        AssetId, BatchId, ConsumedInput, HiddenMakerCurve, MakerCurvePoint,
-        ManagedMakerAuthorization, ManagedMakerPolicy, Note, NoteCommitment,
-        NoteConsolidationWitness, Nullifier, OrderIntent, OrderSide, OrderType,
-        OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord, PairId,
-        PrivateExecutionKeyPublicConfig, PrivateExecutionKeyRegistry, RecoverySeed, RelayMode,
+        AssetId, BatchId, ConsumedInput, LiquidityPositionBacking, LiquidityPositionCommitment,
+        LiquidityPositionCurveKind, LiquidityPositionCurvePolicy,
+        LiquidityPositionLifecycleAuthorization, LiquidityPositionRotationPolicy,
+        LiquidityPositionState, LiquidityPositionStatus, LiquidityPositionTransitionKind,
+        LiquidityPositionTransitionWitness, Note, NoteCommitment, NoteConsolidationWitness,
+        Nullifier, OrderIntent, OrderSide, OrderType, OutputCiphertextBundle,
+        OutputNoteMerkleProof, OutputNoteRecord, PairId, PrivateExecutionKeyPublicConfig,
+        PrivateExecutionKeyRegistry, PrivateLiquidityPosition, RecoverySeed, RelayMode,
         SettlementOutputWithdrawalWitness, SpendAuthorization, TimeInForce, deposit_root_from_note,
-        derive_user_keys, encrypt_note_for_owner, note_recognition_public_key_from_raw_key_hex,
-        nullifier_from_note_secret, nullifier_sparse_update_witnesses_for_consumed_inputs,
-        settlement_note_root_after_deposit_roots, spend_authority_from_raw_key_hex,
-        spend_authority_from_spend_auth_key_felt, withdraw_authority_from_raw_key_hex,
+        derive_user_keys, encrypt_note_for_owner, liquidity_position_private_authority,
+        note_recognition_public_key_from_raw_key_hex, nullifier_from_note_secret,
+        nullifier_sparse_update_witnesses_for_consumed_inputs,
+        settlement_note_root_after_deposit_roots, spend_auth_key_felt_from_raw_key_hex,
+        spend_authority_from_raw_key_hex, verify_liquidity_position_transition_authorization,
+        verify_liquidity_position_transition_witness, withdraw_authority_from_raw_key_hex,
     };
+
+    fn owned_test_liquidity_position(
+        seed: &RecoverySeed,
+        position_id: &str,
+        blinding: &str,
+    ) -> PrivateLiquidityPosition {
+        let keys = derive_user_keys(seed);
+        let spend_key_hex = secret_hex(&keys.spend_auth_key);
+        let owner_authority = liquidity_position_private_authority(
+            &spend_auth_key_felt_from_raw_key_hex(&spend_key_hex),
+        )
+        .expect("position authority");
+        PrivateLiquidityPosition {
+            version: zylith_core::LIQUIDITY_POSITION_VERSION,
+            position_id: position_id.into(),
+            backing: LiquidityPositionBacking::PrivateReserve,
+            status: LiquidityPositionStatus::Active,
+            pair_id: PairId("STRK/USDC".into()),
+            base_asset_id: AssetId("STRK".into()),
+            quote_asset_id: AssetId("USDC".into()),
+            owner_authority,
+            base_reserve: 10_000,
+            quote_reserve: 1_000_000,
+            price_lower_bound: 90,
+            price_upper_bound: 120,
+            max_fill_base_per_batch: 1_000,
+            curve_policy: LiquidityPositionCurvePolicy {
+                kind: LiquidityPositionCurveKind::StaticRange,
+                band_count: 3,
+                spread_bps: 40,
+                target_base_ratio_bps: 5_000,
+                inventory_skew_bps: 0,
+                max_price_deviation_bps: 0,
+            },
+            oracle_guard: None,
+            rotation_policy: LiquidityPositionRotationPolicy {
+                max_price_rotation_bps: 0,
+                max_depth_rotation_bps: 0,
+                skip_epoch_bps: 0,
+            },
+            opened_epoch: 7,
+            expiry_epoch: 27,
+            blinding: blinding.into(),
+            metadata_commitment: "0x0".into(),
+        }
+    }
+
+    #[test]
+    fn wasm_request_types_reject_unknown_unsupported_fields() {
+        let mut parent = serde_json::to_value(BuildStrategyParentRequest {
+            seed_hex: "11".repeat(32),
+            parent_authorization_secret: "22".repeat(32),
+        })
+        .expect("parent request json");
+        parent["unsupported_parent_order_id"] = serde_json::json!("unexpected");
+        assert!(serde_json::from_value::<BuildStrategyParentRequest>(parent).is_err());
+
+        let mut claim = serde_json::to_value(SignStrk20ExitClaimRequest {
+            seed_hex: "11".repeat(32),
+            chain_id: "0x534e5f5345504f4c4941".into(),
+            bridge_address: "0x1".into(),
+            privacy_pool_address: "0x2".into(),
+            auction_verifier_address: "0x3".into(),
+            asset_id: "STRK".into(),
+            token_address: "0x4".into(),
+            amount: "1".into(),
+            exit_commitment: "0x5".into(),
+            open_note_id: "0x6".into(),
+        })
+        .expect("claim request json");
+        claim["unsupported_recipient_address"] = serde_json::json!("0x123");
+        assert!(serde_json::from_value::<SignStrk20ExitClaimRequest>(claim).is_err());
+
+        let mut relay_auth = serde_json::to_value(BuildRenewalRelayPackageAuthorizationResponse {
+            signer_public_key: "0x1".into(),
+            signature_r: "0x2".into(),
+            signature_s: "0x3".into(),
+        })
+        .expect("relay auth json");
+        relay_auth["unsupported_access_token"] = serde_json::json!("unexpected");
+        assert!(
+            serde_json::from_value::<BuildRenewalRelayPackageAuthorizationResponse>(relay_auth)
+                .is_err()
+        );
+
+        let mut cancel = serde_json::json!({
+            "seed_hex": "11".repeat(32),
+            "chain_id": "0x534e5f5345504f4c4941",
+            "auction_verifier_address": "0x1",
+            "parent_secret_commitment": "0x2",
+            "parent_cancel_authority": "0x3",
+            "prior_renewal_entries": []
+        });
+        cancel
+            .as_object_mut()
+            .unwrap()
+            .remove("prior_renewal_entries");
+        assert!(
+            serde_json::from_value::<BuildRenewalParentCancelSubmissionPlanRequest>(cancel)
+                .is_err()
+        );
+
+        let note = Note {
+            asset_id: AssetId("STRK".into()),
+            amount: 1,
+            owner_public_key: "ab".repeat(32),
+            spend_authority: "0x1".into(),
+            withdraw_authority: "0x2".into(),
+            blinding: "0x3".into(),
+            nonce: 1,
+            metadata_commitment: "0x4".into(),
+        };
+        let mut consolidation = serde_json::to_value(BuildNoteConsolidationDraftRequest {
+            seed_hex: "11".repeat(32),
+            consolidation_id: BatchId("consolidation-test".into()),
+            input_notes: vec![note.clone()],
+            target_amounts: vec!["1".into()],
+        })
+        .expect("consolidation request json");
+        consolidation
+            .as_object_mut()
+            .unwrap()
+            .remove("target_amounts");
+        assert!(
+            serde_json::from_value::<BuildNoteConsolidationDraftRequest>(consolidation).is_err()
+        );
+
+        let mut withdrawal =
+            serde_json::to_value(BuildSettlementOutputWithdrawalSubmissionPlanRequest {
+                seed_hex: "11".repeat(32),
+                batch_id: BatchId("batch-1".into()),
+                output_note: OutputNoteRecord {
+                    note_commitment: NoteCommitment("0x5".into()),
+                    asset_id: note.asset_id.clone(),
+                    amount: note.amount,
+                    withdraw_authority: note.withdraw_authority.clone(),
+                },
+                output_note_preimage: note,
+                output_proof: OutputNoteMerkleProof {
+                    merkle_path: vec![],
+                    merkle_directions: vec![],
+                },
+                prior_nullifier_root: "0x6".into(),
+                nullifier_history: vec![],
+                nullifier_sparse_witness: None,
+                new_nullifier_root: "0x7".into(),
+                proof_artifact_commitment: "0x8".into(),
+                strk20_exit_commitment: "0x9".into(),
+                auction_verifier_address: "0xa".into(),
+                shielded_asset_adapter_address: "0xb".into(),
+                chain_id: "0x534e5f5345504f4c4941".into(),
+            })
+            .expect("withdrawal request json");
+        withdrawal
+            .as_object_mut()
+            .unwrap()
+            .remove("nullifier_history");
+        assert!(
+            serde_json::from_value::<BuildSettlementOutputWithdrawalSubmissionPlanRequest>(
+                withdrawal
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn public_config_is_deterministic() {
@@ -1684,6 +2803,30 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(!first.account_id.is_empty());
+    }
+
+    #[test]
+    fn output_recovery_key_tags_can_be_paged_by_output_index() {
+        let seed = "11".repeat(32);
+        let batch_id = "batch-strk-usdc-42";
+        let prefix = zylith_wallet_output_recovery_key_tags(&seed, batch_id, 8).expect("prefix");
+        let range =
+            zylith_wallet_output_recovery_key_tags_range(&seed, batch_id, 4, 4).expect("range");
+        let prefix: serde_json::Value = serde_json::from_str(&prefix).expect("prefix json");
+        let range: serde_json::Value = serde_json::from_str(&range).expect("range json");
+
+        assert_eq!(
+            &prefix["key_tags"].as_array().expect("prefix tags")[4..8],
+            range["key_tags"].as_array().expect("range tags")
+        );
+    }
+
+    #[test]
+    fn output_recovery_key_tags_reject_oversized_requests() {
+        let seed = "11".repeat(32);
+        assert!(
+            zylith_wallet_output_recovery_key_tags(&seed, "batch-strk-usdc-42", 4_097).is_err()
+        );
     }
 
     #[test]
@@ -1823,8 +2966,7 @@ mod tests {
             auction_verifier_address: "0x123".into(),
             shielded_asset_adapter_address: "0x456".into(),
             chain_id: "0x534e5f5345504f4c4941".into(),
-            recipient: "0x789".into(),
-            strk20_exit_commitment: None,
+            strk20_exit_commitment: "0xabc123".into(),
             prior_nullifier_root,
             output_note: OutputNoteRecord {
                 note_commitment,
@@ -1850,7 +2992,7 @@ mod tests {
             "output_note": witness.output_note.clone(),
             "output_note_preimage": witness.output_note_preimage.clone(),
             "output_proof": witness.output_proof.clone(),
-            "recipient": "0x789",
+            "strk20_exit_commitment": "0xabc123",
             "auction_verifier_address": "0x123",
             "shielded_asset_adapter_address": "0x456",
             "chain_id": "0x534e5f5345504f4c4941"
@@ -1871,7 +3013,7 @@ mod tests {
         assert_ne!(signed.withdraw_authorization.signature_s, "0x0");
 
         let mut malicious = witness;
-        malicious.recipient = "0x999".into();
+        malicious.strk20_exit_commitment = "0x999".into();
         let rejected = zylith_wallet_sign_settlement_output_withdrawal_witness(
             &serde_json::json!({
                 "seed_hex": seed.to_hex(),
@@ -1927,6 +3069,308 @@ mod tests {
     }
 
     #[test]
+    fn wallet_authorizes_liquidity_position_lifecycle_actions() {
+        let seed = RecoverySeed([13_u8; 32]);
+        let keys = derive_user_keys(&seed);
+        let spend_key_hex = secret_hex(&keys.spend_auth_key);
+        let lp_owner_authority = liquidity_position_private_authority(
+            &spend_auth_key_felt_from_raw_key_hex(&spend_key_hex),
+        )
+        .expect("lp owner authority");
+        let position_id = "0x123456";
+        let prior = LiquidityPositionCommitment("0xabc123".into());
+        let output = LiquidityPositionCommitment("0xdef456".into());
+
+        let open_request = AuthorizeLiquidityPositionLifecycleRequest {
+            seed_hex: seed.to_hex(),
+            position_id: position_id.into(),
+            prior_position_commitment: None,
+            output_position_commitment: Some(output.clone()),
+            epoch: 7,
+            base_amount: 0,
+            quote_amount: 0,
+        };
+        let open_json = serde_json::to_string(&open_request).expect("open request json");
+        let open_auth = zylith_wallet_authorize_liquidity_position_open(&open_json)
+            .expect("open authorization");
+        let open_auth: LiquidityPositionLifecycleAuthorization =
+            serde_json::from_str(&open_auth).expect("open auth json");
+        verify_liquidity_position_transition_authorization(
+            &lp_owner_authority,
+            LiquidityPositionTransitionKind::Open,
+            position_id,
+            None,
+            Some(&output),
+            7,
+            0,
+            0,
+            &open_auth,
+        )
+        .expect("open auth verifies");
+
+        let close_request = AuthorizeLiquidityPositionLifecycleRequest {
+            seed_hex: seed.to_hex(),
+            position_id: position_id.into(),
+            prior_position_commitment: Some(prior),
+            output_position_commitment: None,
+            epoch: 9,
+            base_amount: 1_000,
+            quote_amount: 2_000,
+        };
+        let close_json = serde_json::to_string(&close_request).expect("close request json");
+        let close_auth = zylith_wallet_authorize_liquidity_position_close(&close_json)
+            .expect("close authorization");
+        let close_auth: LiquidityPositionLifecycleAuthorization =
+            serde_json::from_str(&close_auth).expect("close auth json");
+        assert_ne!(open_auth.signature_s, close_auth.signature_s);
+
+        let invalid_open = AuthorizeLiquidityPositionLifecycleRequest {
+            prior_position_commitment: Some(LiquidityPositionCommitment("0x333".into())),
+            ..open_request
+        };
+        assert!(
+            zylith_wallet_authorize_liquidity_position_open(
+                &serde_json::to_string(&invalid_open).expect("invalid open json")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wallet_builds_private_liquidity_position_open_from_normal_notes() {
+        let seed = RecoverySeed([14_u8; 32]);
+        let keys = derive_user_keys(&seed);
+        let owner_key_hex = secret_hex(&keys.note_recognition_key);
+        let spend_key_hex = secret_hex(&keys.spend_auth_key);
+        let withdraw_key_hex = secret_hex(&keys.withdraw_auth_key);
+        let owner_public_key =
+            note_recognition_public_key_from_raw_key_hex(&owner_key_hex).expect("owner key");
+        let spend_authority =
+            spend_authority_from_raw_key_hex(&spend_key_hex).expect("spend authority");
+        let withdraw_authority =
+            withdraw_authority_from_raw_key_hex(&withdraw_key_hex).expect("withdraw authority");
+        let base_note = Note {
+            asset_id: AssetId("STRK".into()),
+            amount: 11_000,
+            owner_public_key: owner_public_key.clone(),
+            spend_authority: spend_authority.clone(),
+            withdraw_authority: withdraw_authority.clone(),
+            blinding: "0x101".into(),
+            nonce: 1,
+            metadata_commitment: "0x0".into(),
+        };
+        let quote_note = Note {
+            asset_id: AssetId("USDC".into()),
+            amount: 1_000_000,
+            owner_public_key,
+            spend_authority: spend_authority.clone(),
+            withdraw_authority,
+            blinding: "0x102".into(),
+            nonce: 2,
+            metadata_commitment: "0x0".into(),
+        };
+        let request = serde_json::json!({
+            "seed_hex": seed.to_hex(),
+            "pair_id": "STRK/USDC",
+            "batch_id": "batch-strk-usdc-7",
+            "epoch_id": "7",
+            "funding_notes": [base_note, quote_note],
+            "base_asset_id": "STRK",
+            "quote_asset_id": "USDC",
+            "base_reserve": "10000",
+            "quote_reserve": "1000000",
+            "price_lower_bound": "90",
+            "price_upper_bound": "120",
+            "max_fill_base_per_batch": "1000",
+            "curve_policy": {
+                "kind": "StaticRange",
+                "band_count": "3",
+                "spread_bps": "40",
+                "target_base_ratio_bps": "5000",
+                "inventory_skew_bps": "0",
+                "max_price_deviation_bps": "0"
+            },
+            "rotation_policy": {
+                "max_price_rotation_bps": "0",
+                "max_depth_rotation_bps": "0",
+                "skip_epoch_bps": "0"
+            },
+            "expiry_epoch": "27",
+            "position_nonce": u64::MAX.to_string(),
+            "prior_liquidity_position_root": "0x0",
+            "padding": "0000"
+        });
+        let response = zylith_wallet_build_private_liquidity_position_open(&request.to_string())
+            .expect("build LP open");
+        let json: serde_json::Value = serde_json::from_str(&response).expect("response json");
+
+        let lifecycle_id = json["lifecycle_id"].as_str().expect("lifecycle id");
+        assert_eq!(lifecycle_id.len(), 64);
+        assert!(lifecycle_id.chars().all(|char| char.is_ascii_hexdigit()));
+        assert_eq!(json["position"]["owner_authority"], spend_authority);
+        assert!(json.get("authority_secret").is_none());
+        assert!(
+            json["transition_witness"]["open_funding"]["authorization"]
+                .get("authority_secret")
+                .is_none()
+        );
+        assert!(
+            json["ingress_request"]["transition_witness"]["open_funding"]["authorization"]
+                .get("signature_r")
+                .is_some()
+        );
+        assert_eq!(
+            json["change_notes"].as_array().expect("change notes").len(),
+            1
+        );
+        let witness: LiquidityPositionTransitionWitness =
+            serde_json::from_value(json["ingress_request"]["transition_witness"].clone())
+                .expect("decode transition witness");
+        verify_liquidity_position_transition_witness("0x0", &witness)
+            .expect("LP open witness verifies");
+    }
+
+    #[test]
+    fn wallet_builds_private_liquidity_position_lifecycle_actions() {
+        let seed = RecoverySeed([15_u8; 32]);
+        let prior = owned_test_liquidity_position(&seed, "0x701", "0x801");
+        let prior_root = LiquidityPositionState::from_positions(std::slice::from_ref(&prior))
+            .expect("prior state")
+            .root()
+            .expect("prior root");
+
+        let reconfigure_request = serde_json::json!({
+            "seed_hex": seed.to_hex(),
+            "pair_id": "STRK/USDC",
+            "batch_id": "batch-strk-usdc-8",
+            "epoch_id": "8",
+            "prior_position": prior.clone(),
+            "price_lower_bound": "95",
+            "price_upper_bound": "130",
+            "max_fill_base_per_batch": "500",
+            "curve_policy": {
+                "kind": "StaticRange",
+                "band_count": "3",
+                "spread_bps": "30",
+                "target_base_ratio_bps": "5000",
+                "inventory_skew_bps": "0",
+                "max_price_deviation_bps": "0"
+            },
+            "rotation_policy": {
+                "max_price_rotation_bps": "10",
+                "max_depth_rotation_bps": "10",
+                "skip_epoch_bps": "0"
+            },
+            "expiry_epoch": "30",
+            "lifecycle_nonce": "81"
+        });
+        let reconfigure_preview = zylith_wallet_prepare_private_liquidity_position_reconfigure(
+            &reconfigure_request.to_string(),
+        )
+        .expect("prepare reconfigure");
+        let reconfigure_preview: serde_json::Value =
+            serde_json::from_str(&reconfigure_preview).expect("reconfigure preview json");
+        let reconfigured: PrivateLiquidityPosition =
+            serde_json::from_value(reconfigure_preview["output_position"].clone())
+                .expect("reconfigured position");
+        let reconfigured_commitment: LiquidityPositionCommitment =
+            serde_json::from_value(reconfigure_preview["output_position_commitment"].clone())
+                .expect("reconfigured commitment");
+        let state = LiquidityPositionState::from_positions(std::slice::from_ref(&prior))
+            .expect("state service");
+        let (_, _, reconfigure_update) = state
+            .replacement_update(
+                &prior.position_id,
+                prior.commitment().expect("prior commitment"),
+                reconfigured_commitment,
+            )
+            .expect("reconfigure state update");
+        let mut reconfigure_build = reconfigure_request.as_object().unwrap().clone();
+        reconfigure_build.insert(
+            "prior_liquidity_position_root".into(),
+            serde_json::Value::String(prior_root.clone()),
+        );
+        reconfigure_build.insert(
+            "state_update".into(),
+            serde_json::to_value(reconfigure_update).expect("state update json"),
+        );
+        reconfigure_build.insert("padding".into(), serde_json::Value::String("0000".into()));
+        let reconfigure_response = zylith_wallet_build_private_liquidity_position_reconfigure(
+            &serde_json::Value::Object(reconfigure_build).to_string(),
+        )
+        .expect("build reconfigure");
+        let reconfigure_response: serde_json::Value =
+            serde_json::from_str(&reconfigure_response).expect("reconfigure response json");
+        let reconfigure_witness: LiquidityPositionTransitionWitness =
+            serde_json::from_value(reconfigure_response["transition_witness"].clone())
+                .expect("reconfigure witness");
+        verify_liquidity_position_transition_witness(&prior_root, &reconfigure_witness)
+            .expect("reconfigure witness verifies");
+        assert_eq!(
+            reconfigure_witness.output_position.as_ref(),
+            Some(&reconfigured)
+        );
+
+        let close_prior = owned_test_liquidity_position(&seed, "0x703", "0x803");
+        let close_prior_root =
+            LiquidityPositionState::from_positions(std::slice::from_ref(&close_prior))
+                .expect("close prior state")
+                .root()
+                .expect("close prior root");
+        let close_request = serde_json::json!({
+            "seed_hex": seed.to_hex(),
+            "pair_id": "STRK/USDC",
+            "batch_id": "batch-strk-usdc-10",
+            "epoch_id": "10",
+            "prior_position": close_prior.clone(),
+            "lifecycle_nonce": u64::MAX.to_string()
+        });
+        let close_preview =
+            zylith_wallet_prepare_private_liquidity_position_close(&close_request.to_string())
+                .expect("prepare close");
+        let close_preview: serde_json::Value =
+            serde_json::from_str(&close_preview).expect("close preview json");
+        assert_eq!(
+            close_preview["output_notes"]
+                .as_array()
+                .expect("close output notes")
+                .len(),
+            2
+        );
+        let close_state =
+            LiquidityPositionState::from_positions(std::slice::from_ref(&close_prior))
+                .expect("close state service");
+        let (_, close_root, close_update) = close_state
+            .removal_update(
+                &close_prior.position_id,
+                close_prior.commitment().expect("close prior commitment"),
+            )
+            .expect("close state update");
+        assert_eq!(close_root, "0x0");
+        let mut close_build = close_request.as_object().unwrap().clone();
+        close_build.insert(
+            "prior_liquidity_position_root".into(),
+            serde_json::Value::String(close_prior_root.clone()),
+        );
+        close_build.insert(
+            "state_update".into(),
+            serde_json::to_value(close_update).expect("state update json"),
+        );
+        let close_response = zylith_wallet_build_private_liquidity_position_close(
+            &serde_json::Value::Object(close_build).to_string(),
+        )
+        .expect("build close");
+        let close_response: serde_json::Value =
+            serde_json::from_str(&close_response).expect("close response json");
+        assert!(close_response.get("output_position").is_none());
+        let close_witness: LiquidityPositionTransitionWitness =
+            serde_json::from_value(close_response["transition_witness"].clone())
+                .expect("close witness");
+        verify_liquidity_position_transition_witness(&close_prior_root, &close_witness)
+            .expect("close witness verifies");
+    }
+
+    #[test]
     fn recovery_snapshot_roundtrip_uses_seed_bound_auth() {
         let seed = RecoverySeed([4_u8; 32]);
         let auth_a = zylith_wallet_recovery_auth_tag(&seed.to_hex()).expect("auth tag");
@@ -1956,16 +3400,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_mnemonic_roundtrip_uses_24_words() {
-        let phrase = zylith_wallet_generate_mnemonic().expect("mnemonic");
-        assert_eq!(phrase.split_whitespace().count(), 24);
-        let seed = zylith_wallet_mnemonic_to_seed_hex(&phrase).expect("seed hex");
-        let phrase_again = zylith_wallet_seed_hex_to_mnemonic(&seed).expect("mnemonic");
-        assert_eq!(phrase, phrase_again);
-    }
-
-    #[test]
-    fn builds_private_order_submission_from_seed_and_funding_note() {
+    fn builds_private_order_submission_from_seed_and_funding_notes() {
         let seed = RecoverySeed([9_u8; 32]);
         let keys = derive_user_keys(&seed);
         let owner_public_key =
@@ -1994,15 +3429,14 @@ mod tests {
                     public_key: sample_p256_public_key(),
                 }],
             },
-            funding_note,
-            funding_notes: vec![],
+            funding_notes: vec![funding_note],
             order: OrderIntent {
                 pair_id: PairId("STRK/USDC".into()),
                 batch_id: BatchId("STRK-USDC-7".into()),
                 side: OrderSide::Buy,
                 order_type: OrderType::LimitBatch,
                 relay_mode: RelayMode::SelfRelay,
-                maker_curve: None,
+                liquidity_curve: None,
                 limit_price: 2,
                 amount: 10,
                 min_fill: 1,
@@ -2029,6 +3463,12 @@ mod tests {
         request_json["order"]["expiry_epoch"] = serde_json::json!("7");
         request_json["order"]["order_nonce"] = serde_json::json!("18446744073709551615");
         request_json["order"]["parent_child_index"] = serde_json::json!("0");
+        let mut empty_request_json = request_json.clone();
+        empty_request_json["funding_notes"] = serde_json::json!([]);
+        assert!(
+            zylith_wallet_build_private_order_submission(&empty_request_json.to_string()).is_err(),
+            "empty funding notes are rejected"
+        );
         let encoded = zylith_wallet_build_private_order_submission(&request_json.to_string())
             .expect("build order");
         let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
@@ -2046,111 +3486,6 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[test]
-    fn managed_maker_policy_authorization_binds_owner_outputs() {
-        let seed = RecoverySeed([13_u8; 32]);
-        let policy = managed_policy_fixture("0x123456", "0x0", "0x0", "0x0", "0x0");
-        let request = AuthorizeManagedMakerPolicyRequest {
-            seed_hex: seed.to_hex(),
-            policy,
-        };
-
-        let encoded = zylith_wallet_authorize_managed_maker_policy(
-            &serde_json::to_string(&request).expect("request json"),
-        )
-        .expect("policy authorization");
-        let auth: ManagedMakerAuthorization =
-            serde_json::from_str(&encoded).expect("managed authorization json");
-        let keys = derive_user_keys(&seed);
-
-        assert_eq!(
-            auth.policy.recipient_owner_public_key,
-            note_recognition_public_key_from_raw_key_hex(&hex::encode(keys.note_recognition_key))
-                .expect("owner public key")
-        );
-        assert_eq!(
-            auth.policy.recipient_spend_authority,
-            spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key))
-                .expect("spend authority")
-        );
-        assert_eq!(
-            auth.policy.recipient_withdraw_authority,
-            withdraw_authority_from_raw_key_hex(&hex::encode(keys.withdraw_auth_key))
-                .expect("withdraw authority")
-        );
-        assert!(auth.owner_authorization.signature_r.starts_with("0x"));
-        assert!(auth.owner_authorization.signature_s.starts_with("0x"));
-    }
-
-    #[test]
-    fn builds_delegated_managed_maker_order_without_owner_spend_key() {
-        let seed = RecoverySeed([13_u8; 32]);
-        let funding_note = owned_note(&seed, "USDC", 2_000, 13);
-        let managed_maker_authorization = authorize_policy_for_seed(&seed, "0x123456");
-        let request = BuildDelegatedPrivateOrderSubmissionRequest {
-            delegate_private_key_felt: "0x123456".into(),
-            order_cancellation_key_hex: "44".repeat(32),
-            managed_maker_authorization,
-            registry: PrivateExecutionKeyRegistry {
-                keys: vec![PrivateExecutionKeyPublicConfig {
-                    key_id: "ingress-0".into(),
-                    public_key: sample_p256_public_key(),
-                }],
-            },
-            funding_note,
-            funding_notes: vec![],
-            order: delegated_maker_order_fixture(),
-            padding: Some("0".repeat(64)),
-        };
-
-        let encoded = zylith_wallet_build_delegated_private_order_submission(
-            &serde_json::to_string(&request).expect("request json"),
-        )
-        .expect("delegated order");
-        let value: serde_json::Value = serde_json::from_str(&encoded).expect("json");
-
-        assert!(
-            value["order_commitment"]
-                .as_str()
-                .expect("order commitment")
-                .starts_with("0x")
-        );
-        assert_eq!(
-            value["funding_note_commitments"]
-                .as_array()
-                .expect("funding commitments")
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn delegated_managed_maker_order_rejects_wrong_delegate_key() {
-        let seed = RecoverySeed([13_u8; 32]);
-        let funding_note = owned_note(&seed, "USDC", 2_000, 13);
-        let managed_maker_authorization = authorize_policy_for_seed(&seed, "0x123456");
-        let request = BuildDelegatedPrivateOrderSubmissionRequest {
-            delegate_private_key_felt: "0x654321".into(),
-            order_cancellation_key_hex: "44".repeat(32),
-            managed_maker_authorization,
-            registry: PrivateExecutionKeyRegistry {
-                keys: vec![PrivateExecutionKeyPublicConfig {
-                    key_id: "ingress-0".into(),
-                    public_key: sample_p256_public_key(),
-                }],
-            },
-            funding_note,
-            funding_notes: vec![],
-            order: delegated_maker_order_fixture(),
-            padding: None,
-        };
-
-        let error = zylith_wallet_build_delegated_private_order_submission(
-            &serde_json::to_string(&request).expect("request json"),
-        );
-        assert!(error.is_err(), "wrong delegate key rejected");
     }
 
     #[test]
@@ -2183,15 +3518,14 @@ mod tests {
                     public_key: sample_p256_public_key(),
                 }],
             },
-            funding_note,
-            funding_notes: vec![],
+            funding_notes: vec![funding_note],
             order: OrderIntent {
                 pair_id: PairId("STRK/USDC".into()),
                 batch_id: BatchId("STRK-USDC-7".into()),
                 side: OrderSide::Buy,
                 order_type: OrderType::LimitBatch,
                 relay_mode: RelayMode::ZylithRelay,
-                maker_curve: None,
+                liquidity_curve: None,
                 limit_price: 2,
                 amount: 10,
                 min_fill: 1,
@@ -2330,6 +3664,20 @@ mod tests {
         assert_ne!(signed.spend_authorization.signature_r, "0x0");
         assert_ne!(signed.output_ciphertext_bundle_ref, "0x0");
 
+        let mut unsupported_expected_draft =
+            serde_json::to_value(expected_draft.clone()).expect("expected draft json");
+        unsupported_expected_draft["unsupported_consolidation_mode"] =
+            serde_json::json!("unexpected");
+        let unsupported_expected = zylith_wallet_sign_note_consolidation_witness(
+            &serde_json::json!({
+                "seed_hex": seed.to_hex(),
+                "expected_draft": unsupported_expected_draft,
+                "witness": witness.clone()
+            })
+            .to_string(),
+        );
+        assert!(unsupported_expected.is_err());
+
         let mut malicious = witness;
         malicious.output_note_preimages[0].amount += 1;
         let rejected = zylith_wallet_sign_note_consolidation_witness(
@@ -2423,6 +3771,7 @@ mod tests {
         .expect("authorization");
         package["relay_authorization"] =
             serde_json::from_str(&authorization).expect("authorization json");
+        package["access_token"] = serde_json::Value::String("relay-token".into());
 
         let verified = zylith_wallet_verify_renewal_relay_package(&package.to_string())
             .expect("verified package");
@@ -2430,118 +3779,6 @@ mod tests {
 
         package["slots"][0]["batch_id"] = serde_json::Value::String("STRK-USDC-2".into());
         assert!(verify_renewal_relay_package_value(&package).is_err());
-    }
-
-    fn owned_note(seed: &RecoverySeed, asset_id: &str, amount: u128, nonce: u64) -> Note {
-        let keys = derive_user_keys(seed);
-        Note {
-            asset_id: AssetId(asset_id.into()),
-            amount,
-            owner_public_key: note_recognition_public_key_from_raw_key_hex(&hex::encode(
-                keys.note_recognition_key,
-            ))
-            .expect("owner public key"),
-            spend_authority: spend_authority_from_raw_key_hex(&hex::encode(keys.spend_auth_key))
-                .expect("spend authority"),
-            withdraw_authority: withdraw_authority_from_raw_key_hex(&hex::encode(
-                keys.withdraw_auth_key,
-            ))
-            .expect("withdraw authority"),
-            blinding: format!("0x{:x}", 0x500 + nonce),
-            nonce,
-            metadata_commitment: format!("0x{:x}", 0x600 + nonce),
-        }
-    }
-
-    fn managed_policy_fixture(
-        delegate_private_key_felt: &str,
-        recipient_owner_public_key: &str,
-        recipient_spend_authority: &str,
-        recipient_withdraw_authority: &str,
-        recipient_residual_withdraw_authority: &str,
-    ) -> ManagedMakerPolicy {
-        ManagedMakerPolicy {
-            version: 1,
-            delegate_public_key: spend_authority_from_spend_auth_key_felt(
-                delegate_private_key_felt,
-            )
-            .expect("delegate public key"),
-            pair_id: PairId("STRK/USDC".into()),
-            allow_buy: true,
-            allow_sell: false,
-            max_epoch_base: 1_000,
-            min_price: 1,
-            max_price: 10,
-            valid_from_epoch: 7,
-            valid_until_epoch: 7,
-            relay_mode: RelayMode::SelfRelay,
-            parent_order_commitment: "0x0".into(),
-            recipient_owner_public_key: recipient_owner_public_key.into(),
-            recipient_spend_authority: recipient_spend_authority.into(),
-            recipient_withdraw_authority: recipient_withdraw_authority.into(),
-            recipient_residual_withdraw_authority: recipient_residual_withdraw_authority.into(),
-            auditor_view_allowed: false,
-            policy_nonce: 1,
-        }
-    }
-
-    fn authorize_policy_for_seed(
-        seed: &RecoverySeed,
-        delegate_private_key_felt: &str,
-    ) -> ManagedMakerAuthorization {
-        let request = AuthorizeManagedMakerPolicyRequest {
-            seed_hex: seed.to_hex(),
-            policy: managed_policy_fixture(delegate_private_key_felt, "0x0", "0x0", "0x0", "0x0"),
-        };
-        let encoded = zylith_wallet_authorize_managed_maker_policy(
-            &serde_json::to_string(&request).expect("policy request json"),
-        )
-        .expect("policy authorization");
-        serde_json::from_str(&encoded).expect("managed authorization json")
-    }
-
-    fn delegated_maker_order_fixture() -> OrderIntent {
-        OrderIntent {
-            pair_id: PairId("STRK/USDC".into()),
-            batch_id: BatchId("STRK-USDC-7".into()),
-            side: OrderSide::Buy,
-            order_type: OrderType::MakerCurve,
-            relay_mode: RelayMode::SelfRelay,
-            maker_curve: Some(HiddenMakerCurve {
-                points: vec![
-                    MakerCurvePoint {
-                        price: 2,
-                        base_amount: 300,
-                    },
-                    MakerCurvePoint {
-                        price: 3,
-                        base_amount: 300,
-                    },
-                    MakerCurvePoint {
-                        price: 4,
-                        base_amount: 400,
-                    },
-                ],
-            }),
-            limit_price: 4,
-            amount: 1_000,
-            min_fill: 1,
-            time_in_force: TimeInForce::CurrentBatchOnly,
-            expiry_epoch: 7,
-            order_nonce: 99,
-            parent_order_commitment: "0x0".into(),
-            parent_child_index: 0,
-            parent_secret_commitment: "0x0".into(),
-            parent_cancel_authority: "0x0".into(),
-            parent_authorization_secret: "0x0".into(),
-            funding_note_ref: NoteCommitment("0x0".into()),
-            funding_nullifier: Nullifier("0x0".into()),
-            recipient_owner_public_key: "0xdead".into(),
-            recipient_spend_authority: "0xbeef".into(),
-            recipient_withdraw_authority: "0xcafe".into(),
-            recipient_residual_withdraw_authority: "0xbabe".into(),
-            auditor_view_allowed: false,
-        }
     }
 
     fn sample_p256_public_key() -> String {

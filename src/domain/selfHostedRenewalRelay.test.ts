@@ -72,7 +72,7 @@ describe("selfHostedRenewalRelay", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("uses package authorization headers for result sync and deletion", async () => {
+  it("uses package access token headers for result sync and deletion", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -89,14 +89,8 @@ describe("selfHostedRenewalRelay", () => {
     vi.stubGlobal("fetch", fetchMock);
     const renewalPackage = {
       package_id: "pkg-1",
-      package_commitment: "0xabc",
-      parent_cancel_authority: "0xparent",
+      access_token: "relay-token",
       relay_mode: "SelfRelay" as const,
-      relay_authorization: {
-        signer_public_key: "0xsigner",
-        signature_r: "0xr",
-        signature_s: "0xs",
-      },
     };
 
     await fetchSelfHostedRenewalPackageResults(
@@ -110,18 +104,45 @@ describe("selfHostedRenewalRelay", () => {
 
     for (const call of fetchMock.mock.calls) {
       expect(call[1]?.headers).toHaveProperty(
-        "x-zylith-relay-package-commitment",
-        "0xabc"
+        "x-zylith-relay-package-access-token",
+        "relay-token"
       );
-      expect(call[1]?.headers).toHaveProperty(
-        "x-zylith-relay-signature-r",
-        "0xr"
+      expect(call[1]?.headers).not.toHaveProperty(
+        "x-zylith-relay-signature-r"
       );
     }
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "https://relay.example.com/packages/pkg-1/results"
     );
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
+  });
+
+  it("requires package access token for result sync", async () => {
+    await expect(
+      fetchSelfHostedRenewalPackageResults("https://relay.example.com", {
+        package_id: "pkg-1",
+      })
+    ).rejects.toThrow("Renewal relay package access token is missing");
+  });
+
+  it("normalizes self-hosted relay abort failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException("Signal is aborted without reason", "AbortError")
+        )
+    );
+
+    await expect(
+      submitSelfHostedRenewalPackage(
+        "https://relay.example.com/",
+        selfRelayPackage()
+      )
+    ).rejects.toThrow(
+      "Self-hosted relay request failed. Check your connection and retry."
+    );
   });
 });
 
@@ -138,6 +159,7 @@ function selfRelayPackage(): OfflineRenewalPackage {
     relay_mode: "SelfRelay",
     parent_cancel_authority: "0xparent",
     parent_cancel_marker: "0xcancel",
+    access_token: "relay-token",
     relay_policy: {
       coordinator_url: "https://api.zylith.fi",
       prover_url: "https://api.zylith.fi",

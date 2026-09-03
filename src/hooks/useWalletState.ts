@@ -1,43 +1,49 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import {
   type RuntimeStatus,
+  subscribeWalletRuntime,
   walletRuntime,
   walletRuntimeStatus,
 } from "../domain/browserWallet";
 
-export function useWalletState(): {
+type WalletStateSnapshot = {
+  starknetAddress: string | null;
+  runtimeStatus: RuntimeStatus;
+  walletReady: boolean;
+  hasVault: boolean;
+};
+
+let cachedSnapshot: WalletStateSnapshot | null = null;
+
+export function useWalletState(starknetAddress: string | null): {
   runtimeStatus: RuntimeStatus;
   walletReady: boolean;
   hasVault: boolean;
 } {
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>(() =>
-    walletRuntimeStatus()
+  return useSyncExternalStore(
+    subscribeWalletRuntime,
+    () => walletStateSnapshot(starknetAddress),
+    () => walletStateSnapshot(starknetAddress),
   );
-  const [walletReady, setWalletReady] = useState(() =>
-    Boolean(window.zylithWallet?.isReady())
-  );
-  const [hasVault, setHasVault] = useState(() =>
-    Boolean(window.zylithWallet?.hasVault())
-  );
+}
 
-  useEffect(() => {
-    function onReady() {
-      setRuntimeStatus(walletRuntimeStatus());
-    }
-    window.addEventListener("zylith-wallet-runtime-ready", onReady);
-    return () =>
-      window.removeEventListener("zylith-wallet-runtime-ready", onReady);
-  }, []);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const runtime = walletRuntime();
-      setRuntimeStatus(walletRuntimeStatus());
-      setWalletReady(Boolean(runtime?.isReady()));
-      setHasVault(Boolean(runtime?.hasVault()));
-    }, 800);
-    return () => clearInterval(timer);
-  }, []);
-
-  return { runtimeStatus, walletReady, hasVault };
+function walletStateSnapshot(starknetAddress: string | null) {
+  const runtime = walletRuntime();
+  const next: WalletStateSnapshot = {
+    starknetAddress,
+    runtimeStatus: walletRuntimeStatus(),
+    walletReady: Boolean(runtime?.isReady()),
+    hasVault: Boolean(runtime?.hasVault(starknetAddress)),
+  };
+  if (
+    cachedSnapshot &&
+    cachedSnapshot.starknetAddress === next.starknetAddress &&
+    cachedSnapshot.runtimeStatus === next.runtimeStatus &&
+    cachedSnapshot.walletReady === next.walletReady &&
+    cachedSnapshot.hasVault === next.hasVault
+  ) {
+    return cachedSnapshot;
+  }
+  cachedSnapshot = next;
+  return next;
 }

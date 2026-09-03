@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   claimableOutputs,
   pendingWithdrawalOutputs,
+  safeAtomicAmount,
   settlementReadyAtMs,
+  sumByAsset,
 } from "./noteLifecycle";
 import type { WithdrawableNote } from "./shieldedBalances";
 import type { PublicSettlementTranscript } from "./auctionEpoch";
@@ -56,5 +58,16 @@ describe("note lifecycle", () => {
       .toEqual(["0xready"]);
     expect(pendingWithdrawalOutputs(notes).map(n => n.note_commitment))
       .toEqual(["0xpending"]);
+  });
+
+  it("treats malformed or negative atomic amounts as zero in totals", () => {
+    expect(safeAtomicAmount("bad")).toBe(0n);
+    expect(safeAtomicAmount("-1")).toBe(0n);
+    expect(safeAtomicAmount("5")).toBe(5n);
+    expect(sumByAsset([
+      { asset: "STRK", amount: "5" },
+      { asset: "STRK", amount: "bad" },
+      { asset: "STRK", amount: "-7" },
+    ]).get("STRK")).toBe(5n);
   });
 });

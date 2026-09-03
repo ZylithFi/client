@@ -13,22 +13,40 @@ const ACTIVE_ORDER_STATUSES = new Set(["queued", "in_batch", "proving", "settlin
 export function orderFundingAsset(order: LocalOrder, pairs: OrderFundingPair[]): string {
   if (order.fundingAsset) return order.fundingAsset;
   const pair = pairs.find(entry => entry.pair_id === order.pair);
-  if (!pair) return order.pair.split("/")[0] ?? "—";
+  if (!pair) return order.pair.split("/")[0] ?? "-";
   return order.side === "Buy" ? pair.quote_asset_id : pair.base_asset_id;
 }
 
 export function orderFundingAmountAtomic(order: LocalOrder, pairs: OrderFundingPair[]): bigint {
   const asset = orderFundingAsset(order, pairs);
-  if (order.fundingAmount) return BigInt(toAtomicStr(order.fundingAmount, asset));
+  if (order.fundingAmount) return parseHumanAtomicAmount(order.fundingAmount, asset);
   const pair = pairs.find(entry => entry.pair_id === order.pair);
   if (!pair || order.side === "Sell" || !order.limitPrice) {
-    return BigInt(toAtomicStr(order.amount, asset));
+    return parseHumanAtomicAmount(order.amount, asset);
   }
-  const amountAtomic = BigInt(toAtomicStr(order.amount, pair.base_asset_id));
-  const priceAtomic = BigInt(toAtomicStr(order.limitPrice, pair.quote_asset_id));
-  const priceBaseScale = BigInt(pair.price_base_scale ?? assetScale(pair.base_asset_id).toString());
-  if (priceBaseScale === 0n) return amountAtomic;
+  const amountAtomic = parseHumanAtomicAmount(order.amount, pair.base_asset_id);
+  const priceAtomic = parseHumanAtomicAmount(order.limitPrice, pair.quote_asset_id);
+  const priceBaseScale = parsePositiveBigInt(pair.price_base_scale ?? assetScale(pair.base_asset_id).toString());
+  if (priceBaseScale === null) return 0n;
   return (amountAtomic * priceAtomic) / priceBaseScale;
+}
+
+function parseHumanAtomicAmount(value: string, assetId: string): bigint {
+  try {
+    const parsed = BigInt(toAtomicStr(value, assetId));
+    return parsed >= 0n ? parsed : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+function parsePositiveBigInt(value: string): bigint | null {
+  try {
+    const parsed = BigInt(value);
+    return parsed > 0n ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 export function activeOrderFundingTotals(

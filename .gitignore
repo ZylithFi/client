@@ -1,6 +1,11 @@
 /target
 /.scarb
 /.snfoundry_cache
+/node_modules
+/dist
+/*.tsbuildinfo
+/.env*
+!/.env.example
 /client/node_modules
 /client/dist
 /client/*.tsbuildinfo
@@ -27,6 +32,10 @@
 /paymaster/dist
 /paymaster/state
 /paymaster/*.tsbuildinfo
+/sdk/dist
+/sdk/node_modules
+/sdk/package-lock.json
+/sdk/*.tsbuildinfo
 /coordinator/batches.dev.json
 /.deploy
 /.external

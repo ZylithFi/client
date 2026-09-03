@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   depositRecordMatchesConfirmedFunding,
+  markDepositRecordFailed,
   markDepositRecordConfirmed,
   pendingDepositFailureReason,
   pendingDepositFundingCommitments,
@@ -39,13 +40,26 @@ describe("depositConfirmationState", () => {
       source: "deposit",
       pending_deposit_tx: "0xtx",
       deposit_failed: true,
-      deposit_failure_reason: "old",
+      deposit_failure_reason: "previous failure",
     };
     markDepositRecordConfirmed(record);
     expect(record.deposit_confirmed).toBe(true);
     expect(record.pending_deposit_tx).toBeUndefined();
     expect(record.deposit_failed).toBeUndefined();
     expect(record.deposit_failure_reason).toBeUndefined();
+  });
+
+  it("marks failed records without clearing recovery transaction data", () => {
+    const record: DepositConfirmationRecord = {
+      source: "deposit",
+      pending_deposit_tx: "0xtx",
+      deposit_confirmed: true,
+    };
+    markDepositRecordFailed(record, "reverted");
+    expect(record.deposit_confirmed).toBe(false);
+    expect(record.deposit_failed).toBe(true);
+    expect(record.deposit_failure_reason).toBe("reverted");
+    expect(record.pending_deposit_tx).toBe("0xtx");
   });
 
   it("matches confirmed funding commitments after felt normalization", () => {

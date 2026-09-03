@@ -1,0 +1,324 @@
+{
+  "deployment": {
+    "finalized": true,
+    "release_commit": "c2218677755093af364e7a2ecf7a46bb2e4b5ba9"
+  },
+  "network": "sepolia",
+  "rpc_url": "https://api.zylith.fi/starknet-rpc",
+  "chain_id": "0x534e5f5345504f4c4941",
+  "contracts": {
+    "commitment_registry": "0x06babf29617b1b1a24748959fd7b83a9ab572e1e2ccd2f41a55cb5edc8092b4c",
+    "batch_registry": "0x00dc13e37afadc8569090d3419e63cd983103347b2e55cd8e8441e3cfbe23668",
+    "shielded_asset_adapter": "0x07723e37f2934ecae5926dfe9e32cf14b6b6aef4bb2b6ed35f6bb541e47537ff",
+    "privacy_deposit_bridge": "0x07723e37f2934ecae5926dfe9e32cf14b6b6aef4bb2b6ed35f6bb541e47537ff",
+    "auction_verifier": "0x063d5f52f7afbb224161418313d5df8a551b0c9c1f57013bc1231558989065a0"
+  },
+  "token_addresses": {
+    "STRK": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+    "ETH": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
+    "USDC": "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343",
+    "strkBTC": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
+    "WBTC": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
+    "USDT": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb"
+  },
+  "funding": {
+    "primary": "starknet_privacy",
+    "starknet_privacy": {
+      "privacy_pool": "0x254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
+      "bridge_adapter": "0x07723e37f2934ecae5926dfe9e32cf14b6b6aef4bb2b6ed35f6bb541e47537ff",
+      "discovery_url": "https://api.zylith.fi/starknet-privacy-discovery",
+      "proving_url": "https://api.zylith.fi/starknet-privacy-prover-sepolia",
+      "paymaster_address": "0x3a8fe672fdbd1d9342a13a02b1553e2c23a8f8187f516408fba4ee27f28f76c",
+      "paymaster_url": "https://api.zylith.fi/paymaster/execute-outside",
+      "proof_signer_class_hash": "0x785889d60939bc1f1e7ba3bcf96dccd9ebe69bc3673279819a71279f7af4023",
+      "ingress_key_registry_fingerprint": "2c738b691d9ccc6a21d83cb1f98a143e166b81691cbca1f942493982487b7906",
+      "sdk_package": "@starkware-libs/starknet-privacy-sdk",
+      "sdk_version": "0.14.3-rc.0",
+      "min_proving_delay_blocks": 10,
+      "proving_ohttp_enabled": true
+    },
+    "assets": {
+      "STRK": {
+        "asset_id": "STRK",
+        "token_address": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+        "rail_token_address": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+        "min_trade_amount": "1000000000000000000",
+        "enabled_pairs": [
+          "STRK/USDC",
+          "STRK/ETH",
+          "STRK/strkBTC"
+        ]
+      },
+      "ETH": {
+        "asset_id": "ETH",
+        "token_address": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
+        "rail_token_address": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
+        "min_trade_amount": "1000000000000000",
+        "enabled_pairs": [
+          "ETH/USDC",
+          "STRK/ETH"
+        ]
+      },
+      "USDC": {
+        "asset_id": "USDC",
+        "token_address": "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343",
+        "rail_token_address": "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343",
+        "min_trade_amount": "1000000",
+        "enabled_pairs": [
+          "STRK/USDC",
+          "ETH/USDC",
+          "strkBTC/USDC",
+          "USDC/USDT"
+        ]
+      },
+      "strkBTC": {
+        "asset_id": "strkBTC",
+        "token_address": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
+        "rail_token_address": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
+        "min_trade_amount": "100000",
+        "enabled_pairs": [
+          "strkBTC/USDC",
+          "STRK/strkBTC",
+          "WBTC/strkBTC"
+        ]
+      },
+      "WBTC": {
+        "asset_id": "WBTC",
+        "token_address": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
+        "rail_token_address": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
+        "min_trade_amount": "100000",
+        "enabled_pairs": [
+          "WBTC/strkBTC"
+        ]
+      },
+      "USDT": {
+        "asset_id": "USDT",
+        "token_address": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb",
+        "rail_token_address": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb",
+        "min_trade_amount": "1000000",
+        "enabled_pairs": [
+          "USDC/USDT"
+        ]
+      }
+    }
+  },
+  "product": {
+    "assets": {
+      "STRK": {
+        "asset_id": "STRK",
+        "min_trade_amount": "1000000000000000000",
+        "decimals": 18,
+        "enabled": true,
+        "token_address": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
+        "erc20_behavior": "vanilla-exact-delta",
+        "audit_status": "approved"
+      },
+      "ETH": {
+        "asset_id": "ETH",
+        "min_trade_amount": "1000000000000000",
+        "decimals": 18,
+        "enabled": true,
+        "token_address": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
+        "erc20_behavior": "vanilla-exact-delta",
+        "audit_status": "approved"
+      },
+      "USDC": {
+        "asset_id": "USDC",
+        "min_trade_amount": "1000000",
+        "decimals": 6,
+        "enabled": true,
+        "token_address": "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343",
+        "erc20_behavior": "vanilla-exact-delta",
+        "audit_status": "approved"
+      },
+      "strkBTC": {
+        "asset_id": "strkBTC",
+        "min_trade_amount": "100000",
+        "decimals": 8,
+        "enabled": true,
+        "token_address": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
+        "erc20_behavior": "vanilla-exact-delta",
+        "audit_status": "approved"
+      },
+      "WBTC": {
+        "asset_id": "WBTC",
+        "min_trade_amount": "100000",
+        "decimals": 8,
+        "enabled": true,
+        "token_address": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
+        "erc20_behavior": "vanilla-exact-delta",
+        "audit_status": "approved"
+      },
+      "USDT": {
+        "asset_id": "USDT",
+        "min_trade_amount": "1000000",
+        "decimals": 6,
+        "enabled": true,
+        "token_address": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb",
+        "erc20_behavior": "vanilla-exact-delta",
+        "audit_status": "approved"
+      }
+    },
+    "pairs": {
+      "STRK/USDC": {
+        "pair_id": "STRK/USDC",
+        "base_asset_id": "STRK",
+        "quote_asset_id": "USDC",
+        "min_order_amount": "1000000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 4,
+        "relay_fee_bps": 0,
+        "enabled": true
+      },
+      "ETH/USDC": {
+        "pair_id": "ETH/USDC",
+        "base_asset_id": "ETH",
+        "quote_asset_id": "USDC",
+        "min_order_amount": "1000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 4,
+        "relay_fee_bps": 0,
+        "enabled": true
+      },
+      "strkBTC/USDC": {
+        "pair_id": "strkBTC/USDC",
+        "base_asset_id": "strkBTC",
+        "quote_asset_id": "USDC",
+        "min_order_amount": "100000",
+        "price_base_scale": "100000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 4,
+        "relay_fee_bps": 0,
+        "enabled": true
+      },
+      "STRK/ETH": {
+        "pair_id": "STRK/ETH",
+        "base_asset_id": "STRK",
+        "quote_asset_id": "ETH",
+        "min_order_amount": "1000000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 4,
+        "relay_fee_bps": 0,
+        "enabled": true
+      },
+      "STRK/strkBTC": {
+        "pair_id": "STRK/strkBTC",
+        "base_asset_id": "STRK",
+        "quote_asset_id": "strkBTC",
+        "min_order_amount": "1000000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 4,
+        "relay_fee_bps": 0,
+        "enabled": true
+      },
+      "WBTC/strkBTC": {
+        "pair_id": "WBTC/strkBTC",
+        "base_asset_id": "WBTC",
+        "quote_asset_id": "strkBTC",
+        "min_order_amount": "100000",
+        "price_base_scale": "100000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 1,
+        "relay_fee_bps": 0,
+        "enabled": true
+      },
+      "USDC/USDT": {
+        "pair_id": "USDC/USDT",
+        "base_asset_id": "USDC",
+        "quote_asset_id": "USDT",
+        "min_order_amount": "1000000",
+        "price_base_scale": "1000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 1,
+        "relay_fee_bps": 0,
+        "enabled": true
+      }
+    }
+  },
+  "proof": {
+    "scheme": "native-starknet-proof-bearing-invoke-v3",
+    "proof_version": "PROOF1",
+    "settlement_statement_type": 1,
+    "settlement_statement_schema": 1,
+    "auction_statement_type": 2,
+    "auction_statement_schema": 1,
+    "settlement_entrypoint": "submit_settlement_with_proof_facts",
+    "proof_entrypoint": "compile_settlement_proof",
+    "proof_program_address": "0x040672ccaa58bb198eccefbf512606744a07daea87ee2d14d81a3c6e782b5bbd",
+    "proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "statement_proof_program_hashes": {
+      "ADMISSION": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "AUCTION_RESULT": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "NULLIFIER": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "RENEWAL": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "LIQUIDITY_POSITION": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "SETTLEMENT": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "SETTLEMENT_ORDER": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "SETTLEMENT_INPUT_MEMBERSHIP": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "SETTLEMENT_OUTPUT_RECOVERY": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "NOTE_CONSOLIDATION": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "AGGREGATE_SETTLEMENT": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "WITHDRAWAL": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+      "MULTI_PAIR": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57"
+    },
+    "admission_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "auction_result_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "nullifier_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "renewal_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "liquidity_position_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "settlement_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "settlement_order_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "settlement_input_membership_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "settlement_output_recovery_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "note_consolidation_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "aggregate_settlement_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "withdrawal_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "multi_pair_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "starknet_os_config_hash": "0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1",
+    "settlement_statement_program_address": "0x04a7a20e51f6defde7c811d6347f358eb8610f34ab68daee2bd6824cb3789626",
+    "settlement_note_fee_statement_program_address": "0x0117eecd3bc089a1986f7b6764546b1df8695af625629ad1d37c6435867572e9",
+    "settlement_order_statement_program_address": "0x05b9d09c99bb16d24046321ebaf9c383ce7d0b795df20b55ffe2c64017e861f6",
+    "settlement_input_membership_statement_program_address": "0x05adcec002c310b680de06e329bc734eff10bfe61dfb291d3962c48b07848fa2",
+    "settlement_output_recovery_statement_program_address": "0x0020cb8b7cbda7a8e9eb3f67e6cf5ba22db893aee45b7f2783b9c445ab7b9eaf",
+    "nullifier_statement_program_address": "0x0286f744144053b5d989d976e07a6db3fb2cdaeb38da3e0694264ff25015bffb",
+    "renewal_statement_program_address": "0x06dbe4ffe997650cb59e19e6e0d5a5ee9002aeed150b4f7d106b4e4127adaa51",
+    "liquidity_position_statement_program_address": "0x0694fa9c6204cbc91255a94e48bcdd32949b3744e4a69bf2dd1337c0e7d82b09",
+    "note_consolidation_statement_program_address": "0x0389550cc3f31feb747c3ceeddd228ee965c77bbad06e117115702872bf8a8a6",
+    "withdrawal_statement_program_address": "0x00bd585b9b3a93d8a9013f36c7aa0f0950a1ec011b47f356c72248be31059950",
+    "admission_statement_program_address": "0x050473c6c964db62d38efd0bf8477815acb7612b49820bf8cf94d099b434acb0",
+    "auction_result_statement_program_address": "0x024005e0a9e5b7922c5bc1eda285cb7ade1be920b541de8696348bf2592e40e9",
+    "multi_pair_statement_program_address": "0x05e1f1599d4640ede659a5c73f632558c1327878f3f64e5ff2d700b6dea22315",
+    "proof_account_address": "0x61cb652187e949f5425db8f721f0d6bab36c40491d9806756514f8d501c96b6",
+    "settlement_account_address": "0x61cb652187e949f5425db8f721f0d6bab36c40491d9806756514f8d501c96b6",
+    "deposit_root_registrar_address": "0x06babf29617b1b1a24748959fd7b83a9ab572e1e2ccd2f41a55cb5edc8092b4c",
+    "initial_note_root": "0x35829a48d19b9c1ee2c20f38dee255a3deb9c36bab207a3ea72dd70bf68b7d3",
+    "initial_nullifier_root": "0x0",
+    "initial_renewal_root": "0x0",
+    "initial_fee_root": "0x0",
+    "proof_validity_blocks": 450,
+    "output_claim_delay_seconds": 1800,
+    "proof_program_locked_after_deploy": true,
+    "operational_config_locked_after_deploy": true,
+    "commitment_registry_config_locked_after_deploy": true,
+    "batch_registry_config_locked_after_deploy": true,
+    "privacy_deposit_bridge_config_locked_after_deploy": true,
+    "native_tx_prover_url": "https://api.zylith.fi/starknet-privacy-prover-sepolia",
+    "native_tx_prover_ohttp_enabled": true
+  },
+  "roles": {
+    "protocol_fee_recipient": "0x151310191061bb72006f20965378825b9255e4776daa499888a900fd055d55e",
+    "relay_fee_recipient": "0x3d7db19714bd6bb53a3499c89fc00d4771ca1eec3b2fb5cbef492cef5f535d2",
+    "pause_guardian_address": "0x61cb652187e949f5425db8f721f0d6bab36c40491d9806756514f8d501c96b6"
+  },
+  "runtime": {
+    "batch_window_ms": 20000,
+    "public_artifact_delay_min_epochs": 14,
+    "public_artifact_delay_max_epochs": 36,
+    "artifact_epoch_bucket_size": 8,
+    "output_claim_delay_seconds": 1800
+  }
+}

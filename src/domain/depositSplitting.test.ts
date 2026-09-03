@@ -7,13 +7,13 @@ const USDC = 10n ** 6n;
 const BTC = 10n ** 8n;
 
 describe("deposit splitting", () => {
-  it("uses fixed launch denominations for STRK", () => {
+  it("uses fixed private-note denominations for STRK", () => {
     const table = denominationTableForAsset("STRK", 18);
     expect(table).toContain(2n * STRK);
     expect(table).toContain(25_000_000n * STRK);
   });
 
-  it("covers large launch-token denomination bands", () => {
+  it("covers large asset denomination bands", () => {
     expect(denominationTableForAsset("USDC", 6)).toContain(1_000_000n * USDC);
     expect(denominationTableForAsset("ETH", 18)).toContain(500n * ETH);
     expect(denominationTableForAsset("strkBTC", 8)).toContain(10n * BTC);
@@ -107,8 +107,9 @@ describe("deposit splitting", () => {
     expect(chunks.reduce((sum, chunk) => sum + chunk, 0n)).toBe(1_000_000n * USDC);
   });
 
-  it("falls back to unit denominations for unlisted assets", () => {
-    const table = denominationTableForAsset("NEW", 6);
-    expect(table.slice(0, 3)).toEqual([1n * USDC, 5n * USDC, 10n * USDC]);
+  it("rejects assets without explicit deposit denominations", () => {
+    expect(() => denominationTableForAsset("NEW", 6)).toThrow(
+      "Deposit denominations are not configured for NEW"
+    );
   });
 });

@@ -1,9 +1,9 @@
 export type AppTab = "trade" | "orders" | "assets" | "reports";
 export type Workspace = "taker" | "liquidity";
-export type LiquidityTab = "curves" | "orders" | "inventory" | "analytics";
+export type LiquidityTab = "positions" | "orders" | "inventory" | "analytics";
 
 export const LIQUIDITY_TABS: readonly LiquidityTab[] = [
-  "curves",
+  "positions",
   "orders",
   "inventory",
   "analytics",
@@ -25,11 +25,11 @@ export function takerTabFromPath(path: string): AppTab {
 
 export function liquidityTabFromPath(path: string): LiquidityTab {
   const segment = path.split("/")[2];
-  if (segment === "curves") return "curves";
+  if (segment === "positions" || segment === "curves") return "positions";
   if (segment === "orders") return "orders";
   if (segment === "inventory") return "inventory";
   if (segment === "analytics") return "analytics";
-  return "curves";
+  return "positions";
 }
 
 export function takerPath(tab: AppTab): string {

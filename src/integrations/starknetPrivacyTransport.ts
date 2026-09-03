@@ -1,5 +1,5 @@
 export function serviceBaseUrl(url: string): string {
-  return url.replace(/\/+$/, "");
+  return url.trim().replace(/\/+$/, "");
 }
 
 export function paymasterExecuteUrl(url: string): string {

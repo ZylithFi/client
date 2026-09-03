@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  isMakerLiquidityOrder,
+  isLiquidityPositionOrder,
   reconcileOrderLifecycle,
   type LocalOrder,
 } from "./orderLifecycle";
@@ -63,15 +63,15 @@ const deps = {
 };
 
 describe("order workspace classification", () => {
-  it("keeps direct taker orders out of the maker liquidity workspace", () => {
-    expect(isMakerLiquidityOrder(order({ wireMode: "Limit" }))).toBe(false);
-    expect(isMakerLiquidityOrder(order({ wireMode: "TWAP" }))).toBe(false);
+  it("keeps direct taker orders out of the liquidity position workspace", () => {
+    expect(isLiquidityPositionOrder(order({ wireMode: "Limit" }))).toBe(false);
+    expect(isLiquidityPositionOrder(order({ wireMode: "TWAP" }))).toBe(false);
   });
 
-  it("classifies curve and strategy child orders as maker liquidity", () => {
-    expect(isMakerLiquidityOrder(order({ wireMode: "Maker Curve" }))).toBe(true);
-    expect(isMakerLiquidityOrder(order({ wireMode: "Resting" }))).toBe(true);
-    expect(isMakerLiquidityOrder(order({
+  it("classifies curve and strategy child orders as liquidity positions", () => {
+    expect(isLiquidityPositionOrder(order({ wireMode: "Liquidity Position" }))).toBe(true);
+    expect(isLiquidityPositionOrder(order({ wireMode: "Resting" }))).toBe(true);
+    expect(isLiquidityPositionOrder(order({
       wireMode: "Limit",
       strategyId: "strategy-1",
     }))).toBe(true);
@@ -137,6 +137,50 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].status).toBe("filled");
   });
 
+  it("attaches liquidity attribution from matched settlement outputs", () => {
+    const attribution = {
+      version: 1,
+      pair_id: "STRK/USDC",
+      order_commitment: "0xorder",
+      funding_note_ref: "0xfunding",
+      side: "Buy" as const,
+      clearing_price: "250000",
+      filled_base_amount: "10000000000000000000",
+      bands: [
+        {
+          band_index: 0,
+          band_price: "250000",
+          band_base_amount: "10000000000000000000",
+          filled_base_amount: "10000000000000000000",
+        },
+      ],
+    };
+
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ expectedOutputMetadataCommitment: "0xliq" })],
+      batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
+      settlementTranscripts: {
+        "batch-1": {
+          batch_id: "batch-1",
+          batch_epoch: 10,
+          clearing_price: "250000",
+          price_base_scale: "1000000000000000000",
+        },
+      },
+      withdrawableNotes: [{
+        source: "settlement_output",
+        batch_id: "batch-1",
+        asset: "STRK",
+        amount: "10000000000000000000",
+        metadata_commitment: "0xliq",
+        liquidity_provider_attribution: attribution,
+      }],
+      ...deps,
+    });
+
+    expect(updated[0].liquidityBandAttribution).toEqual(attribution);
+  });
+
   it("matches output metadata commitments after felt normalization", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({
@@ -181,7 +225,7 @@ describe("order lifecycle reconciliation", () => {
         },
       },
       withdrawableNotes: [],
-      noFillFallbackEpochs: 10,
+      noFillDisplayAfterEpochs: 10,
       ...deps,
     });
 
@@ -298,6 +342,40 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].filledAmount).toBe("10");
   });
 
+  it("does not crash on malformed matched-output arithmetic fields", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({
+        ordRef: "ORD-malformed-output",
+        side: "Buy",
+        expectedOutputMetadataCommitment: "0xbad-output",
+      })],
+      batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
+      settlementTranscripts: {
+        "batch-1": {
+          batch_id: "batch-1",
+          batch_epoch: 10,
+          clearing_price: "not-a-number",
+          price_base_scale: "0",
+        },
+      },
+      withdrawableNotes: [{
+        source: "settlement_output",
+        batch_id: "batch-1",
+        asset: "STRK",
+        amount: "not-a-number",
+        metadata_commitment: "0xbad-output",
+      }],
+      ...deps,
+      formatClearingPrice: () => {
+        throw new Error("bad clearing price");
+      },
+    });
+
+    expect(updated[0].status).toBe("filled");
+    expect(updated[0].clearingPrice).toBe("not-a-number");
+    expect(updated[0].filledAmount).toBeUndefined();
+  });
+
   it("does not mutate orders by amount-only output matching", () => {
     const updated = reconcileOrderLifecycle({
       orders: [
@@ -347,10 +425,10 @@ describe("order lifecycle reconciliation", () => {
     expect(updated.find(o => o.ordRef === "ORD-buy")?.filledAmount).toBeUndefined();
   });
 
-  it("does not amount-match relayed maker outputs without metadata", () => {
+  it("does not amount-match relayed liquidity outputs without metadata", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({
-        ordRef: "ORD-relayed-maker",
+        ordRef: "ORD-relayed-liquidity",
         side: "Buy",
         wireMode: "Resting",
         strategyId: "strategy-1",
@@ -372,7 +450,7 @@ describe("order lifecycle reconciliation", () => {
         batch_id: "batch-1",
         asset: "STRK",
         amount: "9997000000000000000",
-        metadata_commitment: "0xrelayed-maker-output",
+        metadata_commitment: "0xrelayed-liquidity-output",
       }],
       ...deps,
     });
@@ -415,7 +493,7 @@ describe("order lifecycle reconciliation", () => {
       ],
       settlementTranscripts: {},
       withdrawableNotes: [],
-      settlementBlockedFallbackEpochs: 10,
+      stalledDisplayAfterEpochs: 10,
       ...deps,
     });
 
@@ -437,7 +515,7 @@ describe("order lifecycle reconciliation", () => {
         },
       },
       withdrawableNotes: [],
-      settlementBlockedFallbackEpochs: 10,
+      stalledDisplayAfterEpochs: 10,
       ...deps,
     });
 
@@ -538,7 +616,7 @@ describe("order lifecycle reconciliation", () => {
     expect(updated[0].filledAmount).toBe("15");
   });
 
-  it("releases confirmed zero-match batches before delayed artifacts publish", () => {
+  it("marks confirmed zero-match batches no_fill before delayed artifacts publish", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
       batches: [
@@ -597,7 +675,7 @@ describe("order lifecycle reconciliation", () => {
         },
       },
       withdrawableNotes: [],
-      settlementBlockedFallbackEpochs: 10,
+      stalledDisplayAfterEpochs: 10,
       ...deps,
     });
 
@@ -613,7 +691,7 @@ describe("order lifecycle reconciliation", () => {
       ],
       settlementTranscripts: {},
       withdrawableNotes: [],
-      settlementBlockedFallbackEpochs: 10,
+      stalledDisplayAfterEpochs: 10,
       ...deps,
     });
 

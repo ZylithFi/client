@@ -1,6 +1,7 @@
 import { useReducer } from "react";
-import { assetScale, fromAtomicStr, toPriceAtomicStr } from "../domain/assets";
-import type { CurvePoint } from "../domain/makerCurves";
+import { assetScale, safeFromAtomicStr, toPriceAtomicStr } from "../domain/assets";
+import type { LiquidityBandPoint } from "../domain/liquidityBands";
+import { safeAtomicAmount } from "../domain/noteLifecycle";
 import { runPrimaryActionOnEnter } from "../domain/primaryEnter";
 import type { WalletBalance } from "../domain/shieldedBalances";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
@@ -15,7 +16,6 @@ export type PairConfig = {
   min_order_amount: string;
   price_base_scale?: string;
   taker_fee_bps?: number;
-  maker_fee_bps?: number;
   relay_fee_bps?: number;
   enabled: boolean;
 };
@@ -30,14 +30,14 @@ export type TicketSubmitIntent = {
   limitPrice: string;
   minFill: string;
   fillOrKill: boolean;
-  curvePoints: CurvePoint[];
+  curvePoints: LiquidityBandPoint[];
   inventoryCap: string;
   durationHours: string;
   childSize: string;
   priceLimit: string;
   jitter: number;
   relayMode?: "SelfRelay" | "ZylithRelay";
-  relayOperator?: "ZylithRelay" | "SelfHostedRelay" | "LocalBrowser";
+  relayOperator?: "ZylithRelay" | "SelfHostedRelay";
   selfRelayUrl?: string;
 };
 
@@ -123,7 +123,7 @@ function ShapeTab({
   return (
     <button
       type="button"
-      className={`shape-tab ${active ? "on" : ""} ${gated ? "maker-gated" : ""}`}
+      className={`shape-tab ${active ? "on" : ""} ${gated ? "liquidity-gated" : ""}`}
       onClick={onClick}
     >
       <span className="shape-tab-title">{title}</span>
@@ -173,13 +173,13 @@ export function OrderTicket({
   const priceBaseScaleValue = pair.price_base_scale ?? assetScale(baseAsset).toString();
   const fundingAsset = state.side === "Buy" ? quoteAsset : baseAsset;
   const fundingBal = balances.find(b => b.asset === fundingAsset);
-  const fundingAvailable = fundingBal ? BigInt(fundingBal.available) : 0n;
-  const fundingLocked = fundingBal ? BigInt(fundingBal.locked) : 0n;
+  const fundingAvailable = fundingBal ? safeAtomicAmount(fundingBal.available) : 0n;
+  const fundingLocked = fundingBal ? safeAtomicAmount(fundingBal.locked) : 0n;
   const availableDisplay = fundingBal && walletReady
-    ? fromAtomicStr(fundingBal.available, fundingAsset)
+    ? safeFromAtomicStr(fundingBal.available, fundingAsset)
     : null;
   const lockedDisplay = fundingBal && walletReady && fundingLocked > 0n
-    ? fromAtomicStr(fundingBal.locked, fundingAsset)
+    ? safeFromAtomicStr(fundingBal.locked, fundingAsset)
     : null;
 
   if (!walletReady) {
@@ -187,7 +187,7 @@ export function OrderTicket({
       <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Connect wallet to start.</div>
-          <div className="gate-body">Choose a Starknet wallet, then unlock the local Zylith wallet.</div>
+          <div className="gate-body">Choose a Starknet wallet to enable private trading.</div>
           <button className="btn-accent gate-primary" onClick={onOpenWallet}>
             Connect wallet
           </button>
@@ -201,7 +201,7 @@ export function OrderTicket({
       <div className="ticket-zone ticket-gate-zone">
         <div className="ticket-state-gate">
           <div className="gate-title">Deposit before trading.</div>
-          <div className="gate-body">Add funds to your Zylith wallet before placing an order.</div>
+          <div className="gate-body">Add private funds before placing an order.</div>
           <button className="btn-accent gate-primary" onClick={onDeposit}>
             Deposit
           </button>
@@ -212,17 +212,19 @@ export function OrderTicket({
 
   function quickFill(pct: number) {
     if (!fundingBal || !walletReady) return;
-    const portion = BigInt(fundingBal.available) * BigInt(pct) / 100n;
+    const portion = fundingAvailable * BigInt(pct) / 100n;
+    if (portion <= 0n) return;
     if (state.side === "Sell") {
-      dispatch({ type: "patch", patch: { amount: fromAtomicStr(portion.toString(), baseAsset) } });
+      dispatch({ type: "patch", patch: { amount: safeFromAtomicStr(portion, baseAsset, "0") } });
       return;
     }
     const priceInput = state.shape === "strategy" ? state.priceLimit : state.limitPrice;
     const price = BigInt(toPriceAtomicStr(priceInput, quoteAsset));
     if (price <= 0n) return;
-    const priceBaseScale = BigInt(priceBaseScaleValue);
+    const priceBaseScale = safeAtomicAmount(priceBaseScaleValue);
+    if (priceBaseScale <= 0n) return;
     const baseAtomic = (portion * priceBaseScale) / price;
-    dispatch({ type: "patch", patch: { amount: fromAtomicStr(baseAtomic.toString(), baseAsset) } });
+    dispatch({ type: "patch", patch: { amount: safeFromAtomicStr(baseAtomic, baseAsset, "0") } });
   }
 
   const canQuickFill = Boolean(
@@ -481,17 +483,17 @@ export function OrderTicket({
                       {fundingPreview.notes.map(note => (
                         <div key={note.note_commitment} className="funding-preview-row">
                           <span>{note.note_commitment.slice(0, 8)}…{note.note_commitment.slice(-4)}</span>
-                          <strong>{fromAtomicStr(note.amount, note.asset)} {note.asset}</strong>
+                          <strong>{safeFromAtomicStr(note.amount, note.asset)} {note.asset}</strong>
                         </div>
                       ))}
                     </div>
                     <div className="wc-row">
                       <span className="l">Locked capital</span>
-                      <span className="r">{fromAtomicStr(fundingPreview.selected_total, fundingPreview.asset)} {fundingPreview.asset}</span>
+                      <span className="r">{safeFromAtomicStr(fundingPreview.selected_total, fundingPreview.asset)} {fundingPreview.asset}</span>
                     </div>
                     <div className="wc-row">
                       <span className="l">Expected change</span>
-                      <span className="r">{fromAtomicStr(fundingPreview.expected_change, fundingPreview.asset)} {fundingPreview.asset}</span>
+                      <span className="r">{safeFromAtomicStr(fundingPreview.expected_change, fundingPreview.asset)} {fundingPreview.asset}</span>
                     </div>
                     {state.shape === "strategy" && (
                       <div className="wc-note">

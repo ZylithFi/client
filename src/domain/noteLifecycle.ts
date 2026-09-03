@@ -6,10 +6,20 @@ export type AmountByAssetInput = {
   amount: string;
 };
 
+export function safeAtomicAmount(value: string | bigint | number | undefined): bigint {
+  if (value === undefined) return 0n;
+  try {
+    const parsed = BigInt(String(value));
+    return parsed >= 0n ? parsed : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
 export function sumByAsset<T extends AmountByAssetInput>(items: T[]): Map<string, bigint> {
   const totals = new Map<string, bigint>();
   for (const item of items) {
-    totals.set(item.asset, (totals.get(item.asset) ?? 0n) + BigInt(item.amount || "0"));
+    totals.set(item.asset, (totals.get(item.asset) ?? 0n) + safeAtomicAmount(item.amount));
   }
   return totals;
 }

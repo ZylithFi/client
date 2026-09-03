@@ -21,7 +21,7 @@ describe("offlineRenewalOperator", () => {
   it("does not reuse funding after a prior proof failure", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes("/api/pairs/STRK/USDC/batches/current")) {
+      if (url.includes("/api/pairs/STRK/USDC/batches/submittable")) {
         return jsonResponse({
           batch_id: "STRK-USDC-2",
           pair_id: "STRK/USDC",
@@ -59,7 +59,7 @@ describe("offlineRenewalOperator", () => {
     let ingressBody: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes("/api/pairs/STRK/USDC/batches/current")) {
+      if (url.includes("/api/pairs/STRK/USDC/batches/submittable")) {
         return jsonResponse({
           batch_id: "STRK-USDC-1",
           pair_id: "STRK/USDC",
@@ -114,6 +114,67 @@ describe("offlineRenewalOperator", () => {
       renewal_slot_batch_id: "STRK-USDC-1",
       renewal_slot_epoch_id: 1,
     });
+  });
+
+  it("normalizes offline relay abort failures per slot", async () => {
+    const renewalPackage = selfRelayPackage();
+    renewalPackage.end_epoch = 1;
+    renewalPackage.slot_count = 1;
+    renewalPackage.slots = [renewalPackage.slots[0]!];
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(
+        new DOMException("Signal is aborted without reason", "AbortError")
+      ) as unknown as typeof fetch;
+
+    const results = await relayOfflineRenewalPackage(renewalPackage, {
+      fetchImpl: fetchMock,
+      now: () => Date.now(),
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.status).toBe("failed");
+    expect(results[0]?.detail).toBe(
+      "Offline renewal request failed. Check your connection and retry."
+    );
+  });
+
+  it("redacts large private-ingress error bodies per slot", async () => {
+    const renewalPackage = selfRelayPackage();
+    renewalPackage.end_epoch = 1;
+    renewalPackage.slot_count = 1;
+    renewalPackage.slots = [renewalPackage.slots[0]!];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/pairs/STRK/USDC/batches/submittable")) {
+        return jsonResponse({
+          batch_id: "STRK-USDC-1",
+          pair_id: "STRK/USDC",
+          epoch_id: 1,
+          close_time_unix_ms: Date.now() + 60_000,
+          status: "Open",
+        });
+      }
+      if (url.includes("/api/renewal/cancel-markers/")) {
+        return jsonResponse({ recorded: false });
+      }
+      if (url.includes("/api/private/orders")) {
+        return new Response(
+          'failed for 0x1234567890abcdef1234567890abcdef1234567890abcdef with "calldata":["0x1234567890abcdef1234567890abcdef1234567890abcdef"]',
+          { status: 500 }
+        );
+      }
+      return new Response(null, { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const results = await relayOfflineRenewalPackage(renewalPackage, {
+      fetchImpl: fetchMock,
+      now: () => Date.now(),
+    });
+
+    expect(results[0]?.status).toBe("failed");
+    expect(results[0]?.detail).not.toContain("1234567890abcdef");
+    expect(results[0]?.detail).not.toContain("calldata");
   });
 });
 

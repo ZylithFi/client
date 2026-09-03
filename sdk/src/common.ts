@@ -1,8 +1,10 @@
 export type OrderSide = "Buy" | "Sell";
-export type StrategySide = "Bid" | "Ask" | "Both";
 export type RelayMode = "SelfRelay" | "ZylithRelay";
 
-const MIN_MANAGED_MAKER_CURVE_POINTS = 3;
+export const DEFAULT_SDK_REQUEST_TIMEOUT_MS = 30_000;
+export const DEFAULT_SDK_RESPONSE_MAX_BYTES = 1_048_576;
+export const DEFAULT_SDK_ERROR_RESPONSE_MAX_BYTES = 65_536;
+export const MAX_MARKET_OBSERVATION_FUTURE_SKEW_MS = 60_000;
 
 export type PairConfig = {
   pair_id: string;
@@ -10,6 +12,8 @@ export type PairConfig = {
   quote_asset_id: string;
   min_order_amount: string;
   price_base_scale?: string;
+  taker_fee_bps?: number;
+  relay_fee_bps?: number;
   enabled: boolean;
 };
 
@@ -21,6 +25,49 @@ export type BatchSummary = {
   status: "Open" | "Closed" | "Clearing" | "Settled" | "Cancelled" | "Proving" | "Settling";
   order_count_bucket: string;
 };
+
+const BATCH_SUMMARY_STATUSES = new Set<BatchSummary["status"]>([
+  "Open",
+  "Closed",
+  "Clearing",
+  "Settled",
+  "Cancelled",
+  "Proving",
+  "Settling",
+]);
+
+export function parseBatchSummary(value: unknown, label = "Coordinator batch response"): BatchSummary {
+  const record = sdkObjectRecord(value, label);
+  const status = sdkRequiredString(record.status, "batch status");
+  if (!BATCH_SUMMARY_STATUSES.has(status as BatchSummary["status"])) {
+    throw new Error("Coordinator returned an invalid batch status");
+  }
+  return {
+    batch_id: sdkRequiredString(record.batch_id, "batch id"),
+    pair_id: sdkRequiredString(record.pair_id, "pair id"),
+    epoch_id: sdkNonNegativeSafeInteger(record.epoch_id, "batch epoch"),
+    close_time_unix_ms: sdkNonNegativeSafeInteger(record.close_time_unix_ms, "batch close time"),
+    status: status as BatchSummary["status"],
+    order_count_bucket: sdkRequiredString(record.order_count_bucket, "order count bucket"),
+  };
+}
+
+function sdkObjectRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function sdkRequiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
+function sdkNonNegativeSafeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`Invalid ${label}`);
+  return value as number;
+}
 
 export type TicketSubmitIntent = {
   pairId: string;
@@ -48,7 +95,7 @@ export type WalletBalance = {
   locked: string;
 };
 
-export type MakerBandAttribution = {
+export type LiquidityBandAttribution = {
   version: number;
   pair_id: string;
   order_commitment: string;
@@ -77,7 +124,7 @@ export type WithdrawableNote = {
   strk20_exit_commitment?: string;
   strk20_open_note_id?: string;
   metadata_commitment: string;
-  maker_attribution?: MakerBandAttribution;
+  liquidity_provider_attribution?: LiquidityBandAttribution;
 };
 
 export type LocalOrder = {
@@ -160,7 +207,7 @@ export type PendingExposure = {
   status: "queued" | "submitted" | "settling";
 };
 
-export type ManagedInventorySnapshot = {
+export type LiquidityInventorySnapshot = {
   pair: string;
   baseAsset: string;
   quoteAsset: string;
@@ -174,116 +221,7 @@ export type ManagedInventorySnapshot = {
   baseRatio: number;
 };
 
-export type ManagedStrategyConfig = {
-  pair: string;
-  side: StrategySide;
-  targetBaseRatio: number;
-  targetBaseRatioMin?: number;
-  targetBaseRatioMax?: number;
-  baseSpreadBps: number;
-  volatilityBps: number;
-  inventorySkewBps: number;
-  bandCount: number;
-  maxEpochBase: number;
-  minBandBase: number;
-  maxExposureBase: number;
-  relayMode: RelayMode;
-  durationHours: number;
-};
-
-export type ManagedRiskPolicy = {
-  minSpreadBps: number;
-  maxSpreadBps: number;
-  maxPriceDeviationBps: number;
-  maxEpochBase: number;
-  maxInventoryImbalanceBps: number;
-  allowBid: boolean;
-  allowAsk: boolean;
-};
-
-export type ManagedCurveDraft = {
-  pair: string;
-  side: OrderSide;
-  fairPrice: number;
-  reservationPrice: number;
-  spreadBps: number;
-  inventorySkewBps: number;
-  maxBaseAmount: number;
-  points: Array<{ price: number; baseAmount: number }>;
-  relayMode: RelayMode;
-  durationHours: number;
-};
-
-export type ManagedCurvePlan =
-  | {
-      ok: true;
-      fairPrice: FairPriceResult & { ok: true };
-      inventory: ManagedInventorySnapshot;
-      curves: ManagedCurveDraft[];
-      clipped: string[];
-    }
-  | {
-      ok: false;
-      reason: string;
-      fairPrice?: FairPriceResult;
-      inventory?: ManagedInventorySnapshot;
-    };
-
-export type DelegatedMakerPermission = {
-  pairs: string[];
-  sides: OrderSide[];
-  maxEpochBase: number;
-  maxPriceDeviationBps: number;
-  expiresAt: number;
-  relayModes: RelayMode[];
-};
-
-export type DelegatedMakerAuthorization =
-  | { ok: true; curve: ManagedCurveDraft }
-  | { ok: false; reason: string };
-
-export type SpendAuthorization = {
-  signature_r: string;
-  signature_s: string;
-};
-
-export type ManagedMakerPolicy = {
-  version: number;
-  delegate_public_key: string;
-  pair_id: string;
-  allow_buy: boolean;
-  allow_sell: boolean;
-  max_epoch_base: string;
-  min_price: string;
-  max_price: string;
-  valid_from_epoch: string;
-  valid_until_epoch: string;
-  relay_mode: RelayMode;
-  parent_order_commitment: string;
-  recipient_owner_public_key: string;
-  recipient_spend_authority: string;
-  recipient_withdraw_authority: string;
-  recipient_residual_withdraw_authority: string;
-  auditor_view_allowed: boolean;
-  policy_nonce: string;
-};
-
-export type ManagedMakerAuthorization = {
-  policy: ManagedMakerPolicy;
-  owner_authorization: SpendAuthorization;
-};
-
-export type MakerPnlSummary = {
-  pair: string;
-  filledChildren: number;
-  noFillChildren: number;
-  baseDelta: number;
-  quoteDelta: number;
-  quoteNotional: number;
-  averageCaptureBps: number | null;
-};
-
-export type MakerOpsSnapshot = {
+export type LiquidityOpsSnapshot = {
   activeStrategies: number;
   delegatedStrategies: number;
   pausedStrategies: number;
@@ -291,39 +229,6 @@ export type MakerOpsSnapshot = {
   failedSlots: number;
   staleMarketPairs: string[];
   balances: WalletBalance[];
-};
-
-export type ManagedBacktestEpoch = {
-  epochId: number;
-  observedAt: number;
-  observations: MarketObservation[];
-  clearingPrice?: number;
-  fillFractions?: Partial<Record<OrderSide, number>>;
-  pending?: PendingExposure[];
-};
-
-export type ManagedBacktestEpochResult = {
-  epochId: number;
-  plan: ManagedCurvePlan;
-  fills: Array<{
-    side: OrderSide;
-    baseAmount: number;
-    quoteAmount: number;
-    executionPrice: number;
-  }>;
-  baseBalance: number;
-  quoteBalance: number;
-  markedValueQuote: number;
-};
-
-export type ManagedBacktestResult = {
-  pair: string;
-  epochs: ManagedBacktestEpochResult[];
-  finalBase: number;
-  finalQuote: number;
-  initialMarkedValueQuote: number;
-  finalMarkedValueQuote: number;
-  pnlQuote: number;
 };
 
 export type MarketDataSource = {
@@ -351,7 +256,12 @@ let configuredAssetDecimals: Record<string, number> = { ...DEFAULT_ASSET_DECIMAL
 export function configureAssetDecimals(assets: Record<string, { decimals?: number }> | null | undefined): void {
   configuredAssetDecimals = { ...DEFAULT_ASSET_DECIMALS };
   for (const [assetId, metadata] of Object.entries(assets ?? {})) {
-    if (typeof metadata.decimals === "number" && Number.isInteger(metadata.decimals) && metadata.decimals >= 0) {
+    if (
+      typeof metadata.decimals === "number" &&
+      Number.isInteger(metadata.decimals) &&
+      metadata.decimals >= 0 &&
+      metadata.decimals <= 255
+    ) {
       configuredAssetDecimals[assetId] = metadata.decimals;
     }
   }
@@ -376,6 +286,7 @@ export function toPriceAtomicStr(humanQuotePerBase: string, quoteAssetId: string
 
 export function fromAtomicStr(atomic: string, assetId: string): string {
   if (!atomic || atomic === "0") return "0";
+  if (!/^\d+$/.test(atomic)) throw new Error(`Invalid atomic amount for ${assetId}`);
   const dec = assetDecimals(assetId);
   const n = BigInt(atomic);
   const d = 10n ** BigInt(dec);
@@ -395,18 +306,36 @@ export class MarketDataEngine {
   private readonly now: () => number;
 
   constructor(options: MarketDataEngineOptions) {
-    this.sources = options.sources;
-    this.fairPricePolicy = options.fairPricePolicy;
+    if (!Array.isArray(options.sources) || options.sources.length === 0) {
+      throw new Error("Market data engine requires at least one source");
+    }
+    validateFairPricePolicy(options.fairPricePolicy);
+    const sourceIds = new Set<string>();
+    for (const source of options.sources) {
+      if (!source || typeof source !== "object" || typeof source.observe !== "function") {
+        throw new Error("Market data source is invalid");
+      }
+      if (typeof source.id !== "string") {
+        throw new Error("Market data source id is required");
+      }
+      const sourceId = source.id.trim().toLowerCase();
+      if (!sourceId) throw new Error("Market data source id is required");
+      if (sourceIds.has(sourceId)) throw new Error(`Duplicate market data source id: ${source.id}`);
+      sourceIds.add(sourceId);
+    }
+    if (options.fairPricePolicy.minSources > sourceIds.size) {
+      throw new Error("Fair price minimum source count exceeds configured sources");
+    }
+    this.sources = [...options.sources];
+    this.fairPricePolicy = { ...options.fairPricePolicy };
     this.now = options.now ?? Date.now;
   }
 
   async observations(pair: string, options: { signal?: AbortSignal } = {}): Promise<MarketObservation[]> {
-    const loaded = await Promise.allSettled(
-      this.sources.map((source) => source.observe(pair, options))
+    const loaded = await Promise.all(
+      this.sources.map((source) => observeMarketSource(source, pair, options))
     );
     return loaded
-      .filter((entry): entry is PromiseFulfilledResult<MarketObservation | null> => entry.status === "fulfilled")
-      .map((entry) => entry.value)
       .filter((entry): entry is MarketObservation => Boolean(entry));
   }
 
@@ -433,12 +362,26 @@ export function createHttpJsonPriceSource(options: HttpJsonPriceSourceOptions): 
     id: options.id,
     async observe(pair, requestOptions) {
       const url = typeof options.url === "function" ? options.url(pair) : options.url;
-      const response = await fetcher(url, {
-        headers: { accept: "application/json", ...options.headers },
+      const serviceUrl = normalizeSdkServiceUrl(url, `market data source ${options.id}`);
+      let response: Response;
+      try {
+        response = await fetchWithSdkTimeout(fetcher, serviceUrl, {
+          headers: { accept: "application/json", ...options.headers },
+          signal: requestOptions?.signal,
+        });
+      } catch (error) {
+        if (requestOptions?.signal?.aborted) throw error;
+        if (isTransientFetchError(error)) return null;
+        throw error;
+      }
+      if (!response.ok) {
+        if (isTransientHttpStatus(response.status)) return null;
+        throw new Error(`Market data source ${options.id} returned HTTP ${response.status}`);
+      }
+      const body = await readSdkJsonResponse(response, {
         signal: requestOptions?.signal,
+        label: `Market data source ${options.id}`,
       });
-      if (!response.ok) throw new Error(`Market data source ${options.id} returned HTTP ${response.status}`);
-      const body = await response.json();
       const sourcePair = options.pairPath ? String(readJsonPath(body, options.pairPath) ?? "") : pair;
       if (sourcePair && normalizePair(sourcePair) !== normalizePair(pair)) return null;
       const rawPrice = readJsonPath(body, options.pricePath);
@@ -471,30 +414,44 @@ export type StarknetOraclePriceSourceOptions = {
 
 export function createStarknetOraclePriceSource(options: StarknetOraclePriceSourceOptions): MarketDataSource {
   const fetcher = options.fetchImpl ?? defaultFetch();
+  const rpcUrl = normalizeSdkServiceUrl(options.rpcUrl, `oracle source ${options.id} RPC URL`);
   return {
     id: options.id,
     async observe(pair, requestOptions) {
       const calldata = typeof options.calldata === "function" ? options.calldata(pair) : options.calldata;
-      const response = await fetcher(options.rpcUrl, {
-        method: "POST",
-        headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "starknet_call",
-          params: {
-            request: {
-              contract_address: options.contractAddress,
-              entry_point_selector: options.entrypoint,
-              calldata,
+      let response: Response;
+      try {
+        response = await fetchWithSdkTimeout(fetcher, rpcUrl, {
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "starknet_call",
+            params: {
+              request: {
+                contract_address: options.contractAddress,
+                entry_point_selector: options.entrypoint,
+                calldata,
+              },
+              block_id: "latest",
             },
-            block_id: "latest",
-          },
-        }),
+          }),
+          signal: requestOptions?.signal,
+        });
+      } catch (error) {
+        if (requestOptions?.signal?.aborted) throw error;
+        if (isTransientFetchError(error)) return null;
+        throw error;
+      }
+      if (!response.ok) {
+        if (isTransientHttpStatus(response.status)) return null;
+        throw new Error(`Oracle source ${options.id} returned HTTP ${response.status}`);
+      }
+      const body = await readSdkJsonResponse(response, {
         signal: requestOptions?.signal,
-      });
-      if (!response.ok) throw new Error(`Oracle source ${options.id} returned HTTP ${response.status}`);
-      const body = await response.json() as { result?: string[]; error?: { message?: string } };
+        label: `Oracle source ${options.id}`,
+      }) as { result?: string[]; error?: { message?: string } };
       if (body.error) throw new Error(body.error.message ?? `Oracle source ${options.id} failed`);
       const result = body.result ?? [];
       const decimals = options.decimalsIndex === undefined
@@ -527,6 +484,8 @@ export function createStarknetOraclePriceSource(options: StarknetOraclePriceSour
 export type RatioPriceSourceOptions = {
   id: string;
   pair: string;
+  numeratorPair: string;
+  denominatorPair: string;
   numerator: MarketDataSource;
   denominator: MarketDataSource;
 };
@@ -537,8 +496,8 @@ export function createRatioPriceSource(options: RatioPriceSourceOptions): Market
     async observe(pair, requestOptions) {
       if (normalizePair(pair) !== normalizePair(options.pair)) return null;
       const [numerator, denominator] = await Promise.all([
-        options.numerator.observe(pair, requestOptions),
-        options.denominator.observe(pair, requestOptions),
+        observeMarketSource(options.numerator, options.numeratorPair, requestOptions),
+        observeMarketSource(options.denominator, options.denominatorPair, requestOptions),
       ]);
       if (!numerator || !denominator || denominator.price <= 0) return null;
       const price = numerator.price / denominator.price;
@@ -568,62 +527,33 @@ export function createPairScopedPriceSource(
   };
 }
 
-export type PublicSettlementTranscript = {
-  batch_id: string;
-  pair_id: string;
-  batch_epoch: number;
-  clearing_price: string | number;
-  price_base_scale?: string | number;
-  published_at_unix_ms?: number;
-  settled_at_unix_ms?: number;
-  loaded_at_unix_ms?: number;
-};
-
-export function createLastClearingAnalyticsSource(
-  id: string,
-  transcripts: Record<string, PublicSettlementTranscript>,
-  now: () => number = Date.now
-): MarketDataSource {
-  return {
-    id,
-    async observe(pair) {
-      const latest = Object.values(transcripts)
-        .filter((transcript) => transcript.pair_id === pair)
-        .sort((left, right) => right.batch_epoch - left.batch_epoch)[0];
-      if (!latest) return null;
-      const price = numberValue(latest.clearing_price) / numberValue(latest.price_base_scale ?? 1);
-      if (!Number.isFinite(price) || price <= 0) return null;
-      return {
-        source: id,
-        pair,
-        price,
-        observedAt: latest.settled_at_unix_ms ?? latest.published_at_unix_ms ?? latest.loaded_at_unix_ms ?? now(),
-      };
-    },
-  };
-}
-
 export function selectFairPrice(
   pair: string,
   observations: MarketObservation[],
   policy: FairPricePolicy,
   now = Date.now()
 ): FairPriceResult {
+  validateFairPricePolicy(policy);
+  const targetPair = normalizePair(pair);
   const fresh = observations
-    .filter((observation) => observation.pair === pair && observation.price > 0)
-    .filter((observation) => now - observation.observedAt <= policy.maxStalenessMs);
-  if (fresh.length === 0) {
+    .filter((observation) => normalizePair(observation.pair) === targetPair && observation.price > 0)
+    .filter((observation) =>
+      observation.observedAt <= now + MAX_MARKET_OBSERVATION_FUTURE_SKEW_MS &&
+      now - observation.observedAt <= policy.maxStalenessMs
+    );
+  const uniqueFresh = uniqueObservationsBySource(fresh);
+  if (uniqueFresh.length === 0) {
     return { ok: false, pair, reason: "no_sources", detail: "No fresh reference prices are available." };
   }
-  if (fresh.length < policy.minSources) {
-    return { ok: false, pair, reason: "stale", detail: `Only ${fresh.length} fresh source(s) available.` };
+  if (uniqueFresh.length < policy.minSources) {
+    return { ok: false, pair, reason: "stale", detail: `Only ${uniqueFresh.length} fresh source(s) available.` };
   }
-  const prices = fresh.map((observation) => observation.price).sort((a, b) => a - b);
+  const prices = uniqueFresh.map((observation) => observation.price).sort((a, b) => a - b);
   const median = prices.length % 2 === 1
     ? prices[Math.floor(prices.length / 2)]
     : (prices[prices.length / 2 - 1] + prices[prices.length / 2]) / 2;
   const maxDivergenceBps = Math.max(
-    ...fresh.map((observation) => Math.abs(bps(observation.price - median, median)))
+    ...uniqueFresh.map((observation) => Math.abs(bps(observation.price - median, median)))
   );
   if (maxDivergenceBps > policy.maxDivergenceBps) {
     return {
@@ -637,8 +567,8 @@ export function selectFairPrice(
     ok: true,
     pair,
     price: median,
-    observedAt: Math.max(...fresh.map((observation) => observation.observedAt)),
-    sources: fresh.map((observation) => observation.source),
+    observedAt: Math.max(...uniqueFresh.map((observation) => observation.observedAt)),
+    sources: uniqueFresh.map((observation) => observation.source),
     maxDivergenceBps,
   };
 }
@@ -647,8 +577,8 @@ export function pendingExposureFromOrders(orders: LocalOrder[]): PendingExposure
   return orders
     .filter((order) => ["queued", "in_batch", "proving", "settling", "settled_pending_output"].includes(order.status))
     .map((order) => {
-      const amount = numericValue(order.amount);
-      const price = numericValue(order.limitPrice || order.clearingPrice);
+      const amount = nonNegativeNumericValue(order.amount);
+      const price = nonNegativeNumericValue(order.limitPrice || order.clearingPrice);
       return {
         pair: order.pair,
         orderId: order.orderCommitment || order.ordRef,
@@ -661,31 +591,45 @@ export function pendingExposureFromOrders(orders: LocalOrder[]): PendingExposure
     });
 }
 
+function uniqueObservationsBySource(observations: MarketObservation[]): MarketObservation[] {
+  const bySource = new Map<string, MarketObservation>();
+  for (const observation of observations) {
+    const key = observation.source.trim().toLowerCase();
+    if (!key) continue;
+    const existing = bySource.get(key);
+    if (!existing || observation.observedAt >= existing.observedAt) {
+      bySource.set(key, observation);
+    }
+  }
+  return [...bySource.values()];
+}
+
 export function buildInventorySnapshot(
   pair: PairConfig,
   balances: WalletBalance[],
   pending: PendingExposure[] = [],
   referencePrice?: number
-): ManagedInventorySnapshot {
+): LiquidityInventorySnapshot {
   const baseBalance = balances.find((balance) => balance.asset === pair.base_asset_id);
   const quoteBalance = balances.find((balance) => balance.asset === pair.quote_asset_id);
-  const availableBase = numericValue(baseBalance?.available);
-  const availableQuote = numericValue(quoteBalance?.available);
-  const lockedBase = numericValue(baseBalance?.locked);
-  const lockedQuote = numericValue(quoteBalance?.locked);
+  const availableBase = nonNegativeNumericValue(baseBalance?.available);
+  const availableQuote = nonNegativeNumericValue(quoteBalance?.available);
+  const lockedBase = nonNegativeNumericValue(baseBalance?.locked);
+  const lockedQuote = nonNegativeNumericValue(quoteBalance?.locked);
   const pairPending = pending.filter((exposure) => exposure.pair === pair.pair_id);
   const pendingBuyBase = pairPending
     .filter((exposure) => exposure.side === "Buy")
-    .reduce((sum, exposure) => sum + exposure.baseAmount, 0);
+    .reduce((sum, exposure) => sum + Math.max(0, exposure.baseAmount), 0);
   const pendingSellBase = pairPending
     .filter((exposure) => exposure.side === "Sell")
-    .reduce((sum, exposure) => sum + exposure.baseAmount, 0);
+    .reduce((sum, exposure) => sum + Math.max(0, exposure.baseAmount), 0);
   const pendingQuote = pairPending
     .filter((exposure) => exposure.side === "Buy")
-    .reduce((sum, exposure) => sum + exposure.quoteAmount, 0);
-  const totalBase = availableBase + lockedBase + pendingBuyBase - pendingSellBase;
-  const totalQuoteAsBase = availableQuote > 0 && referencePrice && referencePrice > 0 ? availableQuote / referencePrice : 0;
-  const denominator = totalBase + totalQuoteAsBase;
+    .reduce((sum, exposure) => sum + Math.max(0, exposure.quoteAmount), 0);
+  const projectedBase = Math.max(0, availableBase + lockedBase + pendingBuyBase - pendingSellBase);
+  const projectedQuote = Math.max(0, availableQuote + lockedQuote - pendingQuote);
+  const totalQuoteAsBase = projectedQuote > 0 && referencePrice && referencePrice > 0 ? projectedQuote / referencePrice : 0;
+  const denominator = projectedBase + totalQuoteAsBase;
   return {
     pair: pair.pair_id,
     baseAsset: pair.base_asset_id,
@@ -697,211 +641,16 @@ export function buildInventorySnapshot(
     pendingBuyBase,
     pendingSellBase,
     pendingQuote,
-    baseRatio: denominator > 0 ? totalBase / denominator : 0,
+    baseRatio: denominator > 0 ? projectedBase / denominator : 0,
   };
 }
 
-export function buildManagedCurvePlan(input: {
-  pair: PairConfig;
-  fairPrice: FairPriceResult;
-  inventory: ManagedInventorySnapshot;
-  config: ManagedStrategyConfig;
-  risk: ManagedRiskPolicy;
-}): ManagedCurvePlan {
-  if (!input.fairPrice.ok) {
-    return { ok: false, reason: input.fairPrice.detail, fairPrice: input.fairPrice, inventory: input.inventory };
-  }
-  const fairPrice = input.fairPrice;
-  const clipped: string[] = [];
-  const target = targetBand(input.config);
-  const spreadBps = clamp(
-    input.config.baseSpreadBps + input.config.volatilityBps,
-    input.risk.minSpreadBps,
-    input.risk.maxSpreadBps
-  );
-  if (Math.floor(input.config.bandCount) < MIN_MANAGED_MAKER_CURVE_POINTS) {
-    return { ok: false, reason: "maker curve requires at least 3 bands", fairPrice: input.fairPrice, inventory: input.inventory };
-  }
-  if (spreadBps < makerCurveMinSpreadBps(input.pair.pair_id)) {
-    return { ok: false, reason: "maker curve spread is below protocol minimum", fairPrice: input.fairPrice, inventory: input.inventory };
-  }
-  if (spreadBps !== input.config.baseSpreadBps + input.config.volatilityBps) clipped.push("spread");
-  const imbalanceRatio = inventoryImbalanceRatio(input.inventory.baseRatio, target);
-  const imbalanceBps = imbalanceRatio * 10_000;
-  const forceAskOnly = imbalanceBps > input.risk.maxInventoryImbalanceBps;
-  const forceBidOnly = imbalanceBps < -input.risk.maxInventoryImbalanceBps;
-  if (forceAskOnly) clipped.push("bid-disabled-by-inventory");
-  if (forceBidOnly) clipped.push("ask-disabled-by-inventory");
-  const inventorySkewBps = clamp(
-    imbalanceRatio * input.config.inventorySkewBps,
-    -input.risk.maxPriceDeviationBps,
-    input.risk.maxPriceDeviationBps
-  );
-  const reservationPrice = input.fairPrice.price * (1 - inventorySkewBps / 10_000);
-  const maxBaseAmount = Math.min(input.config.maxEpochBase, input.risk.maxEpochBase, input.config.maxExposureBase);
-  if (maxBaseAmount <= 0) return { ok: false, reason: "max epoch size is zero", fairPrice: input.fairPrice, inventory: input.inventory };
-  const curves: ManagedCurveDraft[] = [];
-  if (!forceAskOnly && (input.config.side === "Bid" || input.config.side === "Both") && input.risk.allowBid) {
-    const quoteCapacity = Math.max(0, input.inventory.availableQuote - input.inventory.pendingQuote);
-    const capacityPrice = Math.max(reservationPrice, input.fairPrice.price);
-    const quoteCapacityBase = capacityPrice > 0 ? quoteCapacity / capacityPrice : 0;
-    const buyBaseAmount = Math.min(maxBaseAmount, quoteCapacityBase);
-    const curve = buildSideCurve({ ...input, fairPrice }, "Buy", reservationPrice, spreadBps, inventorySkewBps, buyBaseAmount);
-    if (curve) curves.push(curve);
-  }
-  if (!forceBidOnly && (input.config.side === "Ask" || input.config.side === "Both") && input.risk.allowAsk) {
-    const baseCapacity = Math.max(0, input.inventory.availableBase - input.inventory.pendingSellBase);
-    const sellBaseAmount = Math.min(maxBaseAmount, baseCapacity);
-    const curve = buildSideCurve({ ...input, fairPrice }, "Sell", reservationPrice, spreadBps, inventorySkewBps, sellBaseAmount);
-    if (curve) curves.push(curve);
-  }
-  if (curves.length === 0) return { ok: false, reason: "insufficient inventory for generated sides", fairPrice: input.fairPrice, inventory: input.inventory };
-  return { ok: true, fairPrice, inventory: input.inventory, curves, clipped };
-}
-
-export function authorizeDelegatedMakerCurve(
-  curve: ManagedCurveDraft,
-  fairPrice: number,
-  permission: DelegatedMakerPermission,
-  now = Date.now()
-): DelegatedMakerAuthorization {
-  if (now >= permission.expiresAt) return { ok: false, reason: "delegated maker permission expired" };
-  if (!permission.pairs.includes(curve.pair)) return { ok: false, reason: "pair not delegated" };
-  if (!permission.sides.includes(curve.side)) return { ok: false, reason: "side not delegated" };
-  if (!permission.relayModes.includes(curve.relayMode)) return { ok: false, reason: "relay mode not delegated" };
-  if (curve.maxBaseAmount > permission.maxEpochBase) return { ok: false, reason: "curve exceeds delegated epoch size" };
-  const worstDeviation = Math.max(...curve.points.map((point) => Math.abs(bps(point.price - fairPrice, fairPrice))));
-  if (worstDeviation > permission.maxPriceDeviationBps) return { ok: false, reason: "curve price outside delegated band" };
-  return { ok: true, curve };
-}
-
-export function authorizeManagedMakerCurvePolicy(
-  curve: ManagedCurveDraft,
-  pair: PairConfig,
-  policy: ManagedMakerPolicy,
-  epochId: number
-): DelegatedMakerAuthorization {
-  if (policy.version !== 1) return { ok: false, reason: "unsupported managed maker policy version" };
-  if (policy.pair_id !== pair.pair_id || curve.pair !== pair.pair_id) return { ok: false, reason: "pair not authorized by managed maker policy" };
-  if (curve.side === "Buy" && !policy.allow_buy) return { ok: false, reason: "buy side not authorized by managed maker policy" };
-  if (curve.side === "Sell" && !policy.allow_sell) return { ok: false, reason: "sell side not authorized by managed maker policy" };
-  if (policy.relay_mode !== curve.relayMode) return { ok: false, reason: "relay mode not authorized by managed maker policy" };
-  const fromEpoch = bigintDecimal(policy.valid_from_epoch);
-  const untilEpoch = bigintDecimal(policy.valid_until_epoch);
-  const currentEpoch = BigInt(epochId);
-  if (currentEpoch < fromEpoch || currentEpoch > untilEpoch) return { ok: false, reason: "epoch outside managed maker policy window" };
-  const maxBase = bigintDecimal(policy.max_epoch_base);
-  const curveBase = BigInt(toAtomicStr(decimalString(curve.maxBaseAmount), pair.base_asset_id));
-  if (curveBase <= 0n || curveBase > maxBase) return { ok: false, reason: "curve exceeds managed maker policy size" };
-  const minPrice = bigintDecimal(policy.min_price);
-  const maxPrice = bigintDecimal(policy.max_price);
-  const reservationPrice = BigInt(toPriceAtomicStr(decimalString(curve.reservationPrice), pair.quote_asset_id));
-  if (reservationPrice < minPrice || reservationPrice > maxPrice) return { ok: false, reason: "reservation price outside managed maker policy band" };
-  for (const point of curve.points) {
-    const price = BigInt(toPriceAtomicStr(decimalString(point.price), pair.quote_asset_id));
-    if (price < minPrice || price > maxPrice) return { ok: false, reason: "curve point outside managed maker policy band" };
-  }
-  return { ok: true, curve };
-}
-
-export function compileManagedCurveIntent(curve: ManagedCurveDraft): TicketSubmitIntent {
-  const invalid = validateManagedCurveDraft(curve);
-  if (invalid) throw new Error(invalid);
-  return {
-    shape: "curve",
-    side: curve.side,
-    pairId: curve.pair,
-    amount: String(curve.maxBaseAmount),
-    limitPrice: String(curve.reservationPrice),
-    priceLimit: String(curve.reservationPrice),
-    minFill: "0",
-    fillOrKill: false,
-    resting: true,
-    stratKind: "Repeat",
-    curvePoints: curve.points.map((point) => ({
-      price: decimalString(point.price),
-      baseAmount: decimalString(point.baseAmount),
-    })),
-    inventoryCap: decimalString(curve.maxBaseAmount),
-    durationHours: String(curve.durationHours),
-    childSize: decimalString(curve.maxBaseAmount),
-    jitter: 0,
-    relayMode: curve.relayMode,
-    relayOperator: curve.relayMode === "ZylithRelay" ? "ZylithRelay" : "SelfHostedRelay",
-  };
-}
-
-export function validateManagedCurveDraft(curve: ManagedCurveDraft): string | null {
-  if (curve.points.length < MIN_MANAGED_MAKER_CURVE_POINTS) {
-    return "maker curve requires at least 3 bands";
-  }
-  let previousPrice = 0;
-  for (const point of curve.points) {
-    if (!Number.isFinite(point.price) || !Number.isFinite(point.baseAmount) || point.price <= 0 || point.baseAmount <= 0) {
-      return "maker curve prices and base amounts must be positive";
-    }
-    if (point.price <= previousPrice) return "maker curve points must be strictly increasing by price";
-    previousPrice = point.price;
-  }
-  const first = curve.points[0]?.price ?? 0;
-  const last = curve.points[curve.points.length - 1]?.price ?? 0;
-  const outerSpreadBps = first > 0 ? ((last - first) / first) * 10_000 : 0;
-  if (outerSpreadBps < makerCurveMinSpreadBps(curve.pair)) {
-    return "maker curve spread is below protocol minimum";
-  }
-  return null;
-}
-
-export function reconcileMakerPnl(pair: string, orders: LocalOrder[]): MakerPnlSummary {
-  let filledChildren = 0;
-  let noFillChildren = 0;
-  let baseDelta = 0;
-  let quoteDelta = 0;
-  let quoteNotional = 0;
-  let captureNumerator = 0;
-  let captureDenominator = 0;
-  for (const order of orders.filter((order) => order.pair === pair)) {
-    if (order.status === "no_fill") {
-      noFillChildren += 1;
-      continue;
-    }
-    if (order.status !== "filled" && order.status !== "partial") continue;
-    const filled = numericValue(order.filledAmount || order.amount);
-    const clearing = numericValue(order.clearingPrice);
-    if (filled <= 0 || clearing <= 0) continue;
-    const notional = filled * clearing;
-    filledChildren += 1;
-    quoteNotional += notional;
-    if (order.side === "Buy") {
-      baseDelta += filled;
-      quoteDelta -= notional;
-    } else {
-      baseDelta -= filled;
-      quoteDelta += notional;
-    }
-    const capture = makerCaptureBps(order);
-    if (capture !== null) {
-      captureNumerator += capture * notional;
-      captureDenominator += notional;
-    }
-  }
-  return {
-    pair,
-    filledChildren,
-    noFillChildren,
-    baseDelta,
-    quoteDelta,
-    quoteNotional,
-    averageCaptureBps: captureDenominator > 0 ? captureNumerator / captureDenominator : null,
-  };
-}
-
-export function buildMakerOpsSnapshot(input: {
+export function buildLiquidityOpsSnapshot(input: {
   strategies: PrivateStrategySummary[];
   orders: LocalOrder[];
   balances: WalletBalance[];
   fairPrices: FairPriceResult[];
-}): MakerOpsSnapshot {
+}): LiquidityOpsSnapshot {
   const strategySlots = input.strategies.flatMap((strategy) => strategy.submitted_children);
   return {
     activeStrategies: input.strategies.filter((strategy) => ["active", "delegated", "pending_relay"].includes(strategy.status)).length,
@@ -911,94 +660,6 @@ export function buildMakerOpsSnapshot(input: {
     failedSlots: strategySlots.filter((slot) => slot.relay_status === "failed" || slot.relay_status === "missed").length,
     staleMarketPairs: input.fairPrices.filter((price) => !price.ok).map((price) => price.pair),
     balances: input.balances,
-  };
-}
-
-export function backtestManagedStrategy(input: {
-  pair: PairConfig;
-  initialBase: number;
-  initialQuote: number;
-  fairPricePolicy: FairPricePolicy;
-  strategy: ManagedStrategyConfig;
-  risk: ManagedRiskPolicy;
-  epochs: ManagedBacktestEpoch[];
-}): ManagedBacktestResult {
-  let base = Math.max(0, input.initialBase);
-  let quote = Math.max(0, input.initialQuote);
-  const initialPrice = firstUsablePrice(input.pair.pair_id, input.epochs, input.fairPricePolicy)
-    ?? input.epochs.find((epoch) => epoch.clearingPrice && epoch.clearingPrice > 0)?.clearingPrice
-    ?? 0;
-  const initialMarkedValueQuote = quote + base * initialPrice;
-  const epochs: ManagedBacktestEpochResult[] = [];
-  let lastMarkPrice = initialPrice;
-
-  for (const epoch of input.epochs) {
-    const fairPrice = selectFairPrice(
-      input.pair.pair_id,
-      epoch.observations,
-      input.fairPricePolicy,
-      epoch.observedAt
-    );
-    if (fairPrice.ok) lastMarkPrice = fairPrice.price;
-    const inventory = buildInventorySnapshot(
-      input.pair,
-      [
-        { asset: input.pair.base_asset_id, available: String(base), locked: "0" },
-        { asset: input.pair.quote_asset_id, available: String(quote), locked: "0" },
-      ],
-      epoch.pending ?? [],
-      fairPrice.ok ? fairPrice.price : lastMarkPrice
-    );
-    const plan = buildManagedCurvePlan({
-      pair: input.pair,
-      fairPrice,
-      inventory,
-      config: input.strategy,
-      risk: input.risk,
-    });
-    const fills: ManagedBacktestEpochResult["fills"] = [];
-    if (plan.ok) {
-      for (const curve of plan.curves) {
-        const fillFraction = clamp(epoch.fillFractions?.[curve.side] ?? 0, 0, 1);
-        const fillBase = totalCurveBase(curve) * fillFraction;
-        if (fillBase <= 0) continue;
-        const executionPrice = epoch.clearingPrice && epoch.clearingPrice > 0
-          ? epoch.clearingPrice
-          : weightedCurvePrice(curve);
-        if (curve.side === "Buy") {
-          const affordableBase = executionPrice > 0 ? Math.min(fillBase, quote / executionPrice) : 0;
-          if (affordableBase <= 0) continue;
-          base += affordableBase;
-          quote -= affordableBase * executionPrice;
-          fills.push({ side: "Buy", baseAmount: affordableBase, quoteAmount: affordableBase * executionPrice, executionPrice });
-        } else {
-          const sellBase = Math.min(fillBase, base);
-          if (sellBase <= 0) continue;
-          base -= sellBase;
-          quote += sellBase * executionPrice;
-          fills.push({ side: "Sell", baseAmount: sellBase, quoteAmount: sellBase * executionPrice, executionPrice });
-        }
-      }
-    }
-    epochs.push({
-      epochId: epoch.epochId,
-      plan,
-      fills,
-      baseBalance: base,
-      quoteBalance: quote,
-      markedValueQuote: quote + base * lastMarkPrice,
-    });
-  }
-
-  const finalMarkedValueQuote = quote + base * lastMarkPrice;
-  return {
-    pair: input.pair.pair_id,
-    epochs,
-    finalBase: base,
-    finalQuote: quote,
-    initialMarkedValueQuote,
-    finalMarkedValueQuote,
-    pnlQuote: finalMarkedValueQuote - initialMarkedValueQuote,
   };
 }
 
@@ -1022,120 +683,8 @@ export function readJsonPath(value: unknown, path: string): unknown {
   return current;
 }
 
-function buildSideCurve(
-  input: {
-    pair: PairConfig;
-    fairPrice: FairPriceResult & { ok: true };
-    config: ManagedStrategyConfig;
-  },
-  side: OrderSide,
-  reservationPrice: number,
-  spreadBps: number,
-  inventorySkewBps: number,
-  maxBaseAmount: number
-): ManagedCurveDraft | null {
-  if (!Number.isFinite(maxBaseAmount) || maxBaseAmount <= 0) return null;
-  const requestedBandCount = Math.max(MIN_MANAGED_MAKER_CURVE_POINTS, Math.floor(input.config.bandCount));
-  const minBandBase = Math.max(makerCurveMinBandBaseAmount(input.pair.pair_id), input.config.minBandBase);
-  const bandCount = minBandBase > 0
-    ? Math.min(requestedBandCount, Math.floor(maxBaseAmount / minBandBase))
-    : requestedBandCount;
-  if (bandCount < MIN_MANAGED_MAKER_CURVE_POINTS) return null;
-  const perBand = maxBaseAmount / bandCount;
-  if (minBandBase > 0 && perBand < minBandBase) return null;
-  const points = Array.from({ length: bandCount }, (_, index) => {
-    const depthBps = (index / Math.max(1, bandCount - 1)) * spreadBps;
-    const signedBps = side === "Buy"
-      ? -(spreadBps / 2 + (spreadBps - depthBps))
-      : spreadBps / 2 + depthBps;
-    return {
-      price: reservationPrice * (1 + signedBps / 10_000),
-      baseAmount: perBand,
-    };
-  });
-  return {
-    pair: input.pair.pair_id,
-    side,
-    fairPrice: input.fairPrice.price,
-    reservationPrice,
-    spreadBps,
-    inventorySkewBps,
-    maxBaseAmount,
-    points,
-    relayMode: input.config.relayMode,
-    durationHours: input.config.durationHours,
-  };
-}
-
-function makerCaptureBps(order: LocalOrder): number | null {
-  const limit = numericValue(order.limitPrice);
-  const clearing = numericValue(order.clearingPrice);
-  if (limit <= 0 || clearing <= 0) return null;
-  return order.side === "Buy"
-    ? ((limit - clearing) / limit) * 10_000
-    : ((clearing - limit) / limit) * 10_000;
-}
-
-function targetBand(config: ManagedStrategyConfig): { min: number; max: number; mid: number } {
-  const min = typeof config.targetBaseRatioMin === "number" && Number.isFinite(config.targetBaseRatioMin)
-    ? clamp(config.targetBaseRatioMin, 0, 1)
-    : undefined;
-  const max = typeof config.targetBaseRatioMax === "number" && Number.isFinite(config.targetBaseRatioMax)
-    ? clamp(config.targetBaseRatioMax, 0, 1)
-    : undefined;
-  if (min !== undefined && max !== undefined && min <= max) return { min, max, mid: (min + max) / 2 };
-  const point = clamp(config.targetBaseRatio, 0, 1);
-  return { min: point, max: point, mid: point };
-}
-
-function inventoryImbalanceRatio(baseRatio: number, target: { min: number; max: number; mid: number }): number {
-  if (baseRatio < target.min) return baseRatio - target.min;
-  if (baseRatio > target.max) return baseRatio - target.max;
-  return 0;
-}
-
-function totalCurveBase(curve: ManagedCurveDraft): number {
-  return curve.points.reduce((sum, point) => sum + point.baseAmount, 0);
-}
-
-function weightedCurvePrice(curve: ManagedCurveDraft): number {
-  const total = totalCurveBase(curve);
-  if (total <= 0) return curve.reservationPrice;
-  return curve.points.reduce((sum, point) => sum + point.price * point.baseAmount, 0) / total;
-}
-
-function firstUsablePrice(
-  pair: string,
-  epochs: ManagedBacktestEpoch[],
-  policy: FairPricePolicy
-): number | null {
-  for (const epoch of epochs) {
-    const fairPrice = selectFairPrice(pair, epoch.observations, policy, epoch.observedAt);
-    if (fairPrice.ok) return fairPrice.price;
-  }
-  return null;
-}
-
-function makerCurveMinBandBaseAmount(pairId: string): number {
-  if (pairId === "ETH/USDC") return 0.001;
-  if (pairId === "strkBTC/USDC" || pairId === "WBTC/strkBTC") return 0.001;
-  if (pairId === "USDC/USDT") return 1;
-  if (pairId === "STRK/USDC" || pairId === "STRK/ETH" || pairId === "STRK/strkBTC") return 1;
-  return 0;
-}
-
-function makerCurveMinSpreadBps(pairId: string): number {
-  if (pairId === "USDC/USDT") return 5;
-  if (pairId === "WBTC/strkBTC") return 10;
-  return 20;
-}
-
 function bps(delta: number, base: number): number {
   return base > 0 ? (delta / base) * 10_000 : Number.POSITIVE_INFINITY;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
 }
 
 function numericValue(value?: string | number): number {
@@ -1145,21 +694,19 @@ function numericValue(value?: string | number): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function decimalString(value: number): string {
-  if (!Number.isFinite(value)) return "0";
-  return value.toLocaleString("en-US", {
-    useGrouping: false,
-    maximumFractionDigits: 18,
-  });
-}
-
-function bigintDecimal(value: string): bigint {
-  if (!/^\d+$/.test(String(value))) return 0n;
-  return BigInt(value);
+function nonNegativeNumericValue(value?: string | number): number {
+  return Math.max(0, numericValue(value));
 }
 
 function normalizePair(pair: string): string {
   return pair.replace(/[-_]/g, "/").toUpperCase();
+}
+
+function isNonZeroHexFelt(value: string | undefined): boolean {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!/^0x[0-9a-fA-F]+$/.test(trimmed)) return false;
+  return BigInt(trimmed) !== 0n;
 }
 
 function numberValue(value: unknown): number {
@@ -1184,6 +731,329 @@ function feltNumber(value: string | undefined): number {
   }
 }
 
+async function observeMarketSource(
+  source: MarketDataSource,
+  pair: string,
+  options?: { signal?: AbortSignal }
+): Promise<MarketObservation | null> {
+  try {
+    const observation = await abortable(
+      source.observe(pair, options),
+      options?.signal,
+      "Zylith SDK market data request aborted"
+    );
+    return observation === null ? null : validateMarketObservation(observation, source.id);
+  } catch (error) {
+    if (options?.signal?.aborted) throw error;
+    if (isTransientMarketSourceError(error)) return null;
+    throw error;
+  }
+}
+
+function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined, message: string): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new Error(message));
+  let rejectAbort: ((error: Error) => void) | undefined;
+  const abortPromise = new Promise<T>((_, reject) => {
+    rejectAbort = reject;
+  });
+  const abort = () => rejectAbort?.(new Error(message));
+  signal.addEventListener("abort", abort, { once: true });
+  return Promise.race([promise, abortPromise]).finally(() => {
+    signal.removeEventListener("abort", abort);
+  });
+}
+
 function defaultFetch(): typeof fetch {
   return fetch.bind(globalThis);
+}
+
+export async function fetchWithSdkTimeout(
+  fetcher: typeof fetch,
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_SDK_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  if (init.signal?.aborted) {
+    throw new Error("Zylith SDK request aborted");
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetcher(input, init);
+  }
+  const controller = new AbortController();
+  const sourceSignal = init.signal;
+  let timedOut = false;
+  let sourceAborted = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let rejectAbort: ((error: Error) => void) | undefined;
+  const abortPromise = new Promise<Response>((_, reject) => {
+    rejectAbort = reject;
+  });
+  const timeoutPromise = new Promise<Response>((_, reject) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("Request timed out", "TimeoutError"));
+      reject(new Error("Zylith SDK request timed out"));
+    }, timeoutMs);
+  });
+  const forwardAbort = () => {
+    sourceAborted = true;
+    controller.abort(sourceSignal?.reason ?? new DOMException("Request aborted", "AbortError"));
+    rejectAbort?.(new Error("Zylith SDK request aborted"));
+  };
+  if (sourceSignal?.aborted) {
+    forwardAbort();
+  } else {
+    sourceSignal?.addEventListener("abort", forwardAbort, { once: true });
+  }
+  try {
+    return await Promise.race([
+      fetcher(input, { ...init, signal: controller.signal }),
+      timeoutPromise,
+      abortPromise,
+    ]);
+  } catch (error) {
+    if (timedOut) throw new Error("Zylith SDK request timed out");
+    if (sourceAborted) throw new Error("Zylith SDK request aborted");
+    if (isTransientFetchError(error)) throw new Error("Network request failed. Check your connection and retry.");
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    sourceSignal?.removeEventListener("abort", forwardAbort);
+  }
+}
+
+export type SdkResponseReadOptions = {
+  maxBytes?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  label?: string;
+};
+
+export async function readSdkJsonResponse(
+  response: Response,
+  options: SdkResponseReadOptions = {}
+): Promise<unknown> {
+  const label = options.label ?? "SDK response";
+  const text = await readSdkResponseText(response, options);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${label} returned invalid JSON`);
+  }
+}
+
+export async function readSdkResponseText(
+  response: Response,
+  options: SdkResponseReadOptions = {}
+): Promise<string> {
+  const label = options.label ?? "SDK response";
+  const maxBytes = positiveResponseLimit(options.maxBytes ?? DEFAULT_SDK_RESPONSE_MAX_BYTES);
+  const timeoutMs = positiveResponseLimit(options.timeoutMs ?? DEFAULT_SDK_REQUEST_TIMEOUT_MS);
+  if (options.signal?.aborted) throw new Error("Zylith SDK request aborted");
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      throw new Error(`${label} exceeded the ${maxBytes}-byte response limit`);
+    }
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = "";
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let aborted = false;
+  let rejectInterruption: ((error: Error) => void) | undefined;
+  const interruption = new Promise<never>((_, reject) => {
+    rejectInterruption = reject;
+  });
+  const cancelReader = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  const abort = () => {
+    aborted = true;
+    cancelReader();
+    rejectInterruption?.(new Error("Zylith SDK request aborted"));
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
+  timeout = setTimeout(() => {
+    timedOut = true;
+    cancelReader();
+    rejectInterruption?.(new Error(`${label} body timed out`));
+  }, timeoutMs);
+
+  try {
+    while (true) {
+      const result = await Promise.race([reader.read(), interruption]);
+      if (result.done) {
+        if (aborted) throw new Error("Zylith SDK request aborted");
+        if (timedOut) throw new Error(`${label} body timed out`);
+        break;
+      }
+      totalBytes += result.value.byteLength;
+      if (totalBytes > maxBytes) {
+        cancelReader();
+        throw new Error(`${label} exceeded the ${maxBytes}-byte response limit`);
+      }
+      text += decoder.decode(result.value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } catch (error) {
+    if (aborted) throw new Error("Zylith SDK request aborted");
+    if (timedOut) throw new Error(`${label} body timed out`);
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
+    try {
+      reader.releaseLock();
+    } catch {
+      cancelReader();
+    }
+  }
+}
+
+export function normalizeSdkServiceUrl(value: string, label = "service URL"): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label} must be an absolute URL`);
+  }
+  if (parsed.protocol === "https:") return stripTrailingSlash(parsed.toString());
+  if (parsed.protocol === "http:" && isLocalDevelopmentHost(parsed.hostname)) {
+    return stripTrailingSlash(parsed.toString());
+  }
+  throw new Error(`${label} must use HTTPS; HTTP is allowed only for localhost development`);
+}
+
+function positiveResponseLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("SDK response limits must be positive safe integers");
+  }
+  return value;
+}
+
+export function sanitizeSdkErrorMessage(value: unknown, fallback = "Zylith SDK request failed"): string {
+  const raw = rawErrorMessage(value, fallback);
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  return trimmed
+    .replace(/"calldata"\s*:\s*\[[^\]]*\]/gi, '"calldata":[...]')
+    .replace(/"signature"\s*:\s*\[[^\]]*\]/gi, '"signature":[...]')
+    .replace(/"private[^"]*"\s*:\s*"[^"]*"/gi, '"private":"<redacted>"')
+    .replace(/0x[0-9a-fA-F]{33,}/g, "<felt>")
+    .replace(/\b[0-9]{32,}\b/g, "<number>")
+    .replace(/\s+/g, " ")
+    .slice(0, 400);
+}
+
+function rawErrorMessage(value: unknown, fallback: string): string {
+  if (value instanceof Error) return value.message;
+  if (typeof value === "string") {
+    const parsed = parseJsonError(value);
+    return parsed ?? value;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["error", "detail", "message", "reason"]) {
+      const entry = record[key];
+      if (typeof entry === "string" && entry.trim()) return entry;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function parseJsonError(value: string): string | null {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    for (const key of ["error", "detail", "message", "reason"]) {
+      const entry = parsed[key];
+      if (typeof entry === "string" && entry.trim()) return entry;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isTransientFetchError(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const name = error instanceof Error ? error.name : "";
+  return (
+    /AbortError|TimeoutError/i.test(name) ||
+    /signal is aborted|aborted without reason|operation was aborted|timed out|request aborted|network request failed|failed to fetch|networkerror|load failed|fetch failed/i.test(
+      message
+    )
+  );
+}
+
+function isTransientMarketSourceError(error: unknown): boolean {
+  if (isTransientFetchError(error)) return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /\bHTTP\s+(408|429|5\d\d)\b|rate.?limit|temporar/i.test(message);
+}
+
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+function isLocalDevelopmentHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
+}
+
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function validateFairPricePolicy(policy: FairPricePolicy): void {
+  if (!Number.isFinite(policy.maxStalenessMs) || policy.maxStalenessMs <= 0) {
+    throw new Error("Fair price max staleness must be positive");
+  }
+  if (!Number.isFinite(policy.maxDivergenceBps) || policy.maxDivergenceBps < 0) {
+    throw new Error("Fair price max divergence must be non-negative");
+  }
+  if (!Number.isSafeInteger(policy.minSources) || policy.minSources <= 0) {
+    throw new Error("Fair price minimum source count must be a positive integer");
+  }
+}
+
+function validateMarketObservation(observation: MarketObservation, expectedSourceId: string): MarketObservation {
+  if (!observation || typeof observation !== "object") {
+    throw new Error(`Market data source ${expectedSourceId} returned an invalid observation`);
+  }
+  if (
+    typeof observation.source !== "string" ||
+    observation.source.trim().toLowerCase() !== expectedSourceId.trim().toLowerCase()
+  ) {
+    throw new Error(`Market data source ${expectedSourceId} returned a mismatched source id`);
+  }
+  if (typeof observation.pair !== "string" || !observation.pair.trim()) {
+    throw new Error(`Market data source ${expectedSourceId} returned an invalid pair`);
+  }
+  if (!Number.isFinite(observation.price) || observation.price <= 0) {
+    throw new Error(`Market data source ${expectedSourceId} returned an invalid price`);
+  }
+  if (!Number.isFinite(observation.observedAt) || observation.observedAt <= 0) {
+    throw new Error(`Market data source ${expectedSourceId} returned an invalid timestamp`);
+  }
+  if (
+    observation.confidenceBps !== undefined &&
+    (!Number.isFinite(observation.confidenceBps) || observation.confidenceBps < 0)
+  ) {
+    throw new Error(`Market data source ${expectedSourceId} returned invalid confidence`);
+  }
+  return { ...observation };
 }

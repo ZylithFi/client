@@ -17,10 +17,10 @@ export type WithdrawableNote = {
   strk20_exit_commitment?: string;
   strk20_open_note_id?: string;
   metadata_commitment: string;
-  maker_attribution?: MakerBandAttribution;
+  liquidity_provider_attribution?: LiquidityBandAttribution;
 };
 
-export type MakerBandAttribution = {
+export type LiquidityBandAttribution = {
   version: number;
   pair_id: string;
   order_commitment: string;

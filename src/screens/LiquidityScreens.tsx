@@ -1,35 +1,37 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { fromAtomicStr } from "../domain/assets";
+import { fromAtomicStr, safeFromAtomicStr } from "../domain/assets";
 import type { BatchSummary, PublicSettlementTranscript } from "../domain/auctionEpoch";
-import type { CurvePoint } from "../domain/makerCurves";
-import { defaultCurveBands } from "../domain/makerCurves";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
 import type { PendingDeposit, WalletBalance, WithdrawableNote } from "../domain/shieldedBalances";
-import { buildMakerOpsSnapshot } from "@zylith/sdk/common";
+import {
+  buildLiquidityOpsSnapshot,
+  buildPrivateLiquidityPositionPlan,
+  type LiquidityPositionCurve,
+  type LiquidityPositionPolicyKind,
+  type PrivateLiquidityPositionOpenRequest,
+} from "@zylith/sdk";
 import type {
-  FundingPreview,
   PairConfig,
   TicketSubmitIntent,
 } from "../components/OrderTicket";
 import {
-  activeCurveRecords,
+  activePositionRecords,
   activeStatuses,
   assetListText,
-  averageCurveFillRate,
-  averageCurvePrice,
+  averagePositionFillRate,
+  averagePositionPrice,
   balanceAmount,
-  buildCurveRecords,
+  buildPositionRecords,
   buildLiquidityEpochSeries,
   committedDepth,
-  curveBaseAsset,
-  curveDisplayRef,
-  curveEpochOutcomes,
-  curveFillRate,
-  curveFundingAsset,
-  curveLockedCapital,
-  curveQuoteAsset,
-  curveStatusPillTone,
-  depthFilled,
+  positionBaseAsset,
+  positionDisplayRef,
+  positionEpochOutcomes,
+  positionFillRate,
+  positionFundingAsset,
+  positionLockedCapital,
+  positionQuoteAsset,
+  positionStatusPillTone,
   displayedBandFill,
   epochOutcomeWindow,
   formatBps,
@@ -39,6 +41,8 @@ import {
   fmtAddr,
   fmtTime,
   latestEpochOutcomes,
+  liquidityStrategyBandCount,
+  liquidityStrategyInventoryCap,
   orderFilled,
   orderFundingExposure,
   orderQuoteNotional,
@@ -48,37 +52,31 @@ import {
   terminalFill,
   visibleLiquidityEpochSeries,
   weightedAverageClearing,
-  weightedMakerCaptureBps,
-  type CurveEpochOutcome,
+  weightedPositionCaptureBps,
+  type PositionEpochOutcome,
   type LiquidityAnalyticsChartMode,
   type LiquidityAnalyticsEpoch,
-  type LiquidityCurveRecord,
+  type LiquidityPositionRecord,
 } from "../domain/liquidityRecords";
 import { runPrimaryActionOnEnter } from "../domain/primaryEnter";
-import { normalizeSelfRelayUrl } from "../domain/selfHostedRenewalRelay";
-import { localRemove, sessionGet, sessionRemove, sessionSet } from "../domain/safeSessionStorage";
+import { safeAtomicAmount } from "../domain/noteLifecycle";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
-
-type CurveSide = "bid" | "ask";
-type RelayOperator = "ZylithRelay" | "SelfHostedRelay" | "LocalBrowser";
 type Period = "7d" | "30d" | "90d" | "all";
-type LiquidityPageTab = "curves" | "orders" | "inventory" | "analytics";
-type RenewalDurationPreset = "1" | "4" | "12" | "24" | "720" | "2160" | "continuous" | "custom";
-const MIN_CURVE_BANDS = 3;
-const LOCAL_BROWSER_MAX_RENEWAL_HOURS = 1;
-const MAX_RELAY_RENEWAL_DAYS = 90;
+type LiquidityPageTab = "positions" | "orders" | "inventory" | "analytics";
+type RenewalDurationPreset = "1" | "4" | "12" | "24" | "168" | "480" | "continuous" | "custom";
+const MIN_POSITION_BANDS = 3;
+const MAX_RELAY_RENEWAL_DAYS = 20;
 const CONTINUOUS_ROLLING_WINDOW_HOURS = MAX_RELAY_RENEWAL_DAYS * 24;
-const SELF_RELAY_ENDPOINT_KEY = "zylith.self-relay-endpoint.v1";
 
-const RENEWAL_DURATION_OPTIONS: Array<{ value: RenewalDurationPreset; label: string; relayOnly?: boolean }> = [
+const RENEWAL_DURATION_OPTIONS: Array<{ value: RenewalDurationPreset; label: string }> = [
   { value: "1", label: "1h" },
-  { value: "4", label: "4h", relayOnly: true },
-  { value: "12", label: "12h", relayOnly: true },
-  { value: "24", label: "24h", relayOnly: true },
-  { value: "720", label: "30d", relayOnly: true },
-  { value: "2160", label: "90d", relayOnly: true },
-  { value: "continuous", label: "Continuous", relayOnly: true },
-  { value: "custom", label: "Custom", relayOnly: true },
+  { value: "4", label: "4h" },
+  { value: "12", label: "12h" },
+  { value: "24", label: "24h" },
+  { value: "168", label: "7d" },
+  { value: "480", label: "20d" },
+  { value: "continuous", label: "Continuous" },
+  { value: "custom", label: "Custom" },
 ];
 
 function liquidityPageTitle(tab: LiquidityPageTab): string {
@@ -86,6 +84,24 @@ function liquidityPageTitle(tab: LiquidityPageTab): string {
   if (tab === "inventory") return "INVENTORY";
   if (tab === "analytics") return "ANALYTICS";
   return "LIQUIDITY";
+}
+
+function formatUnsignedBps(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  const formatted = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1);
+  return `${formatted} bps`;
+}
+
+function formatDailyTurnover(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "-";
+  const formatted = value >= 10 ? value.toFixed(1) : value.toFixed(2);
+  return `${formatted}x`;
+}
+
+function percentInputToBps(value: string, fallback: number): number {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.round(Math.min(100, Math.max(0, parsed)) * 100);
 }
 
 function renewalHoursForPreset(preset: RenewalDurationPreset, customDays: string): number {
@@ -99,7 +115,7 @@ function renewalHoursForPreset(preset: RenewalDurationPreset, customDays: string
 }
 
 function renewalWindowLabel(preset: RenewalDurationPreset, hours: number): string {
-  if (preset === "continuous") return "Continuous · 90d rolling package";
+  if (preset === "continuous") return "Continuous · 20d rolling package";
   if (hours >= 24) {
     const days = hours / 24;
     return `${days.toLocaleString("en-US", { maximumFractionDigits: 1 })}d package`;
@@ -107,33 +123,41 @@ function renewalWindowLabel(preset: RenewalDurationPreset, hours: number): strin
   return `${hours}h window`;
 }
 
-function relayModeForOperator(operator: RelayOperator): "SelfRelay" | "ZylithRelay" {
-  return operator === "ZylithRelay" ? "ZylithRelay" : "SelfRelay";
+function positionPreviewIntent(
+  pair: PairConfig,
+  curve: LiquidityPositionCurve,
+  durationHours: number,
+): TicketSubmitIntent {
+  const envelopePrice = curve.side === "Buy"
+    ? curve.points[curve.points.length - 1]?.price
+    : curve.points[0]?.price;
+  return {
+    pairId: pair.pair_id,
+    side: curve.side,
+    shape: "curve",
+    stratKind: "TWAP",
+    resting: true,
+    amount: curve.totalBaseAmount,
+    limitPrice: envelopePrice ?? "",
+    minFill: "",
+    fillOrKill: false,
+    curvePoints: curve.points,
+    inventoryCap: curve.totalBaseAmount,
+    durationHours: String(durationHours),
+    childSize: "",
+    priceLimit: "",
+    jitter: 0,
+    relayMode: "SelfRelay",
+    relayOperator: "SelfHostedRelay",
+  };
 }
 
-function relayOperatorForMode(mode?: "SelfRelay" | "ZylithRelay"): RelayOperator {
-  if (mode === "ZylithRelay") return "ZylithRelay";
-  if (mode === "SelfRelay") return "SelfHostedRelay";
-  return "LocalBrowser";
-}
-
-function loadSelfRelayEndpoint(): string {
-  return sessionGet(SELF_RELAY_ENDPOINT_KEY, "");
-}
-
-function persistSelfRelayEndpoint(value: string): void {
-  const trimmed = value.trim();
-  if (trimmed) sessionSet(SELF_RELAY_ENDPOINT_KEY, trimmed);
-  else sessionRemove(SELF_RELAY_ENDPOINT_KEY);
-  localRemove(SELF_RELAY_ENDPOINT_KEY);
-}
-
-function CurveOutcomeCells({
+function PositionOutcomeCells({
   outcomes,
   limit = 48,
   future = 0,
 }: {
-  outcomes: CurveEpochOutcome[];
+  outcomes: PositionEpochOutcome[];
   limit?: number;
   future?: number;
 }) {
@@ -162,18 +186,18 @@ function CurveOutcomeCells({
   );
 }
 
-function CurveChildTimeline({
+function PositionChildTimeline({
   record,
   outcomes,
   submitted,
   scheduled,
-  onCancelCurve,
+  onCancelPosition,
 }: {
-  record: LiquidityCurveRecord;
-  outcomes: CurveEpochOutcome[];
+  record: LiquidityPositionRecord;
+  outcomes: PositionEpochOutcome[];
   submitted: number;
   scheduled: number;
-  onCancelCurve: (record: LiquidityCurveRecord) => void;
+  onCancelPosition: (record: LiquidityPositionRecord) => void;
 }) {
   const visible = latestEpochOutcomes(outcomes, 8);
   const remaining = Math.max(0, scheduled - submitted);
@@ -184,7 +208,7 @@ function CurveChildTimeline({
     <tr className="strategy-detail-row liquidity-detail-row">
       <td className="side-bar-cell" />
       <td colSpan={10}>
-        <div className="strategy-child-panel" aria-label="Curve child orders">
+        <div className="strategy-child-panel" aria-label="Position child orders">
           <div className="strategy-child-panel-hd">
             <span>Child execution</span>
             <em>{submitted}/{scheduled} submitted · {remaining} left</em>
@@ -215,8 +239,8 @@ function CurveChildTimeline({
                     <span>{fmtTime(outcome.submittedAt)}</span>
                   </div>
                   <div className="strategy-child-secondary">
-                    <span>Clearing {outcome.clearingPrice ?? "—"}</span>
-                    <span>Filled {outcome.filledAmount ?? "—"}</span>
+                    <span>Clearing {outcome.clearingPrice ?? "-"}</span>
+                    <span>Filled {outcome.filledAmount ?? "-"}</span>
                     <span>{outcome.detail}</span>
                   </div>
                 </div>
@@ -235,7 +259,7 @@ function CurveChildTimeline({
           )}
           {record.status !== "Cancelled" && (
             <div className="liq-parent-actions">
-              <button className="table-action" onClick={() => onCancelCurve(record)}>Cancel parent</button>
+              <button className="table-action" onClick={() => onCancelPosition(record)}>Cancel position</button>
             </div>
           )}
         </div>
@@ -244,160 +268,28 @@ function CurveChildTimeline({
   );
 }
 
-function sideFromCurveSide(side: CurveSide): "Buy" | "Sell" {
-  return side === "bid" ? "Buy" : "Sell";
-}
-
-function curveCtaLabel(side: CurveSide): string {
-  return side === "bid" ? "Activate bid curve" : "Activate ask curve";
-}
-
-function bandRowsFilled(points: CurvePoint[]): CurvePoint[] {
-  return points.filter(point => point.price.trim() && point.baseAmount.trim());
-}
-
-function CurveBandEditor({
-  title,
-  quote,
-  base,
-  bands,
-  onBands,
-}: {
-  title?: string;
-  quote: string;
-  base: string;
-  bands: CurvePoint[];
-  onBands: (points: CurvePoint[]) => void;
-}) {
-  function update(index: number, patch: Partial<CurvePoint>) {
-    onBands(bands.map((band, i) => i === index ? { ...band, ...patch } : band));
-  }
-
-  return (
-    <div className="liq-band-editor">
-      {title && <div className="liq-band-title">{title}</div>}
-      <table className="curve-table">
-        <thead>
-          <tr>
-            <th className="curve-th">Price ({quote})</th>
-            <th className="curve-th">Depth ({base})</th>
-            <th className="curve-th" />
-          </tr>
-        </thead>
-        <tbody>
-          {bands.map((band, index) => (
-            <tr className="curve-band-row" key={index}>
-              <td className="curve-band-cell">
-                <input
-                  className="curve-band-input"
-                  type="text"
-                  inputMode="decimal"
-                  placeholder={index === 0 ? "0.6800" : "0"}
-                  value={band.price}
-                  onChange={event => update(index, { price: event.target.value })}
-                />
-              </td>
-              <td className="curve-band-cell">
-                <input
-                  className="curve-band-input"
-                  type="text"
-                  inputMode="decimal"
-                  placeholder={index === 0 ? "10,000" : "0"}
-                  value={band.baseAmount}
-                  onChange={event => update(index, { baseAmount: event.target.value })}
-                />
-              </td>
-              <td className="curve-band-cell">
-                {bands.length > MIN_CURVE_BANDS && (
-                  <button
-                    className="curve-band-remove"
-                    type="button"
-                    aria-label="Remove curve band"
-                    onClick={() => onBands(bands.filter((_, i) => i !== index))}
-                  >
-                    x
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {bands.length < 8 && (
-        <button
-          className="curve-add-link"
-          type="button"
-          onClick={() => onBands([...bands, { price: "", baseAmount: "" }])}
-        >
-          + Add band
-        </button>
-      )}
-    </div>
-  );
-}
-
-function CurvePreview({
+function PositionPreview({
   pair,
-  side,
-  bidBands,
-  askBands,
-  inventoryCap,
-  renewing,
-  renewalWindowHours,
+  previewIntents,
   renewalWindowLabelText,
-  relayMode,
-  relayOperator,
-  selfRelayUrl,
-  onPreviewFunding,
 }: {
   pair: PairConfig;
-  side: CurveSide;
-  bidBands: CurvePoint[];
-  askBands: CurvePoint[];
-  inventoryCap: string;
-  renewing: boolean;
-  renewalWindowHours: string;
+  previewIntents?: TicketSubmitIntent[];
   renewalWindowLabelText: string;
-  relayMode: "SelfRelay" | "ZylithRelay";
-  relayOperator: RelayOperator;
-  selfRelayUrl?: string;
-  onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
 }) {
-  const activeBandSets = [side === "bid" ? bidBands : askBands];
-  const filledBands = activeBandSets.flatMap(bandRowsFilled);
+  const activeIntents = previewIntents ?? [];
+  const activeBandSets = activeIntents.map(intent =>
+    intent.curvePoints.filter(point => point.price.trim() && point.baseAmount.trim())
+  );
+  const filledBands = activeBandSets.flat();
   const totalDepth = filledBands.reduce((sum, band) => sum + parseHuman(band.baseAmount), 0);
   const prices = filledBands.map(band => parseHuman(band.price)).filter(value => value > 0);
   const threshold = fromAtomicStr(pair.min_order_amount, pair.base_asset_id);
   const thresholdNumber = parseHuman(threshold);
-  const eligible = totalDepth >= thresholdNumber && filledBands.length >= MIN_CURVE_BANDS;
-  let preview: FundingPreview | null = null;
-  let previewError: string | null = null;
-  if (filledBands.length > 0 && onPreviewFunding) {
-    try {
-      preview = onPreviewFunding({
-        pairId: pair.pair_id,
-        side: sideFromCurveSide(side),
-        shape: "curve",
-        stratKind: "TWAP",
-        resting: renewing,
-        amount: "",
-        limitPrice: "",
-        minFill: "",
-        fillOrKill: false,
-        curvePoints: filledBands,
-        inventoryCap,
-        durationHours: renewalWindowHours,
-        childSize: "",
-        priceLimit: "",
-        jitter: 0,
-        relayMode: renewing ? relayMode : "SelfRelay",
-        relayOperator: renewing ? relayOperator : "LocalBrowser",
-        selfRelayUrl: relayOperator === "SelfHostedRelay" ? selfRelayUrl : undefined,
-      });
-    } catch (error) {
-      previewError = userFacingErrorMessage(error, "Funding preview unavailable.");
-    }
-  }
+  const eligible = totalDepth >= thresholdNumber &&
+    activeBandSets.length > 0 &&
+    activeBandSets.every(bands => bands.length >= MIN_POSITION_BANDS);
+  const sides = Array.from(new Set(activeIntents.map(intent => intent.side)));
 
   return (
     <div className="curve-preview">
@@ -406,46 +298,37 @@ function CurvePreview({
         <span className="curve-preview-val">{formatHuman(totalDepth, pair.base_asset_id)}</span>
       </div>
       <div className="curve-preview-row">
+        <span className="curve-preview-lbl">Sides</span>
+        <span className="curve-preview-val">{sides.join(" + ")}</span>
+      </div>
+      <div className="curve-preview-row">
         <span className="curve-preview-lbl">Price range</span>
         <span className="curve-preview-val">
           {prices.length > 0
             ? `${Math.min(...prices).toLocaleString()}-${Math.max(...prices).toLocaleString()} ${pair.quote_asset_id}`
-            : "—"}
+            : "-"}
         </span>
       </div>
       <div className="curve-preview-row">
-        <span className="curve-preview-lbl">Renewal</span>
-        <span className="curve-preview-val">{renewing ? renewalWindowLabelText : "Current epoch only"}</span>
+        <span className="curve-preview-lbl">Duration</span>
+        <span className="curve-preview-val">{renewalWindowLabelText}</span>
       </div>
       <div className="curve-preview-row">
         <span className="curve-preview-lbl">Eligibility</span>
         <span
           className={`curve-preview-val ${eligible ? "good" : "warn"}`}
           title={eligible
-            ? "Curve satisfies local maker quote constraints."
-            : "Curve needs the required bands, spread, and funding before it can be submitted."}
+            ? "Position slice satisfies local liquidity constraints."
+            : "Position needs reserves, range, and funding before it can be opened."}
         >
-          {eligible ? "Quote eligible" : "Quote incomplete"}
+          {eligible ? "Position eligible" : "Position incomplete"}
         </span>
       </div>
-      {preview && (
-        <>
-          <div className="curve-preview-row">
-            <span className="curve-preview-lbl">Funding notes</span>
-            <span className="curve-preview-val">{preview.notes.length}</span>
-          </div>
-          <div className="curve-preview-row">
-            <span className="curve-preview-lbl">Locked capital</span>
-            <span className="curve-preview-val">{fromAtomicStr(preview.selected_total, preview.asset)} {preview.asset}</span>
-          </div>
-        </>
-      )}
-      {previewError && <div className="wc-note warn">{previewError}</div>}
     </div>
   );
 }
 
-export function LiquidityCurvesScreen({
+export function LiquidityPositionsScreen({
   pairs,
   records,
   balances,
@@ -455,18 +338,17 @@ export function LiquidityCurvesScreen({
   walletReady,
   submitting,
   submitError,
-  onPreviewFunding,
-  onSubmitCurve,
-  onCancelCurve,
-  onEditCurve,
-  onPauseCurve,
-  onResumeCurve,
+  onOpenPosition,
+  onCancelPosition,
+  onEditPosition,
+  onPausePosition,
+  onResumePosition,
   onDeposit,
   editRecord,
   onEditConsumed,
 }: {
   pairs: PairConfig[];
-  records: LiquidityCurveRecord[];
+  records: LiquidityPositionRecord[];
   balances: WalletBalance[];
   pendingDeposits: PendingDeposit[];
   activePairId: string;
@@ -474,48 +356,48 @@ export function LiquidityCurvesScreen({
   walletReady: boolean;
   submitting: boolean;
   submitError: string | null;
-  onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
-  onSubmitCurve: (intent: TicketSubmitIntent) => Promise<boolean | void>;
-  onCancelCurve: (record: LiquidityCurveRecord) => void;
-  onEditCurve: (record: LiquidityCurveRecord) => void;
-  onPauseCurve: (record: LiquidityCurveRecord) => void;
-  onResumeCurve: (record: LiquidityCurveRecord) => void;
+  onOpenPosition?: (request: PrivateLiquidityPositionOpenRequest) => Promise<boolean | void>;
+  onCancelPosition: (record: LiquidityPositionRecord) => void;
+  onEditPosition: (record: LiquidityPositionRecord) => void;
+  onPausePosition: (record: LiquidityPositionRecord) => void;
+  onResumePosition: (record: LiquidityPositionRecord) => void;
   onDeposit: (asset?: string) => void;
-  editRecord: LiquidityCurveRecord | null;
+  editRecord: LiquidityPositionRecord | null;
   onEditConsumed: () => void;
 }) {
   const selectedPair = pairs.find(pair => pair.pair_id === activePairId) ?? pairs[0] ?? null;
-  const [side, setSide] = useState<CurveSide>("bid");
-  const [bidBands, setBidBands] = useState<CurvePoint[]>(() => defaultCurveBands());
-  const [askBands, setAskBands] = useState<CurvePoint[]>(() => defaultCurveBands());
   const [advanced, setAdvanced] = useState(false);
   const [inventoryCap, setInventoryCap] = useState("");
-  const [renewing, setRenewing] = useState(true);
   const [renewalDuration, setRenewalDuration] = useState<RenewalDurationPreset>("1");
-  const [customRenewalDays, setCustomRenewalDays] = useState("30");
-  const [relayOperator, setRelayOperator] = useState<RelayOperator>("LocalBrowser");
-  const [selfRelayEndpoint, setSelfRelayEndpoint] = useState(() => loadSelfRelayEndpoint());
+  const [customRenewalDays, setCustomRenewalDays] = useState("20");
+  const [positionBaseAmount, setPositionBaseAmount] = useState("");
+  const [positionQuoteAmount, setPositionQuoteAmount] = useState("");
+  const [positionCurrentPrice, setPositionCurrentPrice] = useState("");
+  const [positionMinPrice, setPositionMinPrice] = useState("");
+  const [positionMaxPrice, setPositionMaxPrice] = useState("");
+  const [positionMinEdgeBps, setPositionMinEdgeBps] = useState("3");
+  const [positionTargetAprPct, setPositionTargetAprPct] = useState("15");
+  const [positionExpectedDailyVolume, setPositionExpectedDailyVolume] = useState("");
+  const [positionPolicyKind, setPositionPolicyKind] = useState<LiquidityPositionPolicyKind>("StaticRange");
+  const [positionTargetBaseRatioPct, setPositionTargetBaseRatioPct] = useState("50");
+  const [positionInventorySkewBps, setPositionInventorySkewBps] = useState("100");
+  const [positionMaxPriceDeviationBps, setPositionMaxPriceDeviationBps] = useState("500");
 
-  function prefillBuilder(record: LiquidityCurveRecord) {
+  function prefillBuilder(record: LiquidityPositionRecord) {
     setActivePairId(record.pair);
-    setSide(record.side === "Buy" ? "bid" : "ask");
-    const nextBands = record.points.length > 0 ? record.points : defaultCurveBands();
-    if (record.side === "Buy") setBidBands(nextBands);
-    else setAskBands(nextBands);
-    setRenewing(Boolean(record.strategy));
     if (record.strategy?.offline_package?.slot_count && record.strategy.offline_package.slot_count > 960) {
       const epochs = Math.max(1, record.strategy.offline_package.slot_count);
-      if (epochs >= 86_400) setRenewalDuration("2160");
-      else if (epochs >= 28_800) setRenewalDuration("720");
+      if (epochs >= 86_400) setRenewalDuration("480");
+      else if (epochs >= 30_240) setRenewalDuration("168");
       else setRenewalDuration("24");
     }
-    if (record.strategy?.maker_inventory_cap) {
+    const existingInventoryCap = liquidityStrategyInventoryCap(record.strategy);
+    if (existingInventoryCap) {
       const pair = pairs.find(candidate => candidate.pair_id === record.pair);
-      setInventoryCap(pair ? fromAtomicStr(record.strategy.maker_inventory_cap, pair.base_asset_id) : "");
+      setInventoryCap(pair ? fromAtomicStr(existingInventoryCap, pair.base_asset_id) : "");
     } else {
       setInventoryCap("");
     }
-    setRelayOperator(relayOperatorForMode(record.strategy?.offline_package?.relay_mode));
   }
 
   useEffect(() => {
@@ -527,8 +409,8 @@ export function LiquidityCurvesScreen({
   if (!selectedPair) {
     return (
       <div className="workspace-page liquidity-page">
-        <div className="page-hd"><span className="page-title">CURVES</span></div>
-        <div className="empty-zone"><div className="empty-mark">—</div><div className="empty-body">No enabled pairs.</div></div>
+        <div className="page-hd"><span className="page-title">POSITIONS</span></div>
+        <div className="empty-zone"><div className="empty-mark">-</div><div className="empty-body">No enabled pairs.</div></div>
       </div>
     );
   }
@@ -536,40 +418,95 @@ export function LiquidityCurvesScreen({
   const base = selectedPair.base_asset_id;
   const quote = selectedPair.quote_asset_id;
   const selectedPairRecords = records.filter(record => record.pair === selectedPair.pair_id);
-  const selectedSideRecord = selectedPairRecords.find(record =>
-    record.side === sideFromCurveSide(side)
-  );
   const selectedPairClearing = selectedPairRecords
     .flatMap(record => record.relatedOrders)
     .sort((a, b) => b.submittedAt - a.submittedAt)
     .find(order => order.clearingPrice)?.clearingPrice;
-  useEffect(() => {
-    if (selectedSideRecord || selectedPairRecords.length === 0) return;
-    setSide(selectedPairRecords[0].side === "Buy" ? "bid" : "ask");
-  }, [selectedPair.pair_id, selectedPairRecords.length, selectedSideRecord]);
-  useEffect(() => {
-    if (!selectedSideRecord || editRecord) return;
-    const nextBands =
-      selectedSideRecord.points.length > 0
-        ? selectedSideRecord.points
-        : defaultCurveBands();
-    if (side === "bid") setBidBands(nextBands);
-    else setAskBands(nextBands);
-    setRenewing(Boolean(selectedSideRecord.strategy));
-    setInventoryCap(
-      selectedSideRecord.strategy?.maker_inventory_cap
-        ? fromAtomicStr(
-            selectedSideRecord.strategy.maker_inventory_cap,
-            selectedPair.base_asset_id
-          )
-        : ""
-    );
-    setRelayOperator(
-      relayOperatorForMode(selectedSideRecord.strategy?.offline_package?.relay_mode)
-    );
-  }, [editRecord, selectedPair.base_asset_id, selectedSideRecord?.id, side]);
+  const renewalHours = renewalHoursForPreset(renewalDuration, customRenewalDays);
+  const renewalLabel = renewalWindowLabel(renewalDuration, renewalHours);
+  const positionInputTouched = [
+    positionBaseAmount,
+    positionQuoteAmount,
+    positionCurrentPrice,
+    positionMinPrice,
+    positionMaxPrice,
+  ].some(value => value.trim());
+  const inferredCurrentPrice = positionCurrentPrice.trim() || selectedPairClearing || "";
+  const positionPlanState = useMemo(() => {
+    const hasReserve = positionBaseAmount.trim() || positionQuoteAmount.trim();
+    if (!positionInputTouched || !hasReserve || !inferredCurrentPrice.trim() || !positionMinPrice.trim() || !positionMaxPrice.trim()) {
+      return { plan: null, error: null };
+    }
+    try {
+      return {
+        plan: buildPrivateLiquidityPositionPlan({
+          pair: selectedPair,
+          baseAmount: positionBaseAmount || "0",
+          quoteAmount: positionQuoteAmount || "0",
+          currentPrice: inferredCurrentPrice,
+          minPrice: positionMinPrice,
+          maxPrice: positionMaxPrice,
+          minEdgeBps: positionMinEdgeBps.trim() ? Number(positionMinEdgeBps) : undefined,
+          targetAprPct: positionTargetAprPct.trim() ? Number(positionTargetAprPct) : undefined,
+          expectedDailyVolume: positionExpectedDailyVolume || undefined,
+          protocolFeeBps: selectedPair.taker_fee_bps,
+          maxFillBasePerBatch: inventoryCap || undefined,
+          policyKind: positionPolicyKind,
+          targetBaseRatioBps: positionPolicyKind === "InventorySkewed"
+            ? percentInputToBps(positionTargetBaseRatioPct, 5_000)
+            : undefined,
+          inventorySkewBps: positionPolicyKind === "InventorySkewed"
+            ? Number(positionInventorySkewBps)
+            : undefined,
+          maxPriceDeviationBps: positionPolicyKind === "InventorySkewed"
+            ? Number(positionMaxPriceDeviationBps)
+            : undefined,
+          bandCount: 5,
+          durationHours: renewalHours,
+          rotationBps: 50,
+          privacyMode: "RotatingPrivate",
+          backing: "PrivateReserve",
+        }),
+        error: null,
+      };
+    } catch (error) {
+      return {
+        plan: null,
+        error: userFacingErrorMessage(error, "Position configuration is invalid."),
+      };
+    }
+  }, [
+    inferredCurrentPrice,
+    inventoryCap,
+    positionBaseAmount,
+    positionExpectedDailyVolume,
+    positionMinEdgeBps,
+    positionTargetAprPct,
+    positionInputTouched,
+    positionMaxPrice,
+    positionMinPrice,
+    positionInventorySkewBps,
+    positionMaxPriceDeviationBps,
+    positionPolicyKind,
+    positionQuoteAmount,
+    positionTargetBaseRatioPct,
+    renewalHours,
+    selectedPair,
+  ]);
+  const positionPreviewIntents: TicketSubmitIntent[] = [
+    positionPlanState.plan?.bidCurve,
+    positionPlanState.plan?.askCurve,
+  ]
+    .filter((curve): curve is LiquidityPositionCurve => Boolean(curve))
+    .map(curve => positionPreviewIntent(selectedPair, curve, renewalHours));
+  const previewIntents = positionPreviewIntents;
   const builderInventoryAssets = Array.from(new Set([base, quote]));
-  const neededInventoryAssets = side === "bid" ? [quote] : [base];
+  const neededInventoryAssets = positionInputTouched
+    ? [
+        positionPlanState.plan && BigInt(positionPlanState.plan.openPosition.baseReserveAtomic) > 0n ? base : null,
+        positionPlanState.plan && BigInt(positionPlanState.plan.openPosition.quoteReserveAtomic) > 0n ? quote : null,
+      ].filter((asset): asset is string => Boolean(asset))
+    : [];
   const missingInventoryAssets = neededInventoryAssets.filter(asset =>
     balanceAmount(balances, asset, "available") <= 0n,
   );
@@ -579,82 +516,24 @@ export function LiquidityCurvesScreen({
   const missingInventoryText = `${assetListText(missingInventoryAssets)} ${missingInventoryAssets.length === 1 ? "note" : "notes"}`;
   const lockedAssetText = assetListText(lockedOnlyAssets);
   const fundingWarningText = lockedOnlyAssets.length > 0
-    ? `${lockedAssetText} ${lockedOnlyAssets.length === 1 ? "is" : "are"} locked in existing curves. Cancel or edit a curve, or deposit more ${lockedAssetText}.`
-    : `No available ${missingInventoryText} for this quote. Deposit before quoting liquidity.`;
-  const sideBandSets: Array<[CurveSide, CurvePoint[]]> = [
-    [side, side === "bid" ? bidBands : askBands],
-  ];
-  const renewalHours = renewalHoursForPreset(renewalDuration, customRenewalDays);
-  const renewalLabel = renewalWindowLabel(renewalDuration, renewalHours);
-  const relayMode = relayModeForOperator(relayOperator);
-  const normalizedSelfRelayEndpoint = normalizeSelfRelayUrl(selfRelayEndpoint);
-  const localRelayTooLong = renewing && relayOperator === "LocalBrowser" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS;
-  const selfHostedRelayMissing = renewing && relayOperator === "SelfHostedRelay" && !normalizedSelfRelayEndpoint;
-  const fundingPreviewErrors = sideBandSets
-    .map(([curveSide, bands]) => {
-      const filledBands = bandRowsFilled(bands);
-      if (!walletReady || filledBands.length < MIN_CURVE_BANDS || !onPreviewFunding) return null;
-      try {
-        onPreviewFunding({
-          pairId: selectedPair.pair_id,
-          side: sideFromCurveSide(curveSide),
-          shape: "curve",
-          stratKind: "TWAP",
-          resting: renewing,
-          amount: "",
-          limitPrice: "",
-          minFill: "",
-          fillOrKill: false,
-          curvePoints: filledBands,
-          inventoryCap,
-          durationHours: renewalHours.toString(),
-          childSize: "",
-          priceLimit: "",
-          jitter: 0,
-          relayMode: renewing ? relayMode : "SelfRelay",
-          relayOperator: renewing ? relayOperator : "LocalBrowser",
-          selfRelayUrl: relayOperator === "SelfHostedRelay" ? normalizedSelfRelayEndpoint : undefined,
-        });
-        return null;
-      } catch (error) {
-        return userFacingErrorMessage(error, "Funding preview unavailable.");
-      }
-    })
-    .filter((message): message is string => Boolean(message));
+    ? positionInputTouched
+      ? `${lockedAssetText} ${lockedOnlyAssets.length === 1 ? "is" : "are"} locked in existing positions. Close or edit a position, or deposit more ${lockedAssetText}.`
+      : `${lockedAssetText} ${lockedOnlyAssets.length === 1 ? "is" : "are"} locked in existing positions. Close or edit a position, or deposit more ${lockedAssetText}.`
+    : positionInputTouched
+      ? `No available ${missingInventoryText} for this position. Deposit before providing liquidity.`
+      : `No available ${missingInventoryText} for this quote. Deposit before quoting liquidity.`;
   const canSubmit = walletReady &&
     !submitting &&
-    !localRelayTooLong &&
-    !selfHostedRelayMissing &&
     missingInventoryAssets.length === 0 &&
-    fundingPreviewErrors.length === 0 &&
-    sideBandSets.every(([, bands]) => bandRowsFilled(bands).length >= MIN_CURVE_BANDS);
+    Boolean(positionPlanState.plan && onOpenPosition);
 
   async function submit() {
-    for (const [curveSide, bands] of sideBandSets) {
-      const ok = await onSubmitCurve({
-        pairId: selectedPair.pair_id,
-        side: sideFromCurveSide(curveSide),
-        shape: "curve",
-        stratKind: "TWAP",
-        resting: renewing,
-        amount: "",
-        limitPrice: "",
-        minFill: "",
-        fillOrKill: false,
-        curvePoints: bandRowsFilled(bands),
-        inventoryCap,
-        durationHours: renewalHours.toString(),
-        childSize: "",
-        priceLimit: "",
-        jitter: 0,
-        relayMode: renewing ? relayMode : "SelfRelay",
-        relayOperator: renewing ? relayOperator : "LocalBrowser",
-        selfRelayUrl: relayOperator === "SelfHostedRelay" ? normalizedSelfRelayEndpoint : undefined,
-      });
-      if (ok === false) return;
-    }
+    if (!positionPlanState.plan || !onOpenPosition) return;
+    const ok = await onOpenPosition(positionPlanState.plan.openPosition);
+    if (ok === false) return;
+    setPositionBaseAmount("");
+    setPositionQuoteAmount("");
     setInventoryCap("");
-    if (normalizedSelfRelayEndpoint) persistSelfRelayEndpoint(normalizedSelfRelayEndpoint);
   }
 
   return (
@@ -664,7 +543,7 @@ export function LiquidityCurvesScreen({
           <div className="liq-pair-rail-hd">Markets</div>
           {pairs.map(pair => {
             const pairRecords = records.filter(record => record.pair === pair.pair_id);
-            const livePairRecords = activeCurveRecords(pairRecords);
+            const livePairRecords = activePositionRecords(pairRecords);
             const bidCount = livePairRecords.filter(record => record.side === "Buy").length;
             const askCount = livePairRecords.filter(record => record.side === "Sell").length;
             return (
@@ -690,15 +569,15 @@ export function LiquidityCurvesScreen({
               <span className="liq-pair-head-name">{selectedPair.pair_id}</span>
               <span className="liq-pair-head-status">
                 {selectedPairRecords.length === 0 ? (
-                  <span className="pill muted">No active curve</span>
+                  <span className="pill muted">No active position</span>
                 ) : selectedPairRecords.map(record => (
-                  <span className={`pill ${curveStatusPillTone(record.status)}`} key={record.id}>
+                  <span className={`pill ${positionStatusPillTone(record.status)}`} key={record.id}>
                     {record.sideLabel} {record.status}
                   </span>
                 ))}
               </span>
             </div>
-            <span className="liq-pair-head-clearing">{selectedPairClearing ?? "—"}</span>
+            <span className="liq-pair-head-clearing">{selectedPairClearing ?? "-"}</span>
           </header>
 
           <section
@@ -708,7 +587,7 @@ export function LiquidityCurvesScreen({
             }}
           >
           <div className="liq-panel-hd">
-            <span>Quote liquidity</span>
+            <span>Create position</span>
           </div>
 
           <div className="liq-inventory-strip" aria-label="Liquidity inventory">
@@ -716,45 +595,196 @@ export function LiquidityCurvesScreen({
               const balance = balances.find(entry => entry.asset === asset);
               const pending = pendingDeposits
                 .filter(deposit => deposit.asset === asset && !deposit.confirmed && !deposit.failed)
-                .reduce((sum, deposit) => sum + BigInt(deposit.amount), 0n);
+                .reduce((sum, deposit) => sum + safeAtomicAmount(deposit.amount), 0n);
+              const locked = balance ? safeAtomicAmount(balance.locked) : 0n;
               return (
                 <div key={asset} className="liq-inventory-cell">
                   <span>{asset}</span>
-                  <strong>{balance ? fromAtomicStr(balance.available, asset) : "—"}</strong>
+                  <strong>{balance ? safeFromAtomicStr(balance.available, asset) : "-"}</strong>
                   <em>available</em>
-                  {balance && BigInt(balance.locked) > 0n && (
-                    <small>{fromAtomicStr(balance.locked, asset)} locked</small>
+                  {locked > 0n && (
+                    <small>{safeFromAtomicStr(locked, asset)} locked</small>
                   )}
                   {pending > 0n && (
-                    <small>{fromAtomicStr(pending.toString(), asset)} pending</small>
+                    <small>{safeFromAtomicStr(pending, asset)} pending</small>
                   )}
                 </div>
               );
             })}
           </div>
 
-          <div className="liq-side-segment" aria-label="Curve side">
-            {([
-              ["bid", "Bid Curve"],
-              ["ask", "Ask Curve"],
-            ] as Array<[CurveSide, string]>).map(([value, label]) => (
-              <button key={value} className={side === value ? "on" : ""} onClick={() => setSide(value)}>{label}</button>
-            ))}
+          <div className="position-config-grid" aria-label="Position configuration">
+            <div className="curve-risk-field">
+              <label className="f-label">{base}</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="0"
+                  value={positionBaseAmount}
+                  onChange={event => setPositionBaseAmount(event.target.value)}
+                />
+                <span className="f-unit">{base}</span>
+              </div>
+            </div>
+            <div className="curve-risk-field">
+              <label className="f-label">{quote}</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="0"
+                  value={positionQuoteAmount}
+                  onChange={event => setPositionQuoteAmount(event.target.value)}
+                />
+                <span className="f-unit">{quote}</span>
+              </div>
+            </div>
+            <div className="curve-risk-field">
+              <label className="f-label">Reference price</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder={selectedPairClearing ?? "0"}
+                  value={positionCurrentPrice}
+                  onChange={event => setPositionCurrentPrice(event.target.value)}
+                />
+                <span className="f-unit">{quote}</span>
+              </div>
+            </div>
+            <div className="curve-risk-field">
+              <label className="f-label">Min edge</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="8"
+                  value={positionMinEdgeBps}
+                  onChange={event => setPositionMinEdgeBps(event.target.value)}
+                />
+                <span className="f-unit">bps</span>
+              </div>
+            </div>
+            <div className="curve-risk-field">
+              <label className="f-label">Min price</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="0"
+                  value={positionMinPrice}
+                  onChange={event => setPositionMinPrice(event.target.value)}
+                />
+                <span className="f-unit">{quote}</span>
+              </div>
+            </div>
+            <div className="curve-risk-field">
+              <label className="f-label">Max price</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="0"
+                  value={positionMaxPrice}
+                  onChange={event => setPositionMaxPrice(event.target.value)}
+                />
+                <span className="f-unit">{quote}</span>
+              </div>
+            </div>
           </div>
+
+          <div className="position-config-grid position-return-grid" aria-label="Return model">
+            <div className="curve-risk-field">
+              <label className="f-label">Target gross yield</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="15"
+                  value={positionTargetAprPct}
+                  onChange={event => setPositionTargetAprPct(event.target.value)}
+                />
+                <span className="f-unit">%</span>
+              </div>
+            </div>
+            <div className="curve-risk-field">
+              <label className="f-label">Daily filled volume</label>
+              <div className="f-input-box" style={{ height: 36 }}>
+                <input
+                  className="f-input"
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="optional"
+                  value={positionExpectedDailyVolume}
+                  onChange={event => setPositionExpectedDailyVolume(event.target.value)}
+                />
+                <span className="f-unit">{quote}</span>
+              </div>
+            </div>
+          </div>
+
+          {(positionPlanState.plan || positionPlanState.error) && (
+            <div className="position-metrics-row">
+              {positionPlanState.plan && (
+                <>
+                  <div>
+                    <span>Capital</span>
+                    <strong>{formatCompactHuman(positionPlanState.plan.metrics.quoteValue, quote)}</strong>
+                  </div>
+                  <div>
+                    <span>Indicative fill yield</span>
+                    <strong>{formatPct(positionPlanState.plan.metrics.rewards.projectedAprPct ?? Number.NaN)}</strong>
+                  </div>
+                  <div>
+                    <span>Daily volume needed</span>
+                    <strong>{formatCompactHuman(positionPlanState.plan.metrics.rewards.requiredDailyVolume ?? Number.NaN, quote)}</strong>
+                  </div>
+                  <div>
+                    <span>Daily turnover needed</span>
+                    <strong>{formatDailyTurnover(positionPlanState.plan.metrics.rewards.requiredDailyTurnover)}</strong>
+                  </div>
+                  <div>
+                    <span>Effective ref</span>
+                    <strong>{formatHuman(positionPlanState.plan.metrics.effectiveReferencePrice, quote)}</strong>
+                  </div>
+                  <div>
+                    <span>LP edge</span>
+                    <strong>{formatUnsignedBps(positionPlanState.plan.metrics.rewards.estimatedEdgeBps)}</strong>
+                  </div>
+                  <div>
+                    <span>LP rebate</span>
+                    <strong>{formatUnsignedBps(positionPlanState.plan.metrics.rewards.estimatedRebateBps)}</strong>
+                  </div>
+                  <div>
+                    <span>Net LP return</span>
+                    <strong>{formatUnsignedBps(positionPlanState.plan.metrics.rewards.netLpEdgeBps)}</strong>
+                  </div>
+                </>
+              )}
+              {positionPlanState.error && <div className="wc-note warn">{positionPlanState.error}</div>}
+            </div>
+          )}
+          {positionPlanState.plan?.warnings.map(warning => (
+            <div className="wc-note warn" key={warning}>{warning}</div>
+          ))}
+          {positionInputTouched && positionPlanState.plan && !onOpenPosition && (
+            <div className="wc-note warn">Private position opening is not enabled in this wallet build yet.</div>
+          )}
+
           {walletReady && missingInventoryAssets.length > 0 && (
             <div className="wc-note warn liq-funding-warning">
               <span>{fundingWarningText}</span>
               <button type="button" onClick={() => onDeposit(missingInventoryAssets[0])}>Deposit</button>
             </div>
           )}
-
-          <CurveBandEditor
-            title={`${side === "bid" ? "Bid" : "Ask"} bands`}
-            quote={quote}
-            base={base}
-            bands={side === "bid" ? bidBands : askBands}
-            onBands={side === "bid" ? setBidBands : setAskBands}
-          />
 
           <button className="adv-toggle liq-adv" onClick={() => setAdvanced(value => !value)}>
             <span>Advanced</span>
@@ -763,14 +793,71 @@ export function LiquidityCurvesScreen({
           {advanced && (
             <div className="liq-advanced-grid">
               <div className="curve-risk-field">
-                <label className="f-label">Inventory cap</label>
+                <label className="f-label">Policy</label>
+                <select
+                  className="liq-select compact"
+                  value={positionPolicyKind}
+                  onChange={event => setPositionPolicyKind(event.target.value as LiquidityPositionPolicyKind)}
+                >
+                  <option value="StaticRange">Static range</option>
+                  <option value="InventorySkewed">Inventory skewed</option>
+                </select>
+              </div>
+              <div className="curve-risk-field">
+                <label className="f-label">Max fill/batch</label>
                 <div className="f-input-box" style={{ height: 34 }}>
                   <input className="f-input" type="text" inputMode="decimal" placeholder="0" value={inventoryCap} onChange={event => setInventoryCap(event.target.value)} />
                   <span className="f-unit">{base}</span>
                 </div>
               </div>
+              {positionPolicyKind === "InventorySkewed" && (
+                <>
+                  <div className="curve-risk-field">
+                    <label className="f-label">Target base</label>
+                    <div className="f-input-box" style={{ height: 34 }}>
+                      <input
+                        className="f-input"
+                        type="number"
+                        inputMode="decimal"
+                        placeholder="50"
+                        value={positionTargetBaseRatioPct}
+                        onChange={event => setPositionTargetBaseRatioPct(event.target.value)}
+                      />
+                      <span className="f-unit">%</span>
+                    </div>
+                  </div>
+                  <div className="curve-risk-field">
+                    <label className="f-label">Inventory skew</label>
+                    <div className="f-input-box" style={{ height: 34 }}>
+                      <input
+                        className="f-input"
+                        type="number"
+                        inputMode="numeric"
+                        placeholder="100"
+                        value={positionInventorySkewBps}
+                        onChange={event => setPositionInventorySkewBps(event.target.value)}
+                      />
+                      <span className="f-unit">bps</span>
+                    </div>
+                  </div>
+                  <div className="curve-risk-field">
+                    <label className="f-label">Max skew</label>
+                    <div className="f-input-box" style={{ height: 34 }}>
+                      <input
+                        className="f-input"
+                        type="number"
+                        inputMode="numeric"
+                        placeholder="500"
+                        value={positionMaxPriceDeviationBps}
+                        onChange={event => setPositionMaxPriceDeviationBps(event.target.value)}
+                      />
+                      <span className="f-unit">bps</span>
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="curve-risk-field">
-                <label className="f-label">Renewal window</label>
+                <label className="f-label">Position duration</label>
                 <select
                   className="liq-select compact"
                   value={renewalDuration}
@@ -780,7 +867,6 @@ export function LiquidityCurvesScreen({
                     <option
                       key={option.value}
                       value={option.value}
-                      disabled={relayOperator === "LocalBrowser" && option.relayOnly}
                     >
                       {option.label}
                     </option>
@@ -803,96 +889,35 @@ export function LiquidityCurvesScreen({
                   </div>
                 </div>
               )}
-              <div className="curve-risk-field">
-                <label className="f-label">Renewal operator</label>
-                <select
-                  className="liq-select compact"
-                  value={relayOperator}
-                  onChange={event => {
-                    const next = event.target.value as RelayOperator;
-                    setRelayOperator(next);
-                    if (next === "LocalBrowser" && renewalHours > LOCAL_BROWSER_MAX_RENEWAL_HOURS) {
-                      setRenewalDuration("1");
-                    }
-                  }}
-                >
-                  <option value="ZylithRelay">Zylith Relay</option>
-                  <option value="SelfHostedRelay">Self Relay</option>
-                  <option value="LocalBrowser">Local browser</option>
-                </select>
-              </div>
-              {relayOperator === "SelfHostedRelay" && (
-                <div className="curve-risk-field liq-self-relay-field">
-                  <label className="f-label">Self Relay endpoint</label>
-                  <div className="f-input-box" style={{ height: 34 }}>
-                    <input
-                      className="f-input"
-                      type="url"
-                      placeholder="https://relay.example.com"
-                      value={selfRelayEndpoint}
-                      onChange={event => setSelfRelayEndpoint(event.target.value)}
-                      onBlur={() => {
-                        const normalized = normalizeSelfRelayUrl(selfRelayEndpoint);
-                        if (normalized) {
-                          setSelfRelayEndpoint(normalized);
-                          persistSelfRelayEndpoint(normalized);
-                        }
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-              <label className="f-check liq-renew-check">
-                <input type="checkbox" checked={renewing} onChange={event => setRenewing(event.target.checked)} />
-                Renew each epoch
-              </label>
             </div>
           )}
 
-          <CurvePreview
+          <PositionPreview
             pair={selectedPair}
-            side={side}
-            bidBands={bidBands}
-            askBands={askBands}
-            inventoryCap={inventoryCap}
-            renewing={renewing}
-            renewalWindowHours={renewalHours.toString()}
+            previewIntents={previewIntents}
             renewalWindowLabelText={renewalLabel}
-            relayMode={relayMode}
-            relayOperator={relayOperator}
-            selfRelayUrl={normalizedSelfRelayEndpoint}
-            onPreviewFunding={onPreviewFunding}
           />
-          {renewing && (localRelayTooLong || selfHostedRelayMissing) && (
-            <div className={`wc-note ${localRelayTooLong || selfHostedRelayMissing ? "warn" : ""}`}>
-              {relayOperator === "LocalBrowser"
-                ? "Local browser renewal is capped at 1h and stops if this tab closes or the machine sleeps."
-                : "Enter a valid HTTPS Self Relay endpoint before activating this curve."}
-            </div>
-          )}
           {submitError && <div className="wc-note warn">{submitError}</div>}
           <button className="submit-btn curve-cta" disabled={!canSubmit} onClick={() => { void submit(); }}>
-            {submitting ? "Submitting..." : curveCtaLabel(side)}
+            {submitting ? "Submitting..." : "Create position"}
           </button>
         </section>
         </main>
 
-        <section className="liq-execution-rail liq-active-curves">
+        <section className="liq-execution-rail liq-active-positions">
           <div className="liq-panel-hd">
-            <span>Active curves</span>
-            <em>{activeCurveRecords(records).length} running</em>
+            <span>Active positions</span>
+            <em>{activePositionRecords(records).length} running</em>
           </div>
-          {activeCurveRecords(records).length === 0 ? (
+          {activePositionRecords(records).length === 0 ? (
             <div className="empty-zone liq-empty-zone">
-              <div className="empty-mark">—</div>
+              <div className="empty-mark">-</div>
             </div>
           ) : (
-            activeCurveRecords(records).map(record => {
-              let fallbackRemaining = depthFilled(record.relatedOrders);
+            activePositionRecords(records).map(record => {
               const bands = record.points.map((point, index) => {
                 const depth = parseHuman(point.baseAmount);
-                const filled = displayedBandFill(record, index, fallbackRemaining);
-                fallbackRemaining = Math.max(0, fallbackRemaining - filled);
+                const filled = displayedBandFill(record, index);
                 return { point, depth, filled };
               });
               const maxDepth = Math.max(1, ...bands.map(band => band.depth));
@@ -902,8 +927,8 @@ export function LiquidityCurvesScreen({
                   <div className="liq-active-top">
                     <span>{record.pair}</span>
                     <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>{record.sideLabel}</span>
-                    <span className={`pill ${curveStatusPillTone(record.status)}`}>{record.status}</span>
-                    <span className="liq-active-rate">{formatPct(curveFillRate(record.relatedOrders))}</span>
+                    <span className={`pill ${positionStatusPillTone(record.status)}`}>{record.status}</span>
+                    <span className="liq-active-rate">{formatPct(positionFillRate(record.relatedOrders))}</span>
                   </div>
                   <div className="liq-active-ladder">
                     {bands.map(({ point, depth, filled }, index) => {
@@ -924,11 +949,11 @@ export function LiquidityCurvesScreen({
                   <div className="liq-card-actions">
                     {record.strategy && (
                       record.status === "Paused"
-                        ? <button type="button" onClick={() => onResumeCurve(record)}>Resume</button>
-                        : <button type="button" onClick={() => onPauseCurve(record)}>Pause</button>
+                        ? <button type="button" onClick={() => onResumePosition(record)}>Resume</button>
+                        : <button type="button" onClick={() => onPausePosition(record)}>Pause</button>
                     )}
-                    <button type="button" onClick={() => onEditCurve(record)}>Edit</button>
-                    <button type="button" className="danger" onClick={() => onCancelCurve(record)}>Cancel</button>
+                    <button type="button" onClick={() => onEditPosition(record)}>Edit</button>
+                    <button type="button" className="danger" onClick={() => onCancelPosition(record)}>Cancel</button>
                   </div>
                 </div>
               );
@@ -943,19 +968,19 @@ export function LiquidityCurvesScreen({
 export function LiquidityOrdersScreen({
   records,
   batches,
-  onCancelCurve,
+  onCancelPosition,
 }: {
-  records: LiquidityCurveRecord[];
+  records: LiquidityPositionRecord[];
   batches: BatchSummary[];
-  onCancelCurve: (record: LiquidityCurveRecord) => void;
+  onCancelPosition: (record: LiquidityPositionRecord) => void;
 }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState<"active" | "history">("active");
   const batchStatus = new Map(batches.map(batch => [batch.batch_id, batch.status]));
   const parents = records.filter(record => record.strategy || record.relatedOrders.length > 0);
   const displayedParents = filter === "active"
-    ? parents.filter(record => activeCurveRecords([record]).length > 0)
-    : parents.filter(record => activeCurveRecords([record]).length === 0);
+    ? parents.filter(record => activePositionRecords([record]).length > 0)
+    : parents.filter(record => activePositionRecords([record]).length === 0);
 
   return (
     <div className="workspace-page liquidity-page">
@@ -981,13 +1006,13 @@ export function LiquidityOrdersScreen({
       <div className="liq-sections">
         {displayedParents.length === 0 ? (
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
+            <div className="empty-mark">-</div>
             <div className="empty-body">
               {parents.length === 0
-                ? "Child orders appear after a curve is activated."
+                ? "Child orders appear after a position is activated."
                 : filter === "active"
-                  ? "No active maker orders."
-                  : "No maker order history yet."}
+                  ? "No active position slices."
+                  : "No position slice history yet."}
             </div>
           </div>
         ) : (
@@ -1011,12 +1036,12 @@ export function LiquidityOrdersScreen({
               <tbody>
                 {displayedParents.map((record, index) => {
                   const expanded = open[record.id] ?? index === 0;
-                  const outcomes = curveEpochOutcomes(record, batchStatus);
+                  const outcomes = positionEpochOutcomes(record, batchStatus);
                   const submitted = outcomes.length;
                   const scheduled = Math.max(record.strategy?.max_children ?? record.maxChildren ?? submitted, submitted);
                   const remaining = Math.max(0, scheduled - submitted);
                   const depth = committedDepth(record.points, record.relatedOrders);
-                  const bands = record.points.length || record.strategy?.maker_curve_points?.length || "—";
+                  const bands = record.points.length || liquidityStrategyBandCount(record.strategy) || "-";
                   const toggle = () => setOpen(previous => ({ ...previous, [record.id]: !expanded }));
                   return (
                     <Fragment key={record.id}>
@@ -1027,7 +1052,7 @@ export function LiquidityOrdersScreen({
                         <td className="side-bar-cell">
                           <span style={{ background: record.side === "Buy" ? "var(--z-buy)" : "var(--z-sell)" }} />
                         </td>
-                        <td className="ref">{curveDisplayRef(record)}</td>
+                        <td className="ref">{positionDisplayRef(record)}</td>
                         <td>{record.pair}</td>
                         <td>
                           <span className={`side ${record.side === "Buy" ? "buy" : "sell"}`}>
@@ -1035,17 +1060,17 @@ export function LiquidityOrdersScreen({
                           </span>
                         </td>
                         <td className="num">{bands}</td>
-                        <td className="num">{formatHuman(depth, curveBaseAsset(record))}</td>
-                        <td className="num">{averageCurvePrice(record)}</td>
+                        <td className="num">{formatHuman(depth, positionBaseAsset(record))}</td>
+                        <td className="num">{averagePositionPrice(record)}</td>
                         <td className="num">{submitted}/{scheduled} · {remaining} left</td>
-                        <td><span className={`pill ${curveStatusPillTone(record.status)}`}>{record.status}</span></td>
+                        <td><span className={`pill ${positionStatusPillTone(record.status)}`}>{record.status}</span></td>
                         <td>{fmtTime(record.submittedAt)}</td>
                         <td className="disclosure-cell">
                           <button
                             type="button"
                             className={`disclosure ${expanded ? "open" : "muted"}`}
                             aria-expanded={expanded}
-                            aria-label={`${expanded ? "Collapse" : "Expand"} ${record.pair} curve child orders`}
+                            aria-label={`${expanded ? "Collapse" : "Expand"} ${record.pair} position child orders`}
                             onClick={event => {
                               event.stopPropagation();
                               toggle();
@@ -1056,12 +1081,12 @@ export function LiquidityOrdersScreen({
                         </td>
                       </tr>
                       {expanded && (
-                        <CurveChildTimeline
+                        <PositionChildTimeline
                           record={record}
                           outcomes={outcomes}
                           submitted={submitted}
                           scheduled={scheduled}
-                          onCancelCurve={onCancelCurve}
+                          onCancelPosition={onCancelPosition}
                         />
                       )}
                     </Fragment>
@@ -1085,7 +1110,7 @@ export function LiquidityInventoryScreen({
   onDeposit,
   onWithdraw,
 }: {
-  records: LiquidityCurveRecord[];
+  records: LiquidityPositionRecord[];
   balances: WalletBalance[];
   pendingDeposits: PendingDeposit[];
   withdrawableNotes: WithdrawableNote[];
@@ -1093,7 +1118,7 @@ export function LiquidityInventoryScreen({
   onDeposit: (asset?: string) => void;
   onWithdraw: (asset?: string) => void;
 }) {
-  const activeRecords = activeCurveRecords(records);
+  const activeRecords = activePositionRecords(records);
   if (activeRecords.length === 0) {
     return (
       <div className="workspace-page liquidity-page">
@@ -1102,8 +1127,8 @@ export function LiquidityInventoryScreen({
         </div>
         <div className="table-zone">
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Inventory tracking begins when you activate a curve.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Inventory tracking begins when you open a position.</div>
           </div>
         </div>
       </div>
@@ -1117,11 +1142,11 @@ export function LiquidityInventoryScreen({
     ...activeRecords.flatMap(record => record.pair.split("/")),
   ])).filter(Boolean);
 
-  function lockedInCurves(asset: string): number {
+  function lockedInPositions(asset: string): number {
     return activeRecords
       .filter(record => record.status === "Active" || record.status === "Expiring")
-      .filter(record => curveFundingAsset(record) === asset)
-      .reduce((sum, record) => sum + curveLockedCapital(record), 0);
+      .filter(record => positionFundingAsset(record) === asset)
+      .reduce((sum, record) => sum + positionLockedCapital(record), 0);
   }
 
   return (
@@ -1140,7 +1165,7 @@ export function LiquidityInventoryScreen({
             <tr>
                 <th>Asset</th>
                 <th>Available</th>
-                <th>Locked in curves</th>
+                <th>Locked in positions</th>
                 <th>Observed capacity</th>
                 <th>Current epoch exposure</th>
                 <th>Current utilization</th>
@@ -1149,7 +1174,7 @@ export function LiquidityInventoryScreen({
           <tbody>
             {assets.map(asset => {
               const balance = balances.find(entry => entry.asset === asset);
-              const locked = lockedInCurves(asset);
+              const locked = lockedInPositions(asset);
               const exposure = activeRecords
                 .flatMap(record => record.relatedOrders)
                 .filter(order => order.epochId === activeEpochId)
@@ -1159,7 +1184,7 @@ export function LiquidityInventoryScreen({
               return (
                 <tr key={asset}>
                   <td className="ref">{asset}</td>
-                  <td className="num">{balance ? fromAtomicStr(balance.available, asset) : "—"}</td>
+                  <td className="num">{balance ? safeFromAtomicStr(balance.available, asset) : "-"}</td>
                   <td className="num">{formatHuman(locked)}</td>
                   <td className="num">{formatHuman(cap)}</td>
                   <td className="num">{formatHuman(exposure)}</td>
@@ -1177,7 +1202,7 @@ export function LiquidityInventoryScreen({
         <section className="liq-section-spaced">
           <div className="asset-section-hd">
             <h2>Pair exposure</h2>
-            <span>{activeRecords.length} curves</span>
+            <span>{activeRecords.length} positions</span>
           </div>
           <table className="data-table">
             <thead>
@@ -1212,7 +1237,7 @@ export function LiquidityInventoryScreen({
         <section className="liq-section-spaced">
           <div className="asset-section-hd">
             <h2>Locked notes</h2>
-            <span>Capital fragmentation by curve</span>
+            <span>Capital fragmentation by position</span>
           </div>
           <table className="data-table">
             <thead>
@@ -1263,7 +1288,7 @@ function LiquidityEpochTrend({
   if (series.length === 0) {
     return (
       <div className="an-chart empty" aria-label="No epoch trend data">
-        <span>—</span>
+        <span>-</span>
       </div>
     );
   }
@@ -1302,7 +1327,7 @@ function LiquidityEpochTrend({
 }
 
 function LiquidityUtilBars({ values }: { values: number[] }) {
-  if (values.length === 0) return <span className="an-util empty">—</span>;
+  if (values.length === 0) return <span className="an-util empty">-</span>;
   return (
     <span className="an-util" aria-label="Band utilization">
       {values.map((value, index) => (
@@ -1320,7 +1345,7 @@ export function LiquidityAnalyticsScreen({
   strategies = [],
   balances = [],
 }: {
-  records: LiquidityCurveRecord[];
+  records: LiquidityPositionRecord[];
   settlementTranscripts: Record<string, PublicSettlementTranscript>;
   strategies?: PrivateStrategySummary[];
   balances?: WalletBalance[];
@@ -1341,7 +1366,7 @@ export function LiquidityAnalyticsScreen({
     transcript: settlementTranscripts[order.batchId],
   })));
   const terminalOrders = epochRows.map(row => row.order);
-  const quoteAssets = new Set(activityRecords.map(curveQuoteAsset).filter(Boolean));
+  const quoteAssets = new Set(activityRecords.map(positionQuoteAsset).filter(Boolean));
   const quoteAsset = quoteAssets.size === 1 ? [...quoteAssets][0] : null;
   const chartMode: LiquidityAnalyticsChartMode = quoteAsset ? "notional" : "fills";
   const epochSeries = buildLiquidityEpochSeries(epochRows, chartMode);
@@ -1351,10 +1376,10 @@ export function LiquidityAnalyticsScreen({
     : Number.NaN;
   const filledOrders = terminalOrders.filter(terminalFill).length;
   const blendedFillRate = terminalOrders.length > 0 ? (filledOrders / terminalOrders.length) * 100 : Number.NaN;
-  const captureBps = weightedMakerCaptureBps(terminalOrders);
+  const captureBps = weightedPositionCaptureBps(terminalOrders);
   const activeMarkets = new Set(activityRecords.map(record => record.pair)).size;
   const rolledPct = records.length > 0 ? (records.filter(record => record.strategy).length / records.length) * 100 : Number.NaN;
-  const opsSnapshot = buildMakerOpsSnapshot({
+  const opsSnapshot = buildLiquidityOpsSnapshot({
     strategies,
     orders: records.flatMap(record => record.relatedOrders),
     balances,
@@ -1362,22 +1387,19 @@ export function LiquidityAnalyticsScreen({
   });
   const marketGroups = new Map<string, {
     pair: string;
-    sides: Set<LiquidityCurveRecord["side"]>;
+    sides: Set<LiquidityPositionRecord["side"]>;
     orders: LocalOrder[];
     utilization: number[];
   }>();
   for (const record of activityRecords) {
-    const filled = depthFilled(record.relatedOrders);
-    let fallbackRemaining = filled;
     const utilization = record.points.map((point, index) => {
       const depth = parseHuman(point.baseAmount);
-      const bandFilled = displayedBandFill(record, index, fallbackRemaining);
-      fallbackRemaining = Math.max(0, fallbackRemaining - bandFilled);
+      const bandFilled = displayedBandFill(record, index);
       return depth > 0 ? Math.min(100, (bandFilled / depth) * 100) : 0;
     });
     const current = marketGroups.get(record.pair) ?? {
       pair: record.pair,
-      sides: new Set<LiquidityCurveRecord["side"]>(),
+      sides: new Set<LiquidityPositionRecord["side"]>(),
       orders: [],
       utilization: [],
     };
@@ -1392,9 +1414,9 @@ export function LiquidityAnalyticsScreen({
       pair: group.pair,
       quote,
       sides: group.sides,
-      fillRate: curveFillRate(group.orders),
+      fillRate: positionFillRate(group.orders),
       avgClearing: weightedAverageClearing(group.orders),
-      capture: weightedMakerCaptureBps(group.orders),
+      capture: weightedPositionCaptureBps(group.orders),
       notional: group.orders.reduce((sum, order) => sum + orderQuoteNotional(order, settlementTranscripts[order.batchId]), 0),
       utilization: group.utilization.slice(0, 8),
     };
@@ -1419,8 +1441,8 @@ export function LiquidityAnalyticsScreen({
       {epochRows.length === 0 && (
         <div className="table-zone">
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Analytics populate after curves have been active and children have settled.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Analytics populate after positions have been active and children have settled.</div>
           </div>
         </div>
       )}
@@ -1441,7 +1463,7 @@ export function LiquidityAnalyticsScreen({
             <div className="an-kpi">
               <span className="an-kpi-k">Spread capture</span>
               <strong className="an-kpi-v">{formatBps(captureBps)}</strong>
-              <span className={Number.isFinite(captureBps) && captureBps < 0 ? "an-kpi-d down" : "an-kpi-d up"}>Clearing vs maker limit</span>
+              <span className={Number.isFinite(captureBps) && captureBps < 0 ? "an-kpi-d down" : "an-kpi-d up"}>Clearing vs position limit</span>
             </div>
             <div className="an-kpi">
               <span className="an-kpi-k">Epochs cleared</span>
@@ -1466,9 +1488,9 @@ export function LiquidityAnalyticsScreen({
               </div>
               <LiquidityEpochTrend series={chartSeries} chartMode={chartMode} quoteAsset={quoteAsset} />
               <div className="an-chart-axis">
-                <span>{chartSeries[0] ? `Epoch ${chartSeries[0].epoch}` : "—"}</span>
+                <span>{chartSeries[0] ? `Epoch ${chartSeries[0].epoch}` : "-"}</span>
                 <span>{Math.min(30, chartSeries.length)} epochs</span>
-                <span>{chartSeries.at(-1) ? `Epoch ${chartSeries.at(-1)?.epoch}` : "—"}</span>
+                <span>{chartSeries.at(-1) ? `Epoch ${chartSeries.at(-1)?.epoch}` : "-"}</span>
               </div>
             </section>
 
@@ -1477,7 +1499,7 @@ export function LiquidityAnalyticsScreen({
                 <span>Spread capture</span>
               </div>
               <strong className="an-cap-big">{formatBps(captureBps)}</strong>
-              <p className="an-cap-sub">Weighted clearing improvement against maker limits across filled children.</p>
+              <p className="an-cap-sub">Weighted clearing improvement against position limits across filled slices.</p>
               <div className="an-cap-rows">
                 <div className="an-cap-row"><span className="k">Volume matched</span><span className="v">{quoteAsset ? formatCompactHuman(matchedNotional, quoteAsset) : "By market"}</span></div>
                 <div className="an-cap-row"><span className="k">Blended fill</span><span className="v">{formatPct(blendedFillRate)}</span></div>
@@ -1534,8 +1556,8 @@ export function LiquidityAnalyticsScreen({
           <section className="an-market-section">
             <div className="an-market-hd">
               <div className="an-sec-hd">
-                <span>Maker ops</span>
-                <em>Strategy health and relay attention</em>
+                <span>Liquidity ops</span>
+                <em>Position health and relay attention</em>
               </div>
             </div>
             <div className="an-markets">
@@ -1548,7 +1570,7 @@ export function LiquidityAnalyticsScreen({
                 <span>Failures</span>
               </div>
               <div className="an-mkt-row" role="row">
-                <span className="an-mkt-name">Managed curves</span>
+                <span className="an-mkt-name">Position slices</span>
                 <span className="an-mkt-num">{opsSnapshot.activeStrategies.toLocaleString("en-US")}</span>
                 <span className="an-mkt-num">{opsSnapshot.delegatedStrategies.toLocaleString("en-US")}</span>
                 <span className="an-mkt-num">{opsSnapshot.pausedStrategies.toLocaleString("en-US")}</span>
@@ -1578,15 +1600,14 @@ export function LiquidityWorkspace({
   walletReady,
   submitting,
   submitError,
-  onPreviewFunding,
-  onSubmitCurve,
+  onOpenPosition,
   onCancelOrder,
   onCancelStrategy,
   onPauseStrategy,
   onResumeStrategy,
   onDeposit,
   onWithdraw,
-  onNavigateCurves,
+  onNavigatePositions,
 }: {
   tab: LiquidityPageTab;
   pairs: PairConfig[];
@@ -1602,21 +1623,20 @@ export function LiquidityWorkspace({
   walletReady: boolean;
   submitting: boolean;
   submitError: string | null;
-  onPreviewFunding?: (intent: TicketSubmitIntent) => FundingPreview | null;
-  onSubmitCurve: (intent: TicketSubmitIntent) => Promise<boolean | void>;
+  onOpenPosition?: (request: PrivateLiquidityPositionOpenRequest) => Promise<boolean | void>;
   onCancelOrder: (order: LocalOrder) => void;
   onCancelStrategy: (strategyId: string) => Promise<void>;
   onPauseStrategy: (strategyId: string) => Promise<void>;
   onResumeStrategy: (strategyId: string) => Promise<void>;
   onDeposit: (asset?: string) => void;
   onWithdraw: (asset?: string) => void;
-  onNavigateCurves: () => void;
+  onNavigatePositions: () => void;
 }) {
-  const [editRecord, setEditRecord] = useState<LiquidityCurveRecord | null>(null);
-  const records = useMemo(() => buildCurveRecords(orders, strategies, pairs), [orders, pairs, strategies]);
+  const [editRecord, setEditRecord] = useState<LiquidityPositionRecord | null>(null);
+  const records = useMemo(() => buildPositionRecords(orders, strategies, pairs), [orders, pairs, strategies]);
   const activeEpochId = batches.reduce<number | null>((latest, batch) => latest === null ? batch.epoch_id : Math.max(latest, batch.epoch_id), null);
 
-  function cancelCurve(record: LiquidityCurveRecord) {
+  function cancelPosition(record: LiquidityPositionRecord) {
     if (record.strategy) {
       void onCancelStrategy(record.strategy.id);
       return;
@@ -1625,22 +1645,22 @@ export function LiquidityWorkspace({
     if (firstActive) onCancelOrder(firstActive);
   }
 
-  async function pauseCurve(record: LiquidityCurveRecord) {
+  async function pausePosition(record: LiquidityPositionRecord) {
     if (!record.strategy) return;
     await onPauseStrategy(record.strategy.id);
   }
 
-  async function resumeCurve(record: LiquidityCurveRecord) {
+  async function resumePosition(record: LiquidityPositionRecord) {
     if (!record.strategy) return;
     await onResumeStrategy(record.strategy.id);
   }
 
-  function editCurve(record: LiquidityCurveRecord) {
+  function editPosition(record: LiquidityPositionRecord) {
     if (record.strategy && record.status !== "Paused") {
-      void pauseCurve(record);
+      void pausePosition(record);
     }
     setEditRecord(record);
-    onNavigateCurves();
+    onNavigatePositions();
   }
 
   if (!walletReady) {
@@ -1649,8 +1669,8 @@ export function LiquidityWorkspace({
         <div className="page-hd"><span className="page-title">{liquidityPageTitle(tab)}</span></div>
         <div className="table-zone">
           <div className="empty-zone">
-            <div className="empty-mark">—</div>
-            <div className="empty-body">Sign in to manage liquidity.</div>
+            <div className="empty-mark">-</div>
+            <div className="empty-body">Connect wallet to manage liquidity.</div>
           </div>
         </div>
       </div>
@@ -1659,8 +1679,8 @@ export function LiquidityWorkspace({
 
   return (
     <Fragment>
-      {tab === "curves" && (
-        <LiquidityCurvesScreen
+      {tab === "positions" && (
+        <LiquidityPositionsScreen
           pairs={pairs}
           records={records}
           balances={balances}
@@ -1670,12 +1690,11 @@ export function LiquidityWorkspace({
           walletReady={walletReady}
           submitting={submitting}
           submitError={submitError}
-          onPreviewFunding={onPreviewFunding}
-          onSubmitCurve={onSubmitCurve}
-          onCancelCurve={cancelCurve}
-          onEditCurve={editCurve}
-          onPauseCurve={record => { void pauseCurve(record); }}
-          onResumeCurve={record => { void resumeCurve(record); }}
+          onOpenPosition={onOpenPosition}
+          onCancelPosition={cancelPosition}
+          onEditPosition={editPosition}
+          onPausePosition={record => { void pausePosition(record); }}
+          onResumePosition={record => { void resumePosition(record); }}
           onDeposit={onDeposit}
           editRecord={editRecord}
           onEditConsumed={() => setEditRecord(null)}
@@ -1685,7 +1704,7 @@ export function LiquidityWorkspace({
         <LiquidityOrdersScreen
           records={records}
           batches={batches}
-          onCancelCurve={cancelCurve}
+          onCancelPosition={cancelPosition}
         />
       )}
       {tab === "inventory" && (

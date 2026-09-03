@@ -24,6 +24,42 @@ function activeOrder(overrides: Partial<LocalOrder> = {}): LocalOrder {
 }
 
 describe("RightColumn", () => {
+  it("opens deposit and withdraw directly for a connected wallet before authorization", () => {
+    const setOpenSlide = vi.fn();
+
+    render(
+      <RightColumn
+        activeBatch={null}
+        activePairId="STRK/USDC"
+        settlementTranscripts={{}}
+        online
+        allAssets={["STRK", "USDC"]}
+        pairs={[{
+          pair_id: "STRK/USDC",
+          base_asset_id: "STRK",
+          quote_asset_id: "USDC",
+        }]}
+        balances={[]}
+        pendingDeposits={[]}
+        withdrawableNotes={[]}
+        claimDelaySeconds={0}
+        walletReady={false}
+        starknetAddress="0xabc"
+        activeOrders={[]}
+        setOpenSlide={setOpenSlide}
+        allOrders={[]}
+        onCancelOrder={vi.fn()}
+        onClaimNote={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Deposit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+
+    expect(setOpenSlide).toHaveBeenNthCalledWith(1, "deposit");
+    expect(setOpenSlide).toHaveBeenNthCalledWith(2, "withdraw");
+  });
+
   it("keeps withdrawable notes compact and below active orders", () => {
     const note: WithdrawableNote = {
       note_commitment: "0xnote123456",

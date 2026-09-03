@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { PairConfig } from "../components/OrderTicket";
 import type { LocalOrder, PrivateStrategySummary } from "../domain/orderLifecycle";
-import { LiquidityAnalyticsScreen, LiquidityCurvesScreen, LiquidityWorkspace } from "./LiquidityScreens";
+import { LiquidityAnalyticsScreen, LiquidityPositionsScreen, LiquidityWorkspace } from "./LiquidityScreens";
 
 const pairs: PairConfig[] = [
   {
@@ -23,13 +23,13 @@ const pairs: PairConfig[] = [
   },
 ];
 
-describe("LiquidityCurvesScreen", () => {
-  it("submits curves for the liquidity-selected pair, not the taker active pair", async () => {
-    const onSubmitCurve = vi.fn().mockResolvedValue(true);
+describe("LiquidityPositionsScreen", () => {
+  it("opens positions for the liquidity-selected pair, not the taker active pair", async () => {
+    const onOpenPosition = vi.fn().mockResolvedValue(true);
     const setActivePairId = vi.fn();
 
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
         balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
@@ -39,11 +39,11 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={onSubmitCurve}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onOpenPosition={onOpenPosition}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
@@ -52,33 +52,30 @@ describe("LiquidityCurvesScreen", () => {
 
     expect(screen.getByRole("button", { name: /ETH\/USDCNo bidNo ask/i })).toHaveClass("on");
 
-    const inputs = screen.getAllByRole("textbox");
-    fireEvent.change(inputs[0], { target: { value: "2500" } });
-    fireEvent.change(inputs[1], { target: { value: "3" } });
-    fireEvent.change(inputs[2], { target: { value: "2505" } });
-    fireEvent.change(inputs[3], { target: { value: "3" } });
-    fireEvent.change(inputs[4], { target: { value: "2510" } });
-    fireEvent.change(inputs[5], { target: { value: "3" } });
+    const inputs = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(inputs[0], { target: { value: "0" } });
+    fireEvent.change(inputs[1], { target: { value: "5000" } });
+    fireEvent.change(inputs[2], { target: { value: "2500" } });
+    fireEvent.change(inputs[3], { target: { value: "30" } });
+    fireEvent.change(inputs[4], { target: { value: "2300" } });
+    fireEvent.change(inputs[5], { target: { value: "2700" } });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Activate bid curve" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create position" }));
     });
 
-    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
+    expect(onOpenPosition).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "OpenPrivateLiquidityPosition",
       pairId: "ETH/USDC",
-      resting: true,
-      relayMode: "SelfRelay",
-      curvePoints: [
-        { price: "2500", baseAmount: "3" },
-        { price: "2505", baseAmount: "3" },
-        { price: "2510", baseAmount: "3" },
-      ],
+      quoteReserveAtomic: "5000000000",
+      priceLowerBoundAtomic: "2300000000",
+      priceUpperBoundAtomic: "2700000000",
     }));
     expect(setActivePairId).not.toHaveBeenCalled();
   });
 
   it("shows selected-pair inventory beside the liquidity builder", () => {
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
         balances={[
@@ -97,11 +94,10 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
@@ -117,10 +113,10 @@ describe("LiquidityCurvesScreen", () => {
     expect(inventory).toHaveTextContent("1 pending");
   });
 
-  it("opens deposit for the missing liquidity funding asset", () => {
+  it("opens deposit for the missing position reserve asset", () => {
     const onDeposit = vi.fn();
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
         balances={[]}
@@ -130,25 +126,30 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={onDeposit}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
+    const inputs = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(inputs[1], { target: { value: "5000" } });
+    fireEvent.change(inputs[2], { target: { value: "2500" } });
+    fireEvent.change(inputs[4], { target: { value: "2300" } });
+    fireEvent.change(inputs[5], { target: { value: "2700" } });
+
     fireEvent.click(screen.getByRole("button", { name: "Deposit" }));
 
     expect(onDeposit).toHaveBeenCalledWith("USDC");
   });
 
-  it("explains when quote capital is locked in existing curves", () => {
+  it("explains when quote capital is locked in existing positions", () => {
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
         balances={[{ asset: "USDC", available: "0", locked: "2000000" }]}
@@ -158,76 +159,74 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
-    expect(screen.getByText(/USDC is locked in existing curves/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeDisabled();
+    const inputs = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(inputs[1], { target: { value: "5000" } });
+    fireEvent.change(inputs[2], { target: { value: "2500" } });
+    fireEvent.change(inputs[4], { target: { value: "2300" } });
+    fireEvent.change(inputs[5], { target: { value: "2700" } });
+
+    expect(screen.getByText(/USDC is locked in existing positions/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create position" })).toBeDisabled();
   });
 
-  it("blocks activation when funding preview cannot select notes", () => {
+  it("opens positions without legacy per-order funding preview requirements", async () => {
+    const onOpenPosition = vi.fn().mockResolvedValue(true);
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
-        balances={[{ asset: "USDC", available: "1000000", locked: "0" }]}
+        balances={[{ asset: "USDC", available: "10000000000", locked: "0" }]}
         pendingDeposits={[]}
         activePairId="ETH/USDC"
         setActivePairId={vi.fn()}
         walletReady
         submitting={false}
         submitError={null}
-        onPreviewFunding={() => {
-          throw new Error("No unlocked USDC note can fund this order");
-        }}
-        onSubmitCurve={vi.fn()}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onOpenPosition={onOpenPosition}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
-    const inputs = screen.getAllByRole("textbox");
-    fireEvent.change(inputs[0], { target: { value: "2500" } });
-    fireEvent.change(inputs[1], { target: { value: "3" } });
-    fireEvent.change(inputs[2], { target: { value: "2505" } });
-    fireEvent.change(inputs[3], { target: { value: "3" } });
-    fireEvent.change(inputs[4], { target: { value: "2510" } });
-    fireEvent.change(inputs[5], { target: { value: "3" } });
+    const inputs = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(inputs[1], { target: { value: "5000" } });
+    fireEvent.change(inputs[2], { target: { value: "2500" } });
+    fireEvent.change(inputs[4], { target: { value: "2300" } });
+    fireEvent.change(inputs[5], { target: { value: "2700" } });
 
-    expect(screen.getByText(/No unlocked USDC note can fund this order/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeDisabled();
+    expect(screen.queryByText(/No available USDC balance can fund this order/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create position" })).toBeEnabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create position" }));
+    });
+
+    expect(onOpenPosition).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "OpenPrivateLiquidityPosition",
+      pairId: "ETH/USDC",
+    }));
   });
 
-  it("allows a small USDC bid curve when preview can select the available quote note", async () => {
-    const onSubmitCurve = vi.fn().mockResolvedValue(true);
-    const onPreviewFunding = vi.fn(() => ({
-      asset: "USDC",
-      required: "45000",
-      selected_total: "1170000",
-      expected_change: "1125000",
-      notes: [{
-        note_commitment: "0xquote",
-        asset: "USDC",
-        amount: "1170000",
-        source: "deposit" as const,
-      }],
-    }));
+  it("allows a small quote-only position when the quote reserve is available", async () => {
+    const onOpenPosition = vi.fn().mockResolvedValue(true);
 
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
         balances={[{ asset: "USDC", available: "1170000", locked: "829668" }]}
@@ -237,105 +236,187 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onPreviewFunding={onPreviewFunding}
-        onSubmitCurve={onSubmitCurve}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onOpenPosition={onOpenPosition}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
-    const inputs = screen.getAllByRole("textbox");
-    fireEvent.change(inputs[0], { target: { value: "0.01" } });
+    const inputs = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
     fireEvent.change(inputs[1], { target: { value: "1" } });
     fireEvent.change(inputs[2], { target: { value: "0.015" } });
-    fireEvent.change(inputs[3], { target: { value: "1" } });
-    fireEvent.change(inputs[4], { target: { value: "0.02" } });
-    fireEvent.change(inputs[5], { target: { value: "1" } });
+    fireEvent.change(inputs[4], { target: { value: "0.01" } });
+    fireEvent.change(inputs[5], { target: { value: "0.02" } });
 
-    expect(screen.getByText("1.17 USDC")).toBeInTheDocument();
+    expect(screen.getByLabelText("Liquidity inventory")).toHaveTextContent("1.17");
     expect(screen.queryByText(/No available USDC note/i)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create position" })).toBeEnabled();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Activate bid curve" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create position" }));
     });
 
-    expect(onPreviewFunding).toHaveBeenCalledWith(expect.objectContaining({
+    expect(onOpenPosition).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "OpenPrivateLiquidityPosition",
       pairId: "STRK/USDC",
-      side: "Buy",
-      relayMode: "SelfRelay",
-      curvePoints: [
-        { price: "0.01", baseAmount: "1" },
-        { price: "0.015", baseAmount: "1" },
-        { price: "0.02", baseAmount: "1" },
-      ],
-    }));
-    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
-      pairId: "STRK/USDC",
-      side: "Buy",
-      relayMode: "SelfRelay",
-      curvePoints: [
-        { price: "0.01", baseAmount: "1" },
-        { price: "0.015", baseAmount: "1" },
-        { price: "0.02", baseAmount: "1" },
-      ],
+      baseReserveAtomic: "0",
+      quoteReserveAtomic: "1000000",
     }));
   });
 
-  it("submits the maker curve when pressing Enter in a band input", async () => {
-    const onSubmitCurve = vi.fn().mockResolvedValue(true);
+  it("opens an Ekubo-style private LP position from the position form", async () => {
+    const onOpenPosition = vi.fn().mockResolvedValue(true);
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
-        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
+        balances={[
+          { asset: "ETH", available: "10000000000000000000", locked: "0" },
+          { asset: "USDC", available: "50000000000", locked: "0" },
+        ]}
         pendingDeposits={[]}
-        activePairId="STRK/USDC"
+        activePairId="ETH/USDC"
         setActivePairId={vi.fn()}
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={onSubmitCurve}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onOpenPosition={onOpenPosition}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
-    const inputs = screen.getAllByRole("textbox");
-    fireEvent.change(inputs[0], { target: { value: "0.01" } });
-    fireEvent.change(inputs[1], { target: { value: "1" } });
-    fireEvent.change(inputs[2], { target: { value: "0.015" } });
-    fireEvent.change(inputs[3], { target: { value: "1" } });
-    fireEvent.change(inputs[4], { target: { value: "0.02" } });
-    fireEvent.change(inputs[5], { target: { value: "1" } });
+    const positionFields = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(positionFields[0], { target: { value: "2" } });
+    fireEvent.change(positionFields[1], { target: { value: "5000" } });
+    fireEvent.change(positionFields[2], { target: { value: "2500" } });
+    fireEvent.change(positionFields[3], { target: { value: "30" } });
+    fireEvent.change(positionFields[4], { target: { value: "2300" } });
+    fireEvent.change(positionFields[5], { target: { value: "2700" } });
+
+    expect(screen.getByText("Buy + Sell")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create position" })).toBeEnabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create position" }));
+    });
+
+    expect(onOpenPosition).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "OpenPrivateLiquidityPosition",
+      pairId: "ETH/USDC",
+      baseReserveAtomic: "2000000000000000000",
+      quoteReserveAtomic: "5000000000",
+      priceLowerBoundAtomic: "2300000000",
+      priceUpperBoundAtomic: "2700000000",
+      durationHours: 1,
+      privacyMode: "RotatingPrivate",
+    }));
+    expect(onOpenPosition.mock.calls[0]?.[0].curvePolicy).toMatchObject({
+      kind: "StaticRange",
+      bandCount: 5,
+      spreadBps: 60,
+    });
+  });
+
+  it("projects required turnover and APR from target return inputs", () => {
+    render(
+      <LiquidityPositionsScreen
+        pairs={pairs}
+        records={[]}
+        balances={[
+          { asset: "ETH", available: "50000000000000000000", locked: "0" },
+          { asset: "USDC", available: "100000000000", locked: "0" },
+        ]}
+        pendingDeposits={[]}
+        activePairId="ETH/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    const positionFields = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(positionFields[0], { target: { value: "20" } });
+    fireEvent.change(positionFields[1], { target: { value: "50000" } });
+    fireEvent.change(positionFields[2], { target: { value: "2500" } });
+    fireEvent.change(positionFields[3], { target: { value: "3" } });
+    fireEvent.change(positionFields[4], { target: { value: "2300" } });
+    fireEvent.change(positionFields[5], { target: { value: "2700" } });
+
+    const returnFields = within(screen.getByLabelText("Return model")).getAllByRole("spinbutton");
+    fireEvent.change(returnFields[0], { target: { value: "15" } });
+    fireEvent.change(returnFields[1], { target: { value: "100000" } });
+
+    expect(screen.getByText("Capital").parentElement).toHaveTextContent("100K USDC");
+    expect(screen.getByText("Indicative fill yield").parentElement).toHaveTextContent("16.4%");
+    expect(screen.getByText("Daily volume needed").parentElement).toHaveTextContent("91,324.2 USDC");
+    expect(screen.getByText("Daily turnover needed").parentElement).toHaveTextContent("0.91x");
+    expect(screen.getByText("Effective ref").parentElement).toHaveTextContent("2,500 USDC");
+    expect(screen.getByText("LP edge").parentElement).toHaveTextContent("3.0 bps");
+    expect(screen.getByText("LP rebate").parentElement).toHaveTextContent("1.5 bps");
+    expect(screen.getByText("Net LP return").parentElement).toHaveTextContent("4.5 bps");
+  });
+
+  it("opens the position when pressing Enter in a position field", async () => {
+    const onOpenPosition = vi.fn().mockResolvedValue(true);
+    render(
+      <LiquidityPositionsScreen
+        pairs={pairs}
+        records={[]}
+        balances={[{ asset: "USDC", available: "10000000000", locked: "0" }]}
+        pendingDeposits={[]}
+        activePairId="ETH/USDC"
+        setActivePairId={vi.fn()}
+        walletReady
+        submitting={false}
+        submitError={null}
+        onOpenPosition={onOpenPosition}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
+        onDeposit={vi.fn()}
+        editRecord={null}
+        onEditConsumed={vi.fn()}
+      />,
+    );
+
+    const inputs = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(inputs[1], { target: { value: "5000" } });
+    fireEvent.change(inputs[2], { target: { value: "2500" } });
+    fireEvent.change(inputs[4], { target: { value: "2300" } });
+    fireEvent.change(inputs[5], { target: { value: "2700" } });
 
     await act(async () => {
       fireEvent.keyDown(inputs[5], { key: "Enter" });
     });
 
-    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
-      pairId: "STRK/USDC",
-      side: "Buy",
-      curvePoints: [
-        { price: "0.01", baseAmount: "1" },
-        { price: "0.015", baseAmount: "1" },
-        { price: "0.02", baseAmount: "1" },
-      ],
+    expect(onOpenPosition).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "OpenPrivateLiquidityPosition",
+      pairId: "ETH/USDC",
     }));
   });
 
-  it("shows cancel with the active curve management actions", () => {
-    const onCancelCurve = vi.fn();
+  it("shows cancel with the active position management actions", () => {
+    const onCancelPosition = vi.fn();
     const record = {
       id: "curve-1",
       pair: "ETH/USDC",
@@ -348,7 +429,7 @@ describe("LiquidityCurvesScreen", () => {
     };
 
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[record]}
         balances={[]}
@@ -358,11 +439,10 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
-        onCancelCurve={onCancelCurve}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onCancelPosition={onCancelPosition}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
@@ -371,12 +451,12 @@ describe("LiquidityCurvesScreen", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(onCancelCurve).toHaveBeenCalledWith(record);
+    expect(onCancelPosition).toHaveBeenCalledWith(record);
   });
 
-  it("keeps renewal controls active for maker curves by default", () => {
+  it("keeps advanced controls scoped to the private position", () => {
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
         balances={[]}
@@ -386,89 +466,91 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Activate bid curve" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Activate hidden/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create position" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Activate/i })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Advanced/ }));
     const selects = screen.getAllByRole("combobox") as HTMLSelectElement[];
 
     expect(selects).toHaveLength(2);
-    expect(selects[0]).not.toBeDisabled();
+    expect(selects[0]).toHaveValue("StaticRange");
     expect(selects[1]).not.toBeDisabled();
-    fireEvent.change(selects[0], { target: { value: "720" } });
-    expect(selects[0]).toHaveValue("720");
-    fireEvent.change(selects[1], { target: { value: "SelfHostedRelay" } });
-    expect(selects[1]).toHaveValue("SelfHostedRelay");
-    expect(selects[0]).toHaveValue("720");
-    expect(screen.getByPlaceholderText("https://relay.example.com")).toBeInTheDocument();
-
-    fireEvent.change(selects[1], { target: { value: "LocalBrowser" } });
-    expect(selects[1]).toHaveValue("LocalBrowser");
-    expect(selects[0]).toHaveValue("1");
+    fireEvent.change(selects[1], { target: { value: "480" } });
+    expect(selects[1]).toHaveValue("480");
+    fireEvent.change(selects[0], { target: { value: "InventorySkewed" } });
+    expect(screen.getByText("Target base")).toBeInTheDocument();
+    expect(screen.getByText("Inventory skew")).toBeInTheDocument();
+    expect(screen.getByText("Max skew")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("https://relay.example.com")).not.toBeInTheDocument();
   });
 
-  it("submits self-hosted relay curves as SelfRelay packages with a relay endpoint", async () => {
-    const onSubmitCurve = vi.fn().mockResolvedValue(true);
+  it("submits inventory-skewed LP policy values from advanced controls", async () => {
+    const onOpenPosition = vi.fn().mockResolvedValue(true);
     render(
-      <LiquidityCurvesScreen
+      <LiquidityPositionsScreen
         pairs={pairs}
         records={[]}
-        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
+        balances={[
+          { asset: "ETH", available: "50000000000000000000", locked: "0" },
+          { asset: "USDC", available: "100000000000", locked: "0" },
+        ]}
         pendingDeposits={[]}
-        activePairId="STRK/USDC"
+        activePairId="ETH/USDC"
         setActivePairId={vi.fn()}
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={onSubmitCurve}
-        onCancelCurve={vi.fn()}
-        onEditCurve={vi.fn()}
-        onPauseCurve={vi.fn()}
-        onResumeCurve={vi.fn()}
+        onOpenPosition={onOpenPosition}
+        onCancelPosition={vi.fn()}
+        onEditPosition={vi.fn()}
+        onPausePosition={vi.fn()}
+        onResumePosition={vi.fn()}
         onDeposit={vi.fn()}
         editRecord={null}
         onEditConsumed={vi.fn()}
       />,
     );
 
+    const positionFields = within(screen.getByLabelText("Position configuration")).getAllByRole("spinbutton");
+    fireEvent.change(positionFields[0], { target: { value: "20" } });
+    fireEvent.change(positionFields[1], { target: { value: "50000" } });
+    fireEvent.change(positionFields[2], { target: { value: "2500" } });
+    fireEvent.change(positionFields[3], { target: { value: "3" } });
+    fireEvent.change(positionFields[4], { target: { value: "2300" } });
+    fireEvent.change(positionFields[5], { target: { value: "2700" } });
+
     fireEvent.click(screen.getByRole("button", { name: /Advanced/ }));
     const selects = screen.getAllByRole("combobox") as HTMLSelectElement[];
-    fireEvent.change(selects[1], { target: { value: "SelfHostedRelay" } });
-    fireEvent.change(screen.getByPlaceholderText("https://relay.example.com"), {
-      target: { value: "https://maker-relay.example.com/" },
-    });
-
-    const inputs = screen.getAllByRole("textbox");
-    fireEvent.change(inputs[0], { target: { value: "0.01" } });
-    fireEvent.change(inputs[1], { target: { value: "1" } });
-    fireEvent.change(inputs[2], { target: { value: "0.015" } });
-    fireEvent.change(inputs[3], { target: { value: "1" } });
-    fireEvent.change(inputs[4], { target: { value: "0.02" } });
-    fireEvent.change(inputs[5], { target: { value: "1" } });
+    fireEvent.change(selects[0], { target: { value: "InventorySkewed" } });
+    const advancedFields = screen.getAllByRole("spinbutton").slice(8);
+    fireEvent.change(advancedFields[0], { target: { value: "60" } });
+    fireEvent.change(advancedFields[1], { target: { value: "125" } });
+    fireEvent.change(advancedFields[2], { target: { value: "250" } });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Activate bid curve" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create position" }));
     });
 
-    expect(onSubmitCurve).toHaveBeenCalledWith(expect.objectContaining({
-      relayMode: "SelfRelay",
-      relayOperator: "SelfHostedRelay",
-      selfRelayUrl: "https://maker-relay.example.com",
-    }));
+    expect(onOpenPosition.mock.calls[0]?.[0].curvePolicy).toMatchObject({
+      kind: "InventorySkewed",
+      spreadBps: 6,
+      targetBaseRatioBps: 6000,
+      inventorySkewBps: 125,
+      maxPriceDeviationBps: 250,
+    });
   });
 
-  it("keeps pending relay curves visible while relay registration catches up", () => {
+  it("keeps pending relay positions visible while relay registration catches up", () => {
     const pendingStrategy: PrivateStrategySummary = {
       id: "strategy-pending",
       mode: "Resting",
@@ -484,7 +566,7 @@ describe("LiquidityCurvesScreen", () => {
       next_child_index: 1,
       start_epoch: 10,
       end_epoch: 969,
-      maker_curve_points: [
+      liquidity_curve_points: [
         { price: "10000000000000000", base_amount: "1000000000000000000" },
         { price: "15000000000000000", base_amount: "1000000000000000000" },
         { price: "20000000000000000", base_amount: "1000000000000000000" },
@@ -494,7 +576,7 @@ describe("LiquidityCurvesScreen", () => {
 
     render(
       <LiquidityWorkspace
-        tab="curves"
+        tab="positions"
         pairs={pairs}
         activePairId="STRK/USDC"
         setActivePairId={vi.fn()}
@@ -508,23 +590,22 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
         onCancelOrder={vi.fn()}
         onCancelStrategy={vi.fn()}
         onPauseStrategy={vi.fn()}
         onResumeStrategy={vi.fn()}
         onDeposit={vi.fn()}
         onWithdraw={vi.fn()}
-        onNavigateCurves={vi.fn()}
+        onNavigatePositions={vi.fn()}
       />,
     );
 
-    expect(screen.getByText("Active curves").closest(".liq-panel-hd")).toHaveTextContent("1 running");
+    expect(screen.getByText("Active positions").closest(".liq-panel-hd")).toHaveTextContent("1 running");
     expect(screen.getAllByText("STRK/USDC").length).toBeGreaterThan(1);
     expect(screen.getByText("Pending")).toBeInTheDocument();
   });
 
-  it("rolls maker child orders into the orders table with a child execution timeline", () => {
+  it("rolls position slices into the orders table with a child execution timeline", () => {
     const strategy: PrivateStrategySummary = {
       id: "strategy-rollup",
       mode: "Resting",
@@ -626,23 +707,22 @@ describe("LiquidityCurvesScreen", () => {
         walletReady
         submitting={false}
         submitError={null}
-        onSubmitCurve={vi.fn()}
         onCancelOrder={vi.fn()}
         onCancelStrategy={vi.fn()}
         onPauseStrategy={vi.fn()}
         onResumeStrategy={vi.fn()}
         onDeposit={vi.fn()}
         onWithdraw={vi.fn()}
-        onNavigateCurves={vi.fn()}
+        onNavigatePositions={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("columnheader", { name: "Ref" })).toBeInTheDocument();
-    expect(screen.getByText("CRV-ROLLUP")).toBeInTheDocument();
+    expect(screen.getByText("LP-ROLLUP")).toBeInTheDocument();
     expect(screen.getByText("3/3 · 0 left")).toBeInTheDocument();
     expect(screen.queryByLabelText("Per-epoch fill outcomes")).not.toBeInTheDocument();
 
-    const timeline = screen.getByLabelText("Curve child orders");
+    const timeline = screen.getByLabelText("Position child orders");
     expect(within(timeline).getByText("Child execution")).toBeInTheDocument();
     expect(within(timeline).getByText("3/3 submitted · 0 left")).toBeInTheDocument();
     expect(within(timeline).getByText("Renewal root")).toBeInTheDocument();
@@ -652,11 +732,11 @@ describe("LiquidityCurvesScreen", () => {
     expect(within(timeline).getAllByText("Clearing 0.01")).toHaveLength(2);
     expect(within(timeline).getByText("Filled 0.4")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Collapse STRK\/USDC curve child orders/i }));
-    expect(screen.queryByLabelText("Curve child orders")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Collapse STRK\/USDC position child orders/i }));
+    expect(screen.queryByLabelText("Position child orders")).not.toBeInTheDocument();
   });
 
-  it("renders a maker-focused analytics board from settled child outcomes", () => {
+  it("renders a position-focused analytics board from settled child outcomes", () => {
     const now = Date.now();
     const records = [
       {
@@ -735,7 +815,7 @@ describe("LiquidityCurvesScreen", () => {
     expect(screen.getAllByText("Spread capture").length).toBeGreaterThan(0);
     expect(screen.getByText("By market")).toBeInTheDocument();
     expect(screen.getByText("Quote-notional estimate")).toBeInTheDocument();
-    expect(screen.getByText("Clearing vs maker limit")).toBeInTheDocument();
+    expect(screen.getByText("Clearing vs position limit")).toBeInTheDocument();
     expect(screen.getAllByText("STRK/USDC").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Bid").length).toBeGreaterThan(0);
     expect(screen.getByText("Matched volume")).toBeInTheDocument();
