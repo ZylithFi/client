@@ -57,13 +57,17 @@ describe("browser wallet selection", () => {
       starknetProviders?: unknown;
       starknet?: unknown;
       starknet_ready?: unknown;
+      starknet_argentX?: unknown;
       starknet_xverse?: unknown;
+      argentX?: unknown;
       ready?: unknown;
       xverse?: unknown;
     }).starknet = undefined;
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = undefined;
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = undefined;
+    (window as typeof window & { starknet_argentX?: unknown }).starknet_argentX = undefined;
     (window as typeof window & { starknet_xverse?: unknown }).starknet_xverse = undefined;
+    (window as typeof window & { argentX?: unknown }).argentX = undefined;
     (window as typeof window & { ready?: unknown }).ready = undefined;
     (window as typeof window & { xverse?: unknown }).xverse = undefined;
     delete (window as unknown as { starknet_hidden_ready?: unknown }).starknet_hidden_ready;
@@ -101,7 +105,7 @@ describe("browser wallet selection", () => {
 
   it("does not treat a stored address as an active wallet session", async () => {
     const wallet = providerWithoutAccount("ready");
-    wallet.name = "Ready X";
+    wallet.name = "Ready";
     (window as typeof window & { starknet?: unknown }).starknet = wallet;
     window.sessionStorage.setItem(selectedWalletKey, wallet.id);
     window.sessionStorage.setItem(connectedAddressKey, "0x123");
@@ -122,7 +126,7 @@ describe("browser wallet selection", () => {
     vi.useFakeTimers();
     const wallet = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request: vi.fn(() => new Promise(() => undefined)),
     };
 
@@ -140,7 +144,7 @@ describe("browser wallet selection", () => {
   it("preserves provider request context for injected wallets", async () => {
     const wallet = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       account: { address: "0xabc" },
       request(this: { account?: { address?: string } }, rawRequest: { type?: string }) {
         if (rawRequest.type === "wallet_requestAccounts") {
@@ -162,7 +166,7 @@ describe("browser wallet selection", () => {
   it("does not persist the runtime selected-provider sentinel as a wallet id", async () => {
     const wallet = provider("0xabc");
     wallet.id = "ready";
-    wallet.name = "Ready X";
+    wallet.name = "Ready";
 
     await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBe("0xabc");
     expect(window.sessionStorage.getItem(selectedWalletKey)).toBe("ready");
@@ -181,7 +185,7 @@ describe("browser wallet selection", () => {
     });
     const wallet = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request,
     };
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = wallet;
@@ -196,7 +200,7 @@ describe("browser wallet selection", () => {
     });
   });
 
-  it("discovers Ready X and Xverse from object registries and ranks Ready first", () => {
+  it("discovers Ready and Xverse from object registries and ranks Ready first", () => {
     const xverse = {
       id: "xverse-extension",
       name: "Xverse",
@@ -204,7 +208,7 @@ describe("browser wallet selection", () => {
     };
     const ready = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request: vi.fn(async () => null),
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
@@ -216,6 +220,22 @@ describe("browser wallet selection", () => {
 
     expect(wallets.map(wallet => wallet.name)).toEqual(["Ready X", "Xverse"]);
     expect(wallets.map(wallet => wallet.id)).toEqual(["ready", "xverse"]);
+  });
+
+  it("discovers Ready under its current argentX provider identity", () => {
+    const ready = {
+      id: "argentX",
+      name: "Argent X",
+      request: vi.fn(async () => null),
+    };
+    Object.defineProperty(window, "starknet_argentX", {
+      configurable: true,
+      value: ready,
+    });
+
+    expect(discoverStarknetWallets()).toEqual([
+      expect.objectContaining({ id: "ready", name: "Ready X", provider: ready }),
+    ]);
   });
 
   it("uses the explicit Ready injection key even when provider metadata is generic", () => {
@@ -248,7 +268,7 @@ describe("browser wallet selection", () => {
     expect(wallets[0]?.id).toBe("xverse");
   });
 
-  it("discovers Ready X from nested wallet registries returned by async discovery", async () => {
+  it("discovers Ready from nested wallet registries returned by async discovery", async () => {
     const readyProvider = {
       id: "wallet-provider",
       name: "Starknet wallet",
@@ -256,7 +276,7 @@ describe("browser wallet selection", () => {
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = [{
       id: "ready-wallet",
-      name: "Ready X",
+      name: "Ready",
       wallet: { provider: readyProvider },
     }];
 
@@ -292,7 +312,7 @@ describe("browser wallet selection", () => {
     };
     const ready = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request: vi.fn(async () => null),
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
@@ -313,7 +333,7 @@ describe("browser wallet selection", () => {
     };
     const ready = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request: vi.fn(async () => null),
     };
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
@@ -329,7 +349,7 @@ describe("browser wallet selection", () => {
   it("does not discover enable-only wallet injections", () => {
     const enableOnlyReady = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       enable: vi.fn(async () => ["0xabc"]),
     };
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = enableOnlyReady;

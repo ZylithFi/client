@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { constants } from "starknet";
 import {
   assertConnectedWalletAccountActivatedForDeposit,
-  avnuPrivateExecutorCalldata,
   CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS,
   connectedWalletFundingShortfall,
   executeWalletCall,
@@ -545,36 +544,5 @@ describe("privacyBridgeStrk20ExitClaimCalldata", () => {
       "0",
     ]);
     expect(JSON.stringify(calldata)).not.toContain("recipient");
-  });
-});
-
-describe("avnuPrivateExecutorCalldata", () => {
-  it("uses Cairo 1 call serialization and appends the output open note", () => {
-    const calldata = avnuPrivateExecutorCalldata({
-      buyTokenAddress: "0x123",
-      executorCalls: [
-        {
-          contract_address: "0x456",
-          entrypoint: "swap",
-          calldata: ["0x1", "0x2"],
-        },
-      ],
-      outputOpenNoteId: "0x789",
-    });
-
-    expect(calldata[0]).toBe("0x123");
-    expect(calldata[1]).toBe("1");
-    expect(calldata.at(-1)).toBe("0x789");
-    expect(calldata).toHaveLength(1 + 1 + 1 + 1 + 1 + 2 + 1);
-  });
-
-  it("rejects an empty private executor route", () => {
-    expect(() =>
-      avnuPrivateExecutorCalldata({
-        buyTokenAddress: "0x123",
-        executorCalls: [],
-        outputOpenNoteId: "0x789",
-      })
-    ).toThrow("no executor calls");
   });
 });

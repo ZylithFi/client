@@ -1,5 +1,8 @@
 [workspace]
-members = ["core", "wallet_wasm"]
+members = [
+    "core",
+    "wallet_wasm",
+]
 resolver = "2"
 
 [workspace.package]

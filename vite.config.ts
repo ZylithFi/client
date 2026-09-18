@@ -42,10 +42,21 @@ export default defineConfig({
   build: {
     rolldownOptions: {
       output: {
-        manualChunks(id) {
-          if (id.includes("/@starkware-libs/starknet-privacy-sdk/")) {
-            return "starknet-privacy";
-          }
+        codeSplitting: {
+          groups: [
+            {
+              name: "trading-chart",
+              test: /node_modules\/(?:lightweight-charts|fancy-canvas)\//,
+            },
+            {
+              name: "starknet-privacy",
+              test: /(?:@starkware-libs\/starknet-privacy-sdk|starknet-privacy-sdk-[^/]+\/sdk)/,
+            },
+            {
+              name: "starknet-sdk",
+              test: /node_modules\/starknet\//,
+            },
+          ],
         },
       },
     },

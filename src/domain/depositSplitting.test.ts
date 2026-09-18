@@ -4,7 +4,7 @@ import { denominationTableForAsset, splitDepositAmount } from "./depositSplittin
 const STRK = 10n ** 18n;
 const ETH = 10n ** 18n;
 const USDC = 10n ** 6n;
-const BTC = 10n ** 8n;
+const STRKBTC = 10n ** 18n;
 
 describe("deposit splitting", () => {
   it("uses fixed private-note denominations for STRK", () => {
@@ -16,7 +16,7 @@ describe("deposit splitting", () => {
   it("covers large asset denomination bands", () => {
     expect(denominationTableForAsset("USDC", 6)).toContain(1_000_000n * USDC);
     expect(denominationTableForAsset("ETH", 18)).toContain(500n * ETH);
-    expect(denominationTableForAsset("strkBTC", 8)).toContain(10n * BTC);
+    expect(denominationTableForAsset("strkBTC", 18)).toContain(10n * STRKBTC);
   });
 
   it("splits small STRK deposits into usable inventory notes", () => {
@@ -79,17 +79,17 @@ describe("deposit splitting", () => {
   });
 
   it("uses BTC-scale denominations for strkBTC", () => {
-    const chunks = splitDepositAmount(BTC / 10n, "strkBTC", 8);
+    const chunks = splitDepositAmount(STRKBTC / 10n, "strkBTC", 18);
     expect(chunks).toEqual([
-      BTC / 20n,
-      BTC / 100n,
-      BTC / 100n,
-      BTC / 100n,
-      BTC / 100n,
-      BTC / 200n,
-      BTC / 200n,
+      STRKBTC / 20n,
+      STRKBTC / 100n,
+      STRKBTC / 100n,
+      STRKBTC / 100n,
+      STRKBTC / 100n,
+      STRKBTC / 200n,
+      STRKBTC / 200n,
     ]);
-    expect(chunks.reduce((sum, chunk) => sum + chunk, 0n)).toBe(BTC / 10n);
+    expect(chunks.reduce((sum, chunk) => sum + chunk, 0n)).toBe(STRKBTC / 10n);
   });
 
   it("covers institutional-sized deposits while preserving exact value", () => {

@@ -10,6 +10,8 @@ export type FundingDeploymentConfig = {
   contracts?: {
     auction_verifier?: string;
     shielded_asset_adapter?: string;
+    external_match_executor?: string;
+    ekubo_external_match_router?: string;
   };
   funding?: {
     primary?: "starknet_privacy" | string;

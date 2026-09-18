@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${ZYLITH_WALLET_WASM_OUT_DIR:-${ROOT_DIR}/client/public/wallet}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT_DIR="${ZYLITH_WALLET_WASM_OUT_DIR:-${ROOT_DIR}/public/wallet}"
 PROFILE="${ZYLITH_WALLET_WASM_PROFILE:-release}"
 TARGET_DIR="${ROOT_DIR}/target/wasm32-unknown-unknown/${PROFILE}"
 WASM_FILE="${TARGET_DIR}/zylith_wallet_wasm.wasm"

@@ -8,6 +8,7 @@ import {
 import {
   decryptLocalStore,
   encryptLocalStore,
+  encryptSeedWithWalletSignature,
   type EncryptedLocalStore,
 } from "./domain/walletLocalCrypto";
 import {
@@ -25,7 +26,6 @@ import {
   hostedRelayLeadEpochs,
   mergeLocalNoteRecord,
   noteConsolidationEnabledForDeployment,
-  reconcileExternalCompletionTransaction,
   renewalPackageMaxSubmissionDelayMs,
   strk20WithdrawalEnabledForDeployment,
   transactionCalldataContainsDepositActivation,
@@ -225,6 +225,36 @@ describe("wallet chain validation", () => {
       params: expect.anything(),
     });
   });
+
+  it("reads chain ID from nested wallet response objects", async () => {
+    const request = vi.fn(
+      async (payload: { type?: string; method?: string }) => {
+        if (payload.type === "wallet_requestAccounts")
+          return [{ address: "0xabc" }];
+        if (payload.type === "wallet_requestChainId")
+          return { result: { chain_id: "SN_SEPOLIA" } };
+        if (
+          payload.type === "wallet_switchStarknetChain" ||
+          payload.method === "wallet_switchStarknetChain"
+        )
+          throw new Error("unsupported method");
+        if (payload.type === "wallet_signTypedData") return ["0x1", "0x2"];
+        return null;
+      }
+    );
+    await connectStarknetProvider(
+      {
+        account: { address: "0xabc" },
+        request,
+      } as never,
+      "ready"
+    );
+    const runtime = createZylithWalletRuntime(mockWalletCore());
+
+    await expect(
+      runtime.createWalletWithWalletSignature("0xabc")
+    ).resolves.toBe(true);
+  });
 });
 
 describe("wallet-signature sessions", () => {
@@ -284,7 +314,7 @@ describe("wallet-signature sessions", () => {
     expect(signMessage).toHaveBeenCalled();
   });
 
-  it("removes deployment-stale wallet-signature vaults so they can be recreated", async () => {
+  it("retains an invalid existing vault instead of replacing its private account", async () => {
     const signMessage = vi.fn(async () => ["0x1", "0x2"]);
     await selectRuntimeProvider({
       account: {
@@ -300,7 +330,7 @@ describe("wallet-signature sessions", () => {
         algorithm: "AES-GCM",
         wallet_address: "0xabc",
         chain_id: "0x534e5f5345504f4c4941",
-        deployment_id: "old-deployment",
+        deployment_id: "0x123",
         origin: window.location.origin,
         message_version: 2,
         nonce: "AAAAAAAAAAAAAAAA",
@@ -313,10 +343,63 @@ describe("wallet-signature sessions", () => {
     await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(
       false
     );
-    expect(localStorage.getItem("zylith.wallet.vault.v4:0xabc")).toBeNull();
+    expect(localStorage.getItem("zylith.wallet.vault.v4:0xabc")).toBeTruthy();
+    const legacyTypedData = (signMessage.mock.calls[0] as unknown[])[0] as {
+      types?: Record<string, unknown>;
+      domain?: { revision?: string };
+      message?: { version?: string };
+    };
+    expect(legacyTypedData.types).toHaveProperty("StarkNetDomain");
+    expect(legacyTypedData.domain?.revision).toBeUndefined();
+    expect(legacyTypedData.message?.version).toBe("2");
     await expect(
       runtime.createWalletWithWalletSignature("0xabc")
-    ).resolves.toBe(true);
+    ).rejects.toThrow("Wallet session already exists");
+  });
+
+  it("unlocks an existing legacy vault without replacing its private account", async () => {
+    const signature = ["0x1", "0x2"];
+    const signMessage = vi.fn(async () => signature);
+    await selectRuntimeProvider({
+      account: {
+        address: "0xabc",
+        signMessage,
+      },
+    });
+    const chainId = testDeploymentManifest().chain_id;
+    const deploymentId = `0x${"ab".repeat(32)}`;
+    const vault = await encryptSeedWithWalletSignature("22".repeat(32), {
+      signature,
+      walletAddress: "0xabc",
+      chainId,
+      deploymentId,
+      origin: window.location.origin,
+      messageVersion: 2,
+    });
+    const serializedVault = JSON.stringify(vault);
+    localStorage.setItem(
+      "zylith.wallet.vault.v4:0xabc",
+      serializedVault
+    );
+    const runtime = createZylithWalletRuntime(mockWalletCore());
+
+    await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(
+      true
+    );
+
+    expect(runtime.isReady()).toBe(true);
+    expect(localStorage.getItem("zylith.wallet.vault.v4:0xabc")).toBe(
+      serializedVault
+    );
+    expect(signMessage).toHaveBeenCalledTimes(1);
+    const typedData = (signMessage.mock.calls[0] as unknown[])[0] as {
+      types?: Record<string, unknown>;
+      domain?: { revision?: string };
+      message?: { version?: string };
+    };
+    expect(typedData.types).toHaveProperty("StarkNetDomain");
+    expect(typedData.domain?.revision).toBeUndefined();
+    expect(typedData.message?.version).toBe("2");
   });
 
   it("switches wallet networks before wallet-signature private session setup", async () => {
@@ -415,7 +498,8 @@ describe("wallet-signature sessions", () => {
     expect(signMessage).toHaveBeenCalledTimes(1);
     const typedData = (signMessage.mock.calls[0] as unknown[])[0] as {
       primaryType?: string;
-      domain?: { chainId?: string };
+      types?: Record<string, Array<{ name: string; type: string }>>;
+      domain?: { chainId?: string; revision?: string };
       message?: {
         action?: string;
         wallet?: string;
@@ -427,10 +511,17 @@ describe("wallet-signature sessions", () => {
     expect(typedData.primaryType).toBe("ZylithSession");
     expect(typedData.domain).toMatchObject({
       chainId: "0x534e5f5345504f4c4941",
+      revision: "1",
     });
+    expect(typedData.types?.StarknetDomain).toEqual([
+      { name: "name", type: "shortstring" },
+      { name: "version", type: "shortstring" },
+      { name: "chainId", type: "shortstring" },
+      { name: "revision", type: "shortstring" },
+    ]);
     expect(typedData.message).toMatchObject({
       wallet: "0xabc",
-      version: "2",
+      version: "3",
     });
     expect(typedData.message?.action).not.toBe("");
     expect(typedData.message?.origin).toMatch(/^0x[0-9a-f]+$/);
@@ -717,6 +808,31 @@ describe("wallet-signature sessions", () => {
     });
   });
 
+  it("allows wallet-signature authorization to retry after a wallet timeout", async () => {
+    let signAttempt = 0;
+    const request = vi.fn(async (payload: { type?: string }) => {
+      if (payload.type !== "wallet_signTypedData") return null;
+      signAttempt += 1;
+      if (signAttempt === 1) throw new Error("Timeout");
+      return ["0x1", "0x2"];
+    });
+    await selectRuntimeProvider({
+      account: { address: "0xabc" },
+      request,
+    });
+    request.mockClear();
+    const runtime = createZylithWalletRuntime(mockWalletCore());
+
+    await expect(
+      runtime.createWalletWithWalletSignature("0xabc")
+    ).rejects.toThrow("Wallet signature request timed out");
+    await expect(
+      runtime.createWalletWithWalletSignature("0xabc")
+    ).resolves.toBe(true);
+
+    expect(signAttempt).toBe(2);
+  });
+
   it("prefers wallet_signTypedData over injected account signMessage", async () => {
     const request = vi.fn(async (payload: { type?: string }) =>
       payload.type === "wallet_signTypedData" ? ["0x1", "0x2"] : null
@@ -834,19 +950,20 @@ describe("STRK20 withdrawal deployment availability", () => {
 
 describe("batch submission safety", () => {
   it("uses a proportional safety buffer with a conservative default", () => {
-    expect(batchSubmissionSafetyBufferMs()).toBe(15_000);
+    expect(batchSubmissionSafetyBufferMs()).toBe(2_000);
+    expect(batchSubmissionSafetyBufferMs(10_000)).toBe(2_000);
     expect(batchSubmissionSafetyBufferMs(90_000)).toBe(15_000);
     expect(batchSubmissionSafetyBufferMs(60_000)).toBe(12_000);
     expect(batchSubmissionSafetyBufferMs(45_000)).toBe(9_000);
     expect(batchSubmissionSafetyBufferMs(30_000)).toBe(6_000);
-    expect(batchSubmissionSafetyBufferMs(20_000)).toBe(5_000);
+    expect(batchSubmissionSafetyBufferMs(20_000)).toBe(4_000);
   });
 
   it("requires more than the active safety buffer before close", () => {
     const now = 1_000_000;
 
-    expect(hasBatchSubmissionSafetyWindow(now + 15_000, now)).toBe(false);
-    expect(hasBatchSubmissionSafetyWindow(now + 15_001, now)).toBe(true);
+    expect(hasBatchSubmissionSafetyWindow(now + 2_000, now)).toBe(false);
+    expect(hasBatchSubmissionSafetyWindow(now + 2_001, now)).toBe(true);
     expect(hasBatchSubmissionSafetyWindow(now + 6_000, now, 30_000)).toBe(
       false
     );
@@ -855,12 +972,12 @@ describe("batch submission safety", () => {
 
   it("allows self-relay to use the current epoch only inside the safety window", () => {
     const now = 1_000_000;
-    const batch = { epoch_id: 42, close_time_unix_ms: now + 15_001 };
+    const batch = { epoch_id: 42, close_time_unix_ms: now + 2_001 };
 
     expect(firstRenewalSlotEpoch(batch, "SelfRelay", now)).toBe(42);
     expect(
       firstRenewalSlotEpoch(
-        { ...batch, close_time_unix_ms: now + 15_000 },
+        { ...batch, close_time_unix_ms: now + 2_000 },
         "SelfRelay",
         now
       )
@@ -886,7 +1003,7 @@ describe("batch submission safety", () => {
   it("starts hosted Zylith Relay packages far enough ahead for relay registration", () => {
     const now = 1_000_000;
 
-    expect(hostedRelayLeadEpochs()).toBe(6);
+    expect(hostedRelayLeadEpochs()).toBe(12);
     expect(
       firstRenewalSlotEpoch(
         { epoch_id: 42, close_time_unix_ms: now + 600_000 },
@@ -1114,63 +1231,6 @@ describe("STRK20 exit claim reconciliation", () => {
     expect(note.pending_withdrawal_tx).toBeUndefined();
     expect(note.pending_strk20_open_note_tx).toBeUndefined();
     expect(note.strk20_open_note_id).toBe("0xopen");
-  });
-});
-
-describe("external completion transaction reconciliation", () => {
-  const external = {
-    status: "converting" as const,
-    residualNoteCommitment: "0xresidual",
-    residualAssetId: "USDC",
-    residualAmount: "1000000",
-    conversionTransactionHash: "0xconvert",
-    inputOpenNoteId: "0xopen",
-  };
-
-  it("makes a confirmed residual conversion ready after restart", () => {
-    expect(
-      reconcileExternalCompletionTransaction(external, {
-        failed: false,
-        notFound: false,
-        confirmed: true,
-      })
-    ).toMatchObject({
-      status: "ready",
-      inputOpenNoteId: "0xopen",
-    });
-  });
-
-  it("returns a confirmed private consolidation to the available stage", () => {
-    const consolidating = {
-      ...external,
-      status: "consolidating" as const,
-      sourceNoteCommitments: ["0xconsolidated"],
-      residualNoteCommitment: "0xconsolidated",
-      consolidationTransactionHash: "0xconsolidation",
-      conversionTransactionHash: undefined,
-    };
-
-    expect(
-      reconcileExternalCompletionTransaction(consolidating, {
-        failed: false,
-        notFound: false,
-        confirmed: true,
-      })
-    ).toMatchObject({
-      status: "available",
-      residualNoteCommitment: "0xconsolidated",
-      sourceNoteCommitments: ["0xconsolidated"],
-    });
-  });
-
-  it("does not treat an unconfirmed conversion as ready", () => {
-    expect(
-      reconcileExternalCompletionTransaction(external, {
-        failed: false,
-        notFound: false,
-        confirmed: false,
-      })
-    ).toBe(external);
   });
 });
 

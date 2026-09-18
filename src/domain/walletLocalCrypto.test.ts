@@ -18,7 +18,7 @@ const signatureContext: WalletSignatureVaultContext = {
   chainId: "0x534e5f5345504f4c4941",
   deploymentId: "0x123",
   origin: "https://app.zylith.fi",
-  messageVersion: 2,
+  messageVersion: 3,
 };
 
 describe("walletLocalCrypto", () => {
@@ -101,12 +101,45 @@ describe("walletLocalCrypto", () => {
         chain_id: "0x534e5f5345504f4c4941",
         deployment_id: "0x123",
         origin: "https://app.zylith.fi",
-        message_version: 2,
+        message_version: 3,
         nonce: "AA==",
         ciphertext: "AA==",
         unsupported_passphrase_hint: "removed",
       } as never),
     ).toBe(false);
+  });
+
+  it("recognizes legacy authorization vaults for account-preserving unlock", () => {
+    expect(
+      isWalletSignatureVaultRecord({
+        version: 4,
+        kdf: "wallet-signature-sha256-v2",
+        algorithm: "AES-GCM",
+        wallet_address: "0xabc",
+        chain_id: "0x534e5f5345504f4c4941",
+        deployment_id: "0x123",
+        origin: "https://app.zylith.fi",
+        message_version: 2,
+        nonce: "AA==",
+        ciphertext: "AA==",
+      })
+    ).toBe(true);
+  });
+
+  it("round-trips legacy authorization vaults without changing the private seed", async () => {
+    const legacyContext: WalletSignatureVaultContext = {
+      ...signatureContext,
+      messageVersion: 2,
+    };
+    const vault = await encryptSeedWithWalletSignature(seedHex, legacyContext);
+
+    expect(vault.message_version).toBe(2);
+    await expect(
+      decryptSeedWithWalletSignature(vault, legacyContext),
+    ).resolves.toBe(seedHex);
+    await expect(
+      decryptSeedWithWalletSignature(vault, signatureContext),
+    ).rejects.toThrow("Connected Starknet wallet does not match this wallet session");
   });
 
   it("rejects incomplete wallet-signature vault contexts", async () => {

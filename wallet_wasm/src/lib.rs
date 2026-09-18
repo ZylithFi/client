@@ -1491,9 +1491,10 @@ mod tests {
         OutputCiphertextBundle, OutputNoteMerkleProof, OutputNoteRecord, PairId,
         PrivateExecutionKeyPublicConfig, PrivateExecutionKeyRegistry, RecoverySeed, RelayMode,
         SettlementOutputWithdrawalWitness, SpendAuthorization, TimeInForce, deposit_root_from_note,
-        derive_user_keys, encrypt_note_for_owner, note_recognition_public_key_from_raw_key_hex,
+        derive_user_keys, encrypt_note_for_owner, note_accumulator_root_after_append,
+        note_accumulator_root_after_deposits, note_recognition_public_key_from_raw_key_hex,
         nullifier_from_note_secret, nullifier_sparse_update_witnesses_for_consumed_inputs,
-        settlement_note_root_after_deposit_roots, spend_authority_from_raw_key_hex,
+        output_note_merkle_root, spend_authority_from_raw_key_hex,
         withdraw_authority_from_raw_key_hex,
     };
 
@@ -2141,7 +2142,12 @@ mod tests {
             .map(|note| deposit_root_from_note(note).expect("deposit root"))
             .collect::<Vec<_>>();
         let prior_note_root =
-            settlement_note_root_after_deposit_roots(&deposit_roots).expect("prior note root");
+            note_accumulator_root_after_deposits(&deposit_roots).expect("prior note root");
+        let output_note_root =
+            output_note_merkle_root(&draft.output_notes, &draft.output_ciphertext_bundle_ref)
+                .expect("output note root");
+        let new_note_root = note_accumulator_root_after_append(&deposit_roots, &output_note_root)
+            .expect("new note root");
         let expected_draft = draft.clone();
         let witness = NoteConsolidationWitness {
             consolidation_id: draft.consolidation_id.clone(),
@@ -2161,6 +2167,7 @@ mod tests {
             output_recovery_records: draft.output_recovery_records,
             output_recovery_dummy_commitments: draft.output_recovery_dummy_commitments,
             output_ciphertext_bundle_ref: draft.output_ciphertext_bundle_ref,
+            new_note_root,
             new_nullifier_root,
         };
 

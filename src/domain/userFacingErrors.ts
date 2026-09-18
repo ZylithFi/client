@@ -385,7 +385,7 @@ export function userFacingErrorMessage(
   );
   if (noUnlockedFunding) {
     const asset = noUnlockedFunding[1];
-    return `No available ${asset} balance can fund this order. Cancel or edit existing positions if ${asset} is reserved, or deposit more ${asset}.`;
+    return `No available ${asset} balance can fund this order. Cancel or edit existing orders if ${asset} is reserved, or deposit more ${asset}.`;
   }
   if (/selected (shielded )?note is not withdrawable/i.test(message)) {
     return "Selected note is not withdrawable.";

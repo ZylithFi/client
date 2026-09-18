@@ -2,9 +2,9 @@ type RelayMode = "SelfRelay" | "ZylithRelay";
 
 const PRIVATE_SUBMISSION_MAX_DELAY_MS = 0;
 const HOSTED_RELAY_SUBMISSION_MAX_DELAY_MS = 0;
-const DEFAULT_BATCH_WINDOW_MS = 20_000;
+const DEFAULT_BATCH_WINDOW_MS = 10_000;
 const HOSTED_RELAY_MIN_LEAD_MS = 120_000;
-const MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 5_000;
+const MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 1_000;
 const MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS = 15_000;
 const BATCH_SUBMISSION_SAFETY_BUFFER_BPS = 2_000;
 
@@ -81,14 +81,15 @@ export function privateSubmissionDelayMs(
 
 export function batchSubmissionSafetyBufferMs(batchWindowMs?: number) {
   const parsedWindow = Number(batchWindowMs);
-  if (!Number.isFinite(parsedWindow) || parsedWindow <= 0) {
-    return MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS;
-  }
+  const windowMs =
+    Number.isFinite(parsedWindow) && parsedWindow > 0
+      ? parsedWindow
+      : DEFAULT_BATCH_WINDOW_MS;
   return Math.max(
     MIN_BATCH_SUBMISSION_SAFETY_BUFFER_MS,
     Math.min(
       MAX_BATCH_SUBMISSION_SAFETY_BUFFER_MS,
-      Math.floor((parsedWindow * BATCH_SUBMISSION_SAFETY_BUFFER_BPS) / 10_000),
+      Math.floor((windowMs * BATCH_SUBMISSION_SAFETY_BUFFER_BPS) / 10_000),
     ),
   );
 }

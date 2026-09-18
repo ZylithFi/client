@@ -74,6 +74,8 @@ const KNOWN_STARKNET_PROVIDER_KEYS = [
   "starknet_ready",
   "readyWallet",
   "ready",
+  "starknet_argentX",
+  "argentX",
   "starknet_xverse",
   "xverseStarknet",
   "xverse",
@@ -97,7 +99,8 @@ function providerSearchText(key: string, provider: StarknetProviderWithMeta): st
 
 function walletNameFor(key: string, provider: StarknetProviderWithMeta): string {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready")) return "Ready X";
+  if (normalized.includes("ready") || normalized.includes("argent"))
+    return "Ready X";
   if (normalized.includes("xverse")) return "Xverse";
   if (provider.name?.trim()) return provider.name.trim();
   if (key === "starknet") return "Starknet wallet";
@@ -106,14 +109,15 @@ function walletNameFor(key: string, provider: StarknetProviderWithMeta): string 
 
 function walletIdFor(key: string, provider: StarknetProviderWithMeta): string {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready")) return "ready";
+  if (normalized.includes("ready") || normalized.includes("argent"))
+    return "ready";
   if (normalized.includes("xverse")) return "xverse";
   return provider.id?.trim() || key;
 }
 
 function walletPriorityFor(key: string, provider: StarknetProviderWithMeta): number {
   const normalized = providerSearchText(key, provider);
-  if (normalized.includes("ready")) return 0;
+  if (normalized.includes("ready") || normalized.includes("argent")) return 0;
   if (normalized.includes("xverse")) return 1;
   if (key === "starknet") return 4;
   return 2;
@@ -121,7 +125,11 @@ function walletPriorityFor(key: string, provider: StarknetProviderWithMeta): num
 
 function isSupportedWalletCandidate(key: string, provider: StarknetProviderWithMeta): boolean {
   const normalized = providerSearchText(key, provider);
-  return normalized.includes("ready") || normalized.includes("xverse");
+  return (
+    normalized.includes("ready") ||
+    normalized.includes("argent") ||
+    normalized.includes("xverse")
+  );
 }
 
 function collectWindowWalletCandidates(): WalletCandidate[] {
@@ -179,6 +187,7 @@ function collectWindowWalletCandidates(): WalletCandidate[] {
       (
         key.startsWith("starknet") ||
         normalizedKey.includes("ready") ||
+        normalizedKey.includes("argent") ||
         normalizedKey.includes("xverse")
       ) &&
       !candidates.some(candidate => candidate.key === key)
@@ -334,7 +343,7 @@ export async function restoreConnectedStarknetWallet(): Promise<string | null> {
           return address;
         }
       } catch {
-        // Silent reconnect is best-effort. We must not open wallet UI on page load.
+        // silent reconnect is best-effort. we must not open wallet ui on page load.
       }
     }
   }
@@ -430,7 +439,7 @@ async function disconnectProviderSession(
       await result;
     }
   } catch {
-    // Wallet disconnect is best-effort. Zylith still clears its selected provider state locally.
+    // wallet disconnect is best-effort. zylith still clears its selected provider state locally.
   }
   if (provider.request) {
     const attempts: StarknetProviderRequestInput[] = [

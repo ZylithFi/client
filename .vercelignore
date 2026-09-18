@@ -1,6 +1,9 @@
-node_modules
-.vercel/output
-dist
-test-artifacts
-coverage
+**/node_modules
+**/.vercel
+**/dist
+**/target
+**/tmp
+**/test-artifacts
+**/coverage
 *.log
+*.tgz

@@ -72,6 +72,7 @@ import {
   stableJsonStringify,
   walletSignatureVaultId,
   walletSignatureVaultAuthToken,
+  type WalletSignatureMessageVersion,
   type EncryptedLocalStore,
   type VaultRecord,
   type WalletSignatureVaultRecord,
@@ -107,23 +108,12 @@ import {
   type LocalOrder,
   type LocalOrderStatus,
 } from "./domain/orderLifecycle";
-import {
-  submitPrivacyBridgeDeposit,
-  submitPrivacyOpenNoteWithdrawal,
-  submitPrivacyAvnuSwap,
-  type AvnuPrivateExecutorCall,
-  type SubmitPrivacyBridgeDepositResult,
-} from "./integrations/starknetPrivacyFunding";
-import {
-  deserializeStarknetPrivacyRegistry,
-  serializeStarknetPrivacyRegistry,
-  type SerializedStarknetPrivacyRegistry,
-} from "./integrations/starknetPrivacyRegistry";
+import type { SubmitPrivacyBridgeDepositResult } from "./integrations/starknetPrivacyFunding";
+import type { SerializedStarknetPrivacyRegistry } from "./integrations/starknetPrivacyRegistry";
 import type {
   Note,
   PrivateRegistry,
 } from "@starkware-libs/starknet-privacy-sdk";
-import { hash as starknetHash } from "starknet";
 
 type Side = "Buy" | "Sell";
 type ExecutionPreference = "PrivateOnly" | "PrivateThenExternal";
@@ -179,7 +169,7 @@ type PrivateOrderDraft = {
   limitPrice: string;
   minFill: string;
   fillOrKill: boolean;
-  batchId: string;
+  batchId?: string;
   batchWindowMs?: number;
   childAmount?: string;
   maxChildren?: number;
@@ -187,7 +177,7 @@ type PrivateOrderDraft = {
   randomizedSlicing?: boolean;
   randomizedSlicingBps?: number;
   priceBaseScale?: string;
-  executionPreference?: ExecutionPreference;
+  executionPreference: ExecutionPreference;
   retryUnfilled?: boolean;
   offlineDelegation?: boolean;
   relayMode?: "SelfRelay" | "ZylithRelay";
@@ -311,13 +301,6 @@ export type WalletRuntime = {
     staged_transaction_hash?: string;
     open_note_id?: string;
   }>;
-  submitExternalCompletion: (request: {
-    orderCommitment: string;
-    slippageBps?: number;
-  }) => Promise<{
-    transaction_hash: string;
-    output_open_note_id: string;
-  }>;
 };
 
 type WalletWasmModule = {
@@ -427,42 +410,6 @@ export type TransactionReceiptStatus = {
   confirmed?: boolean;
   reason?: string;
 };
-
-export function reconcileExternalCompletionTransaction(
-  external: NonNullable<LocalOrder["externalCompletion"]>,
-  receipt: TransactionReceiptStatus | null | undefined
-): NonNullable<LocalOrder["externalCompletion"]> {
-  if (receipt?.failed) {
-    return {
-      ...external,
-      status: "failed",
-      lastError: receipt.reason || "External completion transaction reverted.",
-    };
-  }
-  if (!receipt?.confirmed) return external;
-  if (external.status === "consolidating") {
-    return {
-      ...external,
-      status: "available",
-      lastError: undefined,
-    };
-  }
-  if (external.status === "converting") {
-    return {
-      ...external,
-      status: "ready",
-      lastError: undefined,
-    };
-  }
-  if (external.status === "submitting") {
-    return {
-      ...external,
-      status: "completed",
-      lastError: undefined,
-    };
-  }
-  return external;
-}
 
 export type PendingConsolidationRecord = {
   consolidation_id: string;
@@ -692,21 +639,6 @@ type PrivateSettlementReport = {
   order_execution_reports: PrivateOrderExecutionReport[];
 };
 
-type AvnuExternalCompletionPlan = {
-  quote: {
-    input_amount: string;
-    min_output_amount: string;
-    route_commitment: string;
-    quote_expiry_unix_ms: number;
-    executor_address: string;
-  };
-  report: {
-    quote_commitment: string;
-  };
-  chain_id: string;
-  executor_calls: AvnuPrivateExecutorCall[];
-};
-
 function findSdkNote(
   registry: PrivateRegistry | undefined,
   tokenAddress: string,
@@ -821,6 +753,8 @@ type DeploymentConfig = {
   contracts?: {
     auction_verifier?: string;
     shielded_asset_adapter?: string;
+    external_match_executor?: string;
+    ekubo_external_match_router?: string;
   };
   token_addresses?: Record<string, string>;
   funding?: {
@@ -854,6 +788,7 @@ type DeploymentConfig = {
         base_asset_id?: string;
         quote_asset_id?: string;
         price_base_scale?: string;
+        external_match_enabled: boolean;
         enabled?: boolean;
       }
     >;
@@ -886,8 +821,8 @@ type WalletRequestInvokeCall = {
 type StarknetInjectedProvider = {
   id?: string;
   name?: string;
-  chainId?: string;
-  chain_id?: string;
+  chainId?: unknown;
+  chain_id?: unknown;
   getChainId?: () => Promise<string> | string;
   enable?: (options?: unknown) => Promise<unknown>;
   request?: (request: {
@@ -909,6 +844,8 @@ declare global {
   interface Window {
     starknet?: StarknetInjectedProvider;
     starknet_ready?: StarknetInjectedProvider;
+    starknet_argentX?: StarknetInjectedProvider;
+    argentX?: StarknetInjectedProvider;
     starknet_xverse?: StarknetInjectedProvider;
     xverse?: StarknetInjectedProvider;
   }
@@ -1168,7 +1105,6 @@ export function createZylithWalletRuntime(
   let depositConfirmationTimer: number | null = null;
   let strategyWorkerInFlight = false;
   let depositConfirmationWorkerInFlight = false;
-  const externalCompletionInFlight = new Set<string>();
   let depositSubmissionInFlightRequestId: string | null = null;
   let recoverySyncInFlight = false;
   let postUnlockSyncInFlight = false;
@@ -1361,9 +1297,9 @@ export function createZylithWalletRuntime(
     return {
       ...strategy,
       execution_preference:
-        strategy.execution_preference === "PrivateOnly"
-          ? "PrivateOnly"
-          : "PrivateThenExternal",
+        strategy.execution_preference === "PrivateThenExternal"
+          ? "PrivateThenExternal"
+          : "PrivateOnly",
       retry_unfilled: strategy.retry_unfilled === true,
       submitted_children: strategy.submitted_children.map((child) => ({
         ...child,
@@ -1453,6 +1389,9 @@ export function createZylithWalletRuntime(
           unlocked.publicConfig.account_id,
           "starknet-privacy-registry"
         );
+      const { deserializeStarknetPrivacyRegistry } = await import(
+        "./integrations/starknetPrivacyRegistry"
+      );
       return deserializeStarknetPrivacyRegistry(serialized);
     } catch {
       quarantineLocalStore(key);
@@ -1462,6 +1401,9 @@ export function createZylithWalletRuntime(
 
   async function saveStarknetPrivacySdkRegistry(registry: PrivateRegistry) {
     if (!seedHex || !publicConfig) return;
+    const { serializeStarknetPrivacyRegistry } = await import(
+      "./integrations/starknetPrivacyRegistry"
+    );
     const encrypted = await encryptLocalStore(
       serializeStarknetPrivacyRegistry(registry),
       seedHex,
@@ -1614,8 +1556,16 @@ export function createZylithWalletRuntime(
       async () => {
         const generation = walletSessionGeneration;
         if (seedHex && publicConfig) return true;
+        const storedVault = readWalletSignatureVault(starknetAddress);
+        const messageVersion = isWalletSignatureVaultRecord(storedVault)
+          ? storedVault.message_version
+          : 3;
         const context = await requestWalletSignatureVaultContext(
-          starknetAddress
+          starknetAddress,
+          messageVersion,
+          isWalletSignatureVaultRecord(storedVault)
+            ? storedVault.deployment_id
+            : undefined
         );
         ensureWalletSignatureOperationCurrent(generation);
         let vault = readWalletSignatureVault(context.walletAddress);
@@ -1625,14 +1575,11 @@ export function createZylithWalletRuntime(
             if (walletSignatureVaultMetadataMatches(remote.vault, context)) {
               vault = remote.vault;
               writeWalletSignatureVault(remote.vault);
-            } else {
-              removeWalletSignatureVault(context.walletAddress);
             }
           }
         }
         if (!isWalletSignatureVaultRecord(vault)) return false;
         if (!walletSignatureVaultMetadataMatches(vault, context)) {
-          removeWalletSignatureVault(context.walletAddress);
           return false;
         }
         let nextSeedHex: string;
@@ -1670,7 +1617,9 @@ export function createZylithWalletRuntime(
   }
 
   async function requestWalletSignatureVaultContext(
-    starknetAddress: string
+    starknetAddress: string,
+    messageVersion: WalletSignatureMessageVersion = 3,
+    deploymentIdOverride?: string
   ): Promise<WalletSignatureVaultContext> {
     const provider = selectedStarknetProvider();
     if (!provider) {
@@ -1689,10 +1638,9 @@ export function createZylithWalletRuntime(
     const deployment = await loadDeploymentConfig();
     await ensureWalletChain(provider, deployment);
     const chainId = requiredNonZeroFelt(deployment.chain_id, "chain_id");
-    const deploymentId = await zylithWalletAuthDeploymentId(
-      deployment,
-      chainId
-    );
+    const deploymentId = deploymentIdOverride?.trim()
+      ? deploymentIdOverride.trim().toLowerCase()
+      : await zylithWalletAuthDeploymentId(deployment, chainId, messageVersion);
     const origin =
       typeof window !== "undefined" && window.location?.origin
         ? window.location.origin
@@ -1702,6 +1650,7 @@ export function createZylithWalletRuntime(
       chainId,
       deploymentId,
       origin,
+      messageVersion,
     });
     const signature = await requestStarknetWalletTypedSignature(
       provider,
@@ -1713,7 +1662,7 @@ export function createZylithWalletRuntime(
       chainId,
       deploymentId,
       origin,
-      messageVersion: 2,
+      messageVersion,
     };
   }
 
@@ -1938,7 +1887,6 @@ export function createZylithWalletRuntime(
     await syncWithdrawalState();
     await finalizePendingConsolidations();
     await syncSettlementOutputs();
-    await syncExternalCompletionTransactions();
   }
 
   async function refreshDepositState() {
@@ -2027,51 +1975,6 @@ export function createZylithWalletRuntime(
     const pruned = await pruneUnsettledSettlementOutputs().catch(() => false);
     const scanned = await scanNotes().catch(() => false);
     return pruned || scanned;
-  }
-
-  async function syncExternalCompletionTransactions() {
-    const localOrders = await loadLocalOrders().catch(() => [] as LocalOrder[]);
-    const pending = localOrders.filter((order) => {
-      const external = order.externalCompletion;
-      return Boolean(
-        external &&
-          ((external.status === "consolidating" &&
-            external.consolidationTransactionHash) ||
-            (external.status === "submitting" && external.transactionHash) ||
-            (external.status === "converting" &&
-              external.conversionTransactionHash))
-      );
-    });
-    if (pending.length === 0) return false;
-    const deployment = await loadDeploymentConfig();
-    let changed = false;
-    for (const order of pending) {
-      const external = order.externalCompletion;
-      if (!external) continue;
-      const transactionHash =
-        external.status === "consolidating"
-          ? external.consolidationTransactionHash
-          : external.status === "submitting"
-          ? external.transactionHash
-          : external.conversionTransactionHash;
-      if (!transactionHash) continue;
-      const receipt = await fetchTransactionReceiptStatus(
-        transactionHash,
-        deployment
-      ).catch(() => null);
-      const reconciled = reconcileExternalCompletionTransaction(
-        external,
-        receipt
-      );
-      if (reconciled !== external) {
-        order.externalCompletion = reconciled;
-        changed = true;
-      }
-    }
-    if (!changed) return false;
-    await saveLocalOrders(localOrders);
-    scheduleRecoverySnapshot(false);
-    return true;
   }
 
   async function syncPrivateSettlementReports(
@@ -2287,12 +2190,12 @@ export function createZylithWalletRuntime(
               : 0n;
             const activeResidualNoteCommitment =
               externalSourceNoteCommitments[0];
-            const previousExternal = order.externalCompletion;
+            const previousExternal = order.externalMatch;
             const sameResidual =
               Boolean(previousExternal) &&
               previousExternal?.residualNoteCommitment ===
                 activeResidualNoteCommitment;
-            const externalCompletion =
+            const externalMatch =
               order.executionPreference === "PrivateThenExternal" &&
               externalResidualAmount > 0n &&
               activeResidualNoteCommitment
@@ -2309,24 +2212,6 @@ export function createZylithWalletRuntime(
                       "",
                     residualAmount: externalResidualAmount.toString(),
                     sourceNoteCommitments: externalSourceNoteCommitments,
-                    consolidationTransactionHash: sameResidual
-                      ? previousExternal?.consolidationTransactionHash
-                      : undefined,
-                    conversionTransactionHash: sameResidual
-                      ? previousExternal?.conversionTransactionHash
-                      : undefined,
-                    inputOpenNoteId: sameResidual
-                      ? previousExternal?.inputOpenNoteId
-                      : undefined,
-                    transactionHash: sameResidual
-                      ? previousExternal?.transactionHash
-                      : undefined,
-                    outputOpenNoteId: sameResidual
-                      ? previousExternal?.outputOpenNoteId
-                      : undefined,
-                    quoteCommitment: sameResidual
-                      ? previousExternal?.quoteCommitment
-                      : undefined,
                     lastError: sameResidual
                       ? previousExternal?.lastError
                       : undefined,
@@ -2340,7 +2225,7 @@ export function createZylithWalletRuntime(
                 filledAmount > 0n
                   ? execution.filled_amount
                   : order.filledAmount,
-              externalCompletion,
+              externalMatch,
             };
             if (JSON.stringify(order) !== JSON.stringify(nextOrder)) {
               ordersForMutation[index] = nextOrder;
@@ -2428,7 +2313,7 @@ export function createZylithWalletRuntime(
           });
           notesChanged = true;
         } catch {
-          // A report may include recovery slots that do not decrypt under the current wallet after rotation.
+          // a report may include recovery slots that do not decrypt under the current wallet after rotation.
         }
       }
       if (!syncedBatchIds.has(reportBatchId)) {
@@ -2802,6 +2687,9 @@ export function createZylithWalletRuntime(
         () => undefined
       );
       externalDepositSubmissionStarted = true;
+      const { submitPrivacyBridgeDeposit } = await import(
+        "./integrations/starknetPrivacyFunding"
+      );
       depositResult = await submitPrivacyBridgeDeposit({
         provider: provider as never,
         seedHex: unlockedSeed,
@@ -3089,7 +2977,7 @@ export function createZylithWalletRuntime(
             confirmedFundingCommitments.add(fundingCommitment);
         }
       } catch {
-        // Ignore malformed indexer rows and keep the deposit pending until the receipt reconciliation handles it.
+        // ignore malformed indexer rows and keep the deposit pending until the receipt reconciliation handles it.
       }
     }
     return { confirmedFundingCommitments, indexerStale };
@@ -4028,7 +3916,7 @@ export function createZylithWalletRuntime(
       price_base_scale: draftPriceBaseScale(draft).toString(),
       min_fill: minFill.toString(),
       fill_or_kill: draft.fillOrKill,
-      execution_preference: draft.executionPreference ?? "PrivateThenExternal",
+      execution_preference: draft.executionPreference,
       retry_unfilled: draft.retryUnfilled === true,
       batch_window_ms: draft.batchWindowMs,
       max_children: maxChildren,
@@ -4142,7 +4030,7 @@ export function createZylithWalletRuntime(
       price_base_scale: draftPriceBaseScale(draft).toString(),
       min_fill: minFill.toString(),
       fill_or_kill: draft.fillOrKill,
-      execution_preference: draft.executionPreference ?? "PrivateThenExternal",
+      execution_preference: draft.executionPreference,
       retry_unfilled: false,
       batch_window_ms: draft.batchWindowMs,
       max_children: maxChildren,
@@ -4563,7 +4451,7 @@ export function createZylithWalletRuntime(
     ) {
       return;
     }
-    // A retry-unfilled strategy must learn the previous child outcome before
+    // a retry-unfilled strategy must learn the previous child outcome before
     // reserving another slice; otherwise a late fill can over-commit the
     // strategy's remaining amount across multiple epochs.
     if (
@@ -4818,6 +4706,9 @@ export function createZylithWalletRuntime(
     const sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
       () => undefined
     );
+    const { submitPrivacyOpenNoteWithdrawal } = await import(
+      "./integrations/starknetPrivacyFunding"
+    );
     const claimResult = await submitPrivacyOpenNoteWithdrawal({
       seedHex: unlockedSeed,
       chainId,
@@ -4896,476 +4787,6 @@ export function createZylithWalletRuntime(
       staged_transaction_hash: confirmedStagedTransactionHash,
       open_note_id: claimResult.openNoteId,
     };
-  }
-
-  async function submitExternalCompletion(request: {
-    orderCommitment: string;
-    slippageBps?: number;
-  }) {
-    const normalizedOrderCommitment = normalizeFeltForComparison(
-      request.orderCommitment
-    );
-    if (!normalizedOrderCommitment) {
-      throw new Error("External completion requires an order commitment");
-    }
-    if (externalCompletionInFlight.has(normalizedOrderCommitment)) {
-      throw new Error("External completion is already being processed");
-    }
-    externalCompletionInFlight.add(normalizedOrderCommitment);
-    try {
-      const { seedHex: unlockedSeed } = requireUnlocked();
-      const deployment = await loadDeploymentConfig();
-      const localOrders = await loadLocalOrders();
-      const order = localOrders.find(
-        (entry) =>
-          normalizeFeltForComparison(entry.orderCommitment) ===
-          normalizedOrderCommitment
-      );
-      if (!order) throw new Error("Order was not found in this wallet");
-      if (order.executionPreference !== "PrivateThenExternal") {
-        throw new Error(
-          "This order is private-only and cannot use AVNU completion"
-        );
-      }
-      const external = order.externalCompletion;
-      if (!external) {
-        throw new Error(
-          "This order has no residual available for external completion"
-        );
-      }
-      if (external.status === "completed" && external.transactionHash) {
-        return {
-          transaction_hash: external.transactionHash,
-          output_open_note_id: external.outputOpenNoteId ?? "",
-        };
-      }
-
-      if (external.transactionHash && external.status === "submitting") {
-        const previousStatus = await fetchTransactionReceiptStatus(
-          external.transactionHash,
-          deployment
-        ).catch(() => null);
-        if (previousStatus?.confirmed && !previousStatus.failed) {
-          await updateExternalCompletion(normalizedOrderCommitment, {
-            status: "completed",
-          });
-          return {
-            transaction_hash: external.transactionHash,
-            output_open_note_id: external.outputOpenNoteId ?? "",
-          };
-        }
-        if (!previousStatus?.failed) {
-          throw new Error(
-            "External completion is already submitted and awaiting confirmation"
-          );
-        }
-      }
-
-      let residualNote: LocalNoteRecord | undefined;
-      const sourceNoteCommitments = uniqueStrings([
-        ...(external.sourceNoteCommitments ?? [
-          external.residualNoteCommitment,
-        ]),
-      ])
-        .map(normalizeFeltForComparison)
-        .filter((commitment): commitment is string => Boolean(commitment));
-      if (!external.inputOpenNoteId) {
-        let sourceNotes = sourceNoteCommitments
-          .map((commitment) =>
-            notes.find(
-              (entry) =>
-                normalizeFeltForComparison(entry.note_commitment) === commitment
-            )
-          )
-          .filter((note): note is LocalNoteRecord => Boolean(note));
-
-        if (
-          external.status === "consolidating" &&
-          sourceNotes.length !== sourceNoteCommitments.length
-        ) {
-          await finalizePendingConsolidations().catch(() => false);
-          sourceNotes = sourceNoteCommitments
-            .map((commitment) =>
-              notes.find(
-                (entry) =>
-                  normalizeFeltForComparison(entry.note_commitment) ===
-                  commitment
-              )
-            )
-            .filter((note): note is LocalNoteRecord => Boolean(note));
-        }
-
-        const requiresConsolidation =
-          sourceNotes.length !== sourceNoteCommitments.length ||
-          sourceNotes.length !== 1 ||
-          sourceNotes[0]?.source !== "settlement_output";
-        if (requiresConsolidation) {
-          if (external.status === "consolidating") {
-            throw new Error(
-              "Private residual conversion is waiting for consolidation confirmation"
-            );
-          }
-          if (!noteConsolidationAvailable()) {
-            throw new Error(
-              "Private residual conversion is not available in this deployment"
-            );
-          }
-          if (
-            sourceNotes.length !== sourceNoteCommitments.length ||
-            sourceNotes.length === 0
-          ) {
-            throw new Error(
-              "Residual funding notes are unavailable; refresh private state and retry"
-            );
-          }
-          const sourceAssetIds = new Set(
-            sourceNotes.map((note) => note.note.asset_id)
-          );
-          if (sourceAssetIds.size !== 1) {
-            throw new Error("Residual funding notes must use one input asset");
-          }
-          if (
-            sourceNotes.some(
-              (note) =>
-                note.spent ||
-                note.locked_by_order ||
-                (note.source === "deposit" &&
-                  note.deposit_confirmed !== true) ||
-                note.pending_withdrawal_tx ||
-                note.pending_consolidation
-            )
-          ) {
-            throw new Error(
-              "Residual funding notes are not currently spendable"
-            );
-          }
-          const totalResidualAmount = sourceNotes.reduce(
-            (total, note) => total + BigInt(note.note.amount),
-            0n
-          );
-          if (totalResidualAmount <= 0n) {
-            throw new Error("Residual funding notes have no spendable balance");
-          }
-          const consolidation = await consolidateNotes({
-            sourceNoteCommitments,
-            targetAmounts: [totalResidualAmount.toString()],
-          });
-          if (consolidation.output_note_commitments.length !== 1) {
-            throw new Error(
-              "Residual funding consolidation returned an invalid output count"
-            );
-          }
-          const consolidatedCommitment = normalizeNoteCommitment(
-            consolidation.output_note_commitments[0]
-          );
-          await updateExternalCompletion(normalizedOrderCommitment, {
-            status: "consolidating",
-            residualNoteCommitment: consolidatedCommitment,
-            residualAssetId: sourceNotes[0].note.asset_id,
-            residualAmount: totalResidualAmount.toString(),
-            sourceNoteCommitments: [consolidatedCommitment],
-            consolidationTransactionHash: consolidation.transaction_hash,
-            lastError: undefined,
-          });
-          await finalizePendingConsolidations().catch(() => false);
-          residualNote = notes.find(
-            (entry) =>
-              normalizeFeltForComparison(entry.note_commitment) ===
-              normalizeFeltForComparison(consolidatedCommitment)
-          );
-          if (!residualNote) {
-            throw new Error(
-              "Private residual consolidation is pending; refresh private state and retry"
-            );
-          }
-        } else {
-          residualNote = sourceNotes[0];
-        }
-
-        if (!residualNote) {
-          throw new Error(
-            "Residual note is unavailable; refresh private state and retry"
-          );
-        }
-        if (
-          residualNote.spent ||
-          residualNote.locked_by_order ||
-          residualNote.source !== "settlement_output"
-        ) {
-          throw new Error("Residual note is not currently spendable");
-        }
-      }
-
-      const pair = deployment.product?.pairs?.[order.pair];
-      const baseAssetId = pair?.base_asset_id;
-      const quoteAssetId = pair?.quote_asset_id;
-      if (!pair || !baseAssetId || !quoteAssetId || !pair.price_base_scale) {
-        throw new Error(
-          "Deployment pair metadata is incomplete for external completion"
-        );
-      }
-      const priceBaseScale = BigInt(pair.price_base_scale);
-      const limitPrice = parseHumanAmount(order.limitPrice, quoteAssetId);
-      const submittedBaseAmount = parseHumanAmount(order.amount, baseAssetId);
-      const filledBaseAmount = parseHumanAmount(
-        order.filledAmount ?? "0",
-        baseAssetId
-      );
-      if (limitPrice <= 0n || priceBaseScale <= 0n) {
-        throw new Error("External completion requires a positive price limit");
-      }
-      if (filledBaseAmount >= submittedBaseAmount) {
-        throw new Error("Order has no unfilled base amount");
-      }
-      const remainingBaseAmount = submittedBaseAmount - filledBaseAmount;
-      const residualAmount = residualNote
-        ? BigInt(residualNote.note.amount)
-        : BigInt(external.residualAmount);
-      let inputAmount: bigint;
-      let grossOutputAmount: bigint;
-      if (order.side === "Buy") {
-        const limitQuoteAmount = quoteAmountForBase(
-          remainingBaseAmount,
-          limitPrice,
-          priceBaseScale
-        );
-        inputAmount = min(residualAmount, limitQuoteAmount);
-        grossOutputAmount = min(
-          remainingBaseAmount,
-          (inputAmount * priceBaseScale) / limitPrice
-        );
-      } else {
-        inputAmount = min(residualAmount, remainingBaseAmount);
-        grossOutputAmount = quoteAmountForBase(
-          inputAmount,
-          limitPrice,
-          priceBaseScale
-        );
-      }
-      if (inputAmount <= 0n || grossOutputAmount <= 0n) {
-        throw new Error("Residual note cannot satisfy the remaining order");
-      }
-
-      const fundingRail = selectedDepositFundingRail(deployment);
-      const inputTokenAddress = fundingRailTokenAddress(
-        deployment,
-        order.side === "Buy" ? quoteAssetId : baseAssetId
-      );
-      const outputTokenAddress = fundingRailTokenAddress(
-        deployment,
-        order.side === "Buy" ? baseAssetId : quoteAssetId
-      );
-      let sdkRegistry = await loadStarknetPrivacySdkRegistry().catch(
-        () => undefined
-      );
-      let inputOpenNoteId = external.inputOpenNoteId;
-      let inputNote = inputOpenNoteId
-        ? findSdkNote(sdkRegistry, inputTokenAddress, inputOpenNoteId)
-        : undefined;
-
-      if (!inputNote) {
-        if (!residualNote) {
-          throw new Error(
-            "Converted external-completion input note is unavailable; refresh private state and retry"
-          );
-        }
-        await updateExternalCompletion(normalizedOrderCommitment, {
-          status: "converting",
-          lastError: undefined,
-        });
-        const conversion = await submitStrk20Withdrawal({
-          note_commitment: residualNote.note_commitment,
-          batch_id: residualNote.batch_id,
-          output_note: residualNote.output_note,
-          output_proof: residualNote.output_proof,
-        });
-        inputOpenNoteId = requiredString(
-          conversion.open_note_id,
-          "external completion input open note"
-        );
-        sdkRegistry = await loadStarknetPrivacySdkRegistry();
-        inputNote = findSdkNote(
-          sdkRegistry,
-          inputTokenAddress,
-          inputOpenNoteId
-        );
-        if (!inputNote) {
-          throw new Error(
-            "Converted residual note is not visible in the privacy registry"
-          );
-        }
-        await updateExternalCompletion(normalizedOrderCommitment, {
-          status: "ready",
-          conversionTransactionHash: conversion.transaction_hash,
-          inputOpenNoteId,
-          lastError: undefined,
-        });
-      }
-      if (!sdkRegistry || !inputNote) {
-        throw new Error(
-          "External completion input note is unavailable after conversion"
-        );
-      }
-
-      const nowUnixMs = Date.now();
-      const obligation = {
-        pair_id: order.pair,
-        base_asset_id: baseAssetId,
-        quote_asset_id: quoteAssetId,
-        side: order.side,
-        input_asset_id: order.side === "Buy" ? quoteAssetId : baseAssetId,
-        output_asset_id: order.side === "Buy" ? baseAssetId : quoteAssetId,
-        input_amount: residualAmount.toString(),
-        gross_output_amount: grossOutputAmount.toString(),
-        limit_price: limitPrice.toString(),
-        price_base_scale: priceBaseScale.toString(),
-        order_commitments: [order.orderCommitment],
-      };
-      const plan = await postJson<AvnuExternalCompletionPlan>(
-        proverUrl,
-        "/api/public/external-completion/avnu/plan",
-        {
-          obligation,
-          slippage_bps: request.slippageBps ?? 30,
-        },
-        {},
-        { timeoutMs: 30_000 }
-      );
-      const quotedInputAmount = BigInt(plan.quote.input_amount);
-      const quotedOutputAmount = BigInt(plan.quote.min_output_amount);
-      if (
-        quotedInputAmount <= 0n ||
-        quotedInputAmount > residualAmount ||
-        quotedOutputAmount < grossOutputAmount ||
-        plan.quote.quote_expiry_unix_ms <= nowUnixMs
-      ) {
-        throw new Error(
-          "External completion plan failed local obligation checks"
-        );
-      }
-      await updateExternalCompletion(normalizedOrderCommitment, {
-        status: "submitting",
-        inputOpenNoteId,
-        // Persist the commitment over the complete validated quote. The AVNU
-        // route commitment alone is not the value used by receipt validation.
-        quoteCommitment: plan.report.quote_commitment,
-        lastError: undefined,
-      });
-      const swap = await submitPrivacyAvnuSwap({
-        seedHex: unlockedSeed,
-        chainId: plan.chain_id,
-        rpcUrl: requiredString(deployment.rpc_url, "rpc_url"),
-        privacyPoolAddress: requiredNonZeroFelt(
-          fundingRail.privacyPool,
-          "privacy_pool_address"
-        ),
-        tokenAddress: inputTokenAddress,
-        buyTokenAddress: outputTokenAddress,
-        executorAddress: requiredNonZeroFelt(
-          plan.quote.executor_address,
-          "AVNU executor address"
-        ),
-        executorCalls: plan.executor_calls,
-        sellAmount: quotedInputAmount,
-        inputNote,
-        discoveryUrl: browserSafeServiceUrl(
-          normalizeUrl(fundingRail.discoveryUrl),
-          "/starknet-privacy-discovery"
-        ),
-        provingUrl: browserSafeServiceUrl(
-          normalizeUrl(fundingRail.provingUrl),
-          "/starknet-privacy-prover"
-        ),
-        provingOhttpEnabled: fundingRail.provingOhttpEnabled,
-        paymasterAddress: requiredNonZeroFelt(
-          fundingRail.paymasterAddress,
-          "privacy_paymaster_address"
-        ),
-        paymasterUrl: requiredString(
-          fundingRail.paymasterUrl,
-          "privacy_paymaster_url"
-        ),
-        privacyProofSignerClassHash: fundingRail.privacyProofSignerClassHash,
-        minProvingDelayBlocks:
-          fundingRail.minProvingDelayBlocks ??
-          DEFAULT_STARKNET_PRIVACY_MIN_PROVING_DELAY_BLOCKS,
-        sdkRegistry,
-      });
-      await saveStarknetPrivacySdkRegistry(swap.sdkRegistry);
-      await updateExternalCompletion(normalizedOrderCommitment, {
-        status: "submitting",
-        transactionHash: swap.transactionHash,
-        outputOpenNoteId: swap.outputOpenNoteId,
-        lastError: undefined,
-      });
-      await waitForStarknetTransaction(
-        swap.transactionHash,
-        deployment,
-        "Private AVNU external completion"
-      );
-      const outputNote = findSdkNote(
-        swap.sdkRegistry,
-        outputTokenAddress,
-        swap.outputOpenNoteId
-      );
-      if (!outputNote) {
-        throw new Error(
-          "Private AVNU external completion output note is not visible after confirmation"
-        );
-      }
-      let actualOutputAmount: bigint;
-      try {
-        actualOutputAmount = BigInt(String(outputNote.amount));
-      } catch {
-        throw new Error(
-          "Private AVNU external completion returned an invalid output amount"
-        );
-      }
-      if (actualOutputAmount < quotedOutputAmount) {
-        throw new Error(
-          "Private AVNU external completion output is below the quoted minimum"
-        );
-      }
-      await updateExternalCompletion(normalizedOrderCommitment, {
-        status: "completed",
-      });
-      return {
-        transaction_hash: swap.transactionHash,
-        output_open_note_id: swap.outputOpenNoteId,
-      };
-    } catch (error) {
-      await updateExternalCompletion(normalizedOrderCommitment, {
-        status: "failed",
-        lastError: userFacingErrorMessage(
-          error,
-          "External completion failed. Retry after checking private state."
-        ),
-      }).catch(() => undefined);
-      throw error;
-    } finally {
-      externalCompletionInFlight.delete(normalizedOrderCommitment);
-    }
-  }
-
-  async function updateExternalCompletion(
-    orderCommitment: string,
-    patch: Partial<NonNullable<LocalOrder["externalCompletion"]>>
-  ) {
-    const localOrders = await loadLocalOrders();
-    const index = localOrders.findIndex(
-      (entry) =>
-        normalizeFeltForComparison(entry.orderCommitment) === orderCommitment
-    );
-    if (index < 0 || !localOrders[index].externalCompletion) return;
-    localOrders[index] = normalizeLocalOrder({
-      ...localOrders[index],
-      externalCompletion: {
-        ...localOrders[index].externalCompletion!,
-        ...patch,
-      },
-    });
-    await saveLocalOrders(localOrders);
-    scheduleRecoverySnapshot(false);
   }
 
   function getBalances() {
@@ -5571,7 +4992,6 @@ export function createZylithWalletRuntime(
           Boolean(offlinePackage)
         ),
     submitStrk20Withdrawal,
-    submitExternalCompletion,
   };
 
   async function fetchIngressRegistry() {
@@ -6003,6 +5423,7 @@ export function createZylithWalletRuntime(
       batchIdText
     );
     if (!rpcUrl || !verifier || !batchId) return null;
+    const { hash: starknetHash } = await import("starknet");
     const response = await starknetRpc<{ result?: string[]; error?: unknown }>(
       rpcUrl,
       "starknet_call",
@@ -6360,7 +5781,7 @@ export function createZylithWalletRuntime(
       amount: amount.toString(),
       min_fill: minFill.toString(),
       time_in_force: draft.fillOrKill ? "FillOrKill" : "CurrentBatchOnly",
-      execution_preference: draft.executionPreference ?? "PrivateThenExternal",
+      execution_preference: draft.executionPreference,
       expiry_epoch: batch.epoch_id,
       order_nonce: randomU64(),
       parent_order_commitment:
@@ -6690,7 +6111,8 @@ function parseHumanAmount(value: string, asset: string) {
 
 async function zylithWalletAuthDeploymentId(
   deployment: DeploymentConfig,
-  chainId: string
+  chainId: string,
+  messageVersion: WalletSignatureMessageVersion
 ) {
   const fundingRail = selectedDepositFundingRail(deployment);
   return sha256Hex(
@@ -6709,7 +6131,7 @@ async function zylithWalletAuthDeploymentId(
         "shielded_asset_adapter_address"
       ),
       funding_primary: deployment.funding?.primary,
-      auth_message_version: 2,
+      auth_message_version: messageVersion,
     })
   );
 }
@@ -6719,34 +6141,68 @@ async function buildZylithWalletAuthTypedData(input: {
   chainId: string;
   deploymentId: string;
   origin: string;
+  messageVersion: WalletSignatureMessageVersion;
 }) {
+  if (input.messageVersion === 2) {
+    return {
+      types: {
+        StarkNetDomain: [
+          { name: "name", type: "felt" },
+          { name: "version", type: "felt" },
+          { name: "chainId", type: "felt" },
+        ],
+        ZylithSession: [
+          { name: "action", type: "felt" },
+          { name: "wallet", type: "felt" },
+          { name: "origin", type: "felt" },
+          { name: "deployment", type: "felt" },
+          { name: "version", type: "felt" },
+        ],
+      },
+      primaryType: "ZylithSession",
+      domain: {
+        name: shortStringFelt("Zylith"),
+        version: shortStringFelt("1"),
+        chainId: input.chainId,
+      },
+      message: {
+        action: shortStringFelt("Authorize"),
+        wallet: input.walletAddress,
+        origin: await feltHashForText(input.origin),
+        deployment: feltFromHexHash(input.deploymentId),
+        version: "2",
+      },
+    };
+  }
   return {
     types: {
-      StarkNetDomain: [
-        { name: "name", type: "felt" },
-        { name: "version", type: "felt" },
-        { name: "chainId", type: "felt" },
+      StarknetDomain: [
+        { name: "name", type: "shortstring" },
+        { name: "version", type: "shortstring" },
+        { name: "chainId", type: "shortstring" },
+        { name: "revision", type: "shortstring" },
       ],
       ZylithSession: [
-        { name: "action", type: "felt" },
-        { name: "wallet", type: "felt" },
+        { name: "action", type: "shortstring" },
+        { name: "wallet", type: "ContractAddress" },
         { name: "origin", type: "felt" },
         { name: "deployment", type: "felt" },
-        { name: "version", type: "felt" },
+        { name: "version", type: "u128" },
       ],
     },
     primaryType: "ZylithSession",
     domain: {
-      name: shortStringFelt("Zylith"),
-      version: shortStringFelt("1"),
+      name: "Zylith",
+      version: "1",
       chainId: input.chainId,
+      revision: "1",
     },
     message: {
-      action: shortStringFelt("Authorize"),
+      action: "Authorize",
       wallet: input.walletAddress,
       origin: await feltHashForText(input.origin),
       deployment: feltFromHexHash(input.deploymentId),
-      version: "2",
+      version: "3",
     },
   };
 }
@@ -6768,6 +6224,11 @@ async function requestStarknetWalletTypedSignature(
         );
         if (result !== null && result !== undefined) return result;
       } catch (error) {
+        if (isWalletSignatureProviderTimeout(error)) {
+          throw new Error(
+            "Wallet signature request timed out. Open your Starknet wallet, approve the signature, and retry."
+          );
+        }
         if (
           isUserRejectedWalletError(error) ||
           !isWalletSignRequestShapeError(error)
@@ -6783,6 +6244,11 @@ async function requestStarknetWalletTypedSignature(
         provider.account.signMessage(typedData)
       );
     } catch (error) {
+      if (isWalletSignatureProviderTimeout(error)) {
+        throw new Error(
+          "Wallet signature request timed out. Open your Starknet wallet, approve the signature, and retry."
+        );
+      }
       if (isWalletSignRequestShapeError(error)) {
         throw new Error("Selected Starknet wallet cannot sign Zylith messages");
       }
@@ -6871,6 +6337,10 @@ function isWalletSignRequestShapeError(error: unknown) {
   return /method not found|not supported|unsupported|not implemented|unknown method|invalid input|invalid_union|typed.?data|sign.?message/i.test(
     walletErrorMessage(error)
   );
+}
+
+function isWalletSignatureProviderTimeout(error: unknown) {
+  return /^(?:error:\s*)?timeout$/i.test(walletErrorMessage(error).trim());
 }
 
 async function sha256Hex(value: string) {
@@ -7478,6 +6948,14 @@ async function requestWalletChainId(
     const chainId = chainIdFromUnknown(value);
     if (chainId) return chainId;
   }
+  if (typeof provider.chainId === "function") {
+    const value = await withStarknetWalletRequestTimeout(
+      Promise.resolve((provider.chainId as () => unknown)()),
+      STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
+    ).catch(() => null);
+    const chainId = chainIdFromUnknown(value);
+    if (chainId) return chainId;
+  }
   return (
     chainIdFromUnknown(provider.chainId) ??
     chainIdFromUnknown(provider.chain_id)
@@ -7504,6 +6982,9 @@ async function withStarknetWalletRequestTimeout<T>(
 
 function chainIdFromUnknown(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "bigint") return `0x${value.toString(16)}`;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+    return `0x${value.toString(16)}`;
   if (Array.isArray(value)) {
     for (const item of value) {
       const chainId = chainIdFromUnknown(item);
@@ -7516,13 +6997,17 @@ function chainIdFromUnknown(value: unknown): string | null {
   return (
     chainIdFromUnknown(record.chainId) ??
     chainIdFromUnknown(record.chain_id) ??
-    chainIdFromUnknown(record.id)
+    chainIdFromUnknown(record.id) ??
+    chainIdFromUnknown(record.result) ??
+    chainIdFromUnknown(record.data) ??
+    chainIdFromUnknown(record.network)
   );
 }
 
 function normalizeRuntimeChainId(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
+  const chainId = chainIdFromUnknown(value);
+  if (!chainId) return null;
+  const trimmed = chainId.trim();
   if (!trimmed) return null;
   const alias = CHAIN_ID_ALIASES[trimmed.toUpperCase()];
   if (alias) return alias;
@@ -7786,7 +7271,7 @@ function quarantineLocalStore(key: string) {
   try {
     localStorage.removeItem(key);
   } catch {
-    // Local cache is recoverable from recovery artifacts or rescanning visible outputs.
+    // local cache is recoverable from recovery artifacts or rescanning visible outputs.
   }
 }
 

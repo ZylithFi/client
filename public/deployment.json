@@ -1,31 +1,31 @@
 {
   "deployment": {
     "finalized": true,
-    "release_commit": "c2218677755093af364e7a2ecf7a46bb2e4b5ba9"
+    "release_commit": "7957f90daf77fedfa6123a613d76c8c0a0d1f6db"
   },
   "network": "sepolia",
   "rpc_url": "https://api.zylith.fi/starknet-rpc",
   "chain_id": "0x534e5f5345504f4c4941",
   "contracts": {
-    "commitment_registry": "0x06babf29617b1b1a24748959fd7b83a9ab572e1e2ccd2f41a55cb5edc8092b4c",
-    "batch_registry": "0x00dc13e37afadc8569090d3419e63cd983103347b2e55cd8e8441e3cfbe23668",
-    "shielded_asset_adapter": "0x07723e37f2934ecae5926dfe9e32cf14b6b6aef4bb2b6ed35f6bb541e47537ff",
-    "privacy_deposit_bridge": "0x07723e37f2934ecae5926dfe9e32cf14b6b6aef4bb2b6ed35f6bb541e47537ff",
-    "auction_verifier": "0x063d5f52f7afbb224161418313d5df8a551b0c9c1f57013bc1231558989065a0"
+    "commitment_registry": "0x030ca181cbe59a53fd87347250646c1fc2f40c1c08a5dd92d953fd445c486fbb",
+    "batch_registry": "0x00d2115581574eb80d91b8c1bc7bb619bb39fca4df1c7b680f54100b611fd6d7",
+    "shielded_asset_adapter": "0x0606632b9f3a8afb94b9466358b939c243a9f5ab7e7fb337b1109f37d4762afa",
+    "privacy_deposit_bridge": "0x0606632b9f3a8afb94b9466358b939c243a9f5ab7e7fb337b1109f37d4762afa",
+    "external_match_executor": "0x04a7e26604cd864a1a05d6aff30477c1df8d4410cadeb7478031b0bd1be5d881",
+    "ekubo_external_match_router": "0x007350a5cb4e5e545178624802ddcb76acb32c3ade60f105345295386ea56d45",
+    "auction_verifier": "0x0599368fca3756cb69897137fe90c10b1b3e346a330e96d4c9e298bf02fbfc28"
   },
   "token_addresses": {
     "STRK": "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d",
     "ETH": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
     "USDC": "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343",
-    "strkBTC": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
-    "WBTC": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
-    "USDT": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb"
+    "strkBTC": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0"
   },
   "funding": {
     "primary": "starknet_privacy",
     "starknet_privacy": {
       "privacy_pool": "0x254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
-      "bridge_adapter": "0x07723e37f2934ecae5926dfe9e32cf14b6b6aef4bb2b6ed35f6bb541e47537ff",
+      "bridge_adapter": "0x0606632b9f3a8afb94b9466358b939c243a9f5ab7e7fb337b1109f37d4762afa",
       "discovery_url": "https://api.zylith.fi/starknet-privacy-discovery",
       "proving_url": "https://api.zylith.fi/starknet-privacy-prover-sepolia",
       "paymaster_address": "0x3a8fe672fdbd1d9342a13a02b1553e2c23a8f8187f516408fba4ee27f28f76c",
@@ -55,7 +55,7 @@
         "rail_token_address": "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7",
         "min_trade_amount": "1000000000000000",
         "enabled_pairs": [
-          "ETH/USDC",
+          "strkBTC/ETH",
           "STRK/ETH"
         ]
       },
@@ -66,38 +66,18 @@
         "min_trade_amount": "1000000",
         "enabled_pairs": [
           "STRK/USDC",
-          "ETH/USDC",
-          "strkBTC/USDC",
-          "USDC/USDT"
+          "strkBTC/USDC"
         ]
       },
       "strkBTC": {
         "asset_id": "strkBTC",
         "token_address": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
         "rail_token_address": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
-        "min_trade_amount": "100000",
+        "min_trade_amount": "1000000000000000",
         "enabled_pairs": [
           "strkBTC/USDC",
-          "STRK/strkBTC",
-          "WBTC/strkBTC"
-        ]
-      },
-      "WBTC": {
-        "asset_id": "WBTC",
-        "token_address": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
-        "rail_token_address": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
-        "min_trade_amount": "100000",
-        "enabled_pairs": [
-          "WBTC/strkBTC"
-        ]
-      },
-      "USDT": {
-        "asset_id": "USDT",
-        "token_address": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb",
-        "rail_token_address": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb",
-        "min_trade_amount": "1000000",
-        "enabled_pairs": [
-          "USDC/USDT"
+          "strkBTC/ETH",
+          "STRK/strkBTC"
         ]
       }
     }
@@ -133,28 +113,10 @@
       },
       "strkBTC": {
         "asset_id": "strkBTC",
-        "min_trade_amount": "100000",
-        "decimals": 8,
+        "min_trade_amount": "1000000000000000",
+        "decimals": 18,
         "enabled": true,
         "token_address": "0x45060889ad33e70531ae2683046bb9b0d7c8199fccd9acd544170a42b0a0fd0",
-        "erc20_behavior": "vanilla-exact-delta",
-        "audit_status": "approved"
-      },
-      "WBTC": {
-        "asset_id": "WBTC",
-        "min_trade_amount": "100000",
-        "decimals": 8,
-        "enabled": true,
-        "token_address": "0x00452bd5c0512a61df7c7be8cfea5e4f893cb40e126bdc40aee6054db955129e",
-        "erc20_behavior": "vanilla-exact-delta",
-        "audit_status": "approved"
-      },
-      "USDT": {
-        "asset_id": "USDT",
-        "min_trade_amount": "1000000",
-        "decimals": 6,
-        "enabled": true,
-        "token_address": "0x02ab8758891e84b968ff11361789070c6b1af2df618d6d2f4a78b0757573c6eb",
         "erc20_behavior": "vanilla-exact-delta",
         "audit_status": "approved"
       }
@@ -168,30 +130,30 @@
         "price_base_scale": "1000000000000000000",
         "heartbeat_cover_price": "1",
         "taker_fee_bps": 4,
-        "relay_fee_bps": 0,
-        "enabled": true
-      },
-      "ETH/USDC": {
-        "pair_id": "ETH/USDC",
-        "base_asset_id": "ETH",
-        "quote_asset_id": "USDC",
-        "min_order_amount": "1000000000000000",
-        "price_base_scale": "1000000000000000000",
-        "heartbeat_cover_price": "1",
-        "taker_fee_bps": 4,
-        "relay_fee_bps": 0,
-        "enabled": true
+        "enabled": true,
+        "external_match_enabled": true
       },
       "strkBTC/USDC": {
         "pair_id": "strkBTC/USDC",
         "base_asset_id": "strkBTC",
         "quote_asset_id": "USDC",
-        "min_order_amount": "100000",
-        "price_base_scale": "100000000",
+        "min_order_amount": "1000000000000000",
+        "price_base_scale": "1000000000000000000",
         "heartbeat_cover_price": "1",
         "taker_fee_bps": 4,
-        "relay_fee_bps": 0,
-        "enabled": true
+        "enabled": true,
+        "external_match_enabled": true
+      },
+      "strkBTC/ETH": {
+        "pair_id": "strkBTC/ETH",
+        "base_asset_id": "strkBTC",
+        "quote_asset_id": "ETH",
+        "min_order_amount": "1000000000000000",
+        "price_base_scale": "1000000000000000000",
+        "heartbeat_cover_price": "1",
+        "taker_fee_bps": 4,
+        "enabled": true,
+        "external_match_enabled": true
       },
       "STRK/ETH": {
         "pair_id": "STRK/ETH",
@@ -201,8 +163,8 @@
         "price_base_scale": "1000000000000000000",
         "heartbeat_cover_price": "1",
         "taker_fee_bps": 4,
-        "relay_fee_bps": 0,
-        "enabled": true
+        "enabled": true,
+        "external_match_enabled": true
       },
       "STRK/strkBTC": {
         "pair_id": "STRK/strkBTC",
@@ -212,30 +174,8 @@
         "price_base_scale": "1000000000000000000",
         "heartbeat_cover_price": "1",
         "taker_fee_bps": 4,
-        "relay_fee_bps": 0,
-        "enabled": true
-      },
-      "WBTC/strkBTC": {
-        "pair_id": "WBTC/strkBTC",
-        "base_asset_id": "WBTC",
-        "quote_asset_id": "strkBTC",
-        "min_order_amount": "100000",
-        "price_base_scale": "100000000",
-        "heartbeat_cover_price": "1",
-        "taker_fee_bps": 1,
-        "relay_fee_bps": 0,
-        "enabled": true
-      },
-      "USDC/USDT": {
-        "pair_id": "USDC/USDT",
-        "base_asset_id": "USDC",
-        "quote_asset_id": "USDT",
-        "min_order_amount": "1000000",
-        "price_base_scale": "1000000",
-        "heartbeat_cover_price": "1",
-        "taker_fee_bps": 1,
-        "relay_fee_bps": 0,
-        "enabled": true
+        "enabled": true,
+        "external_match_enabled": true
       }
     }
   },
@@ -247,55 +187,57 @@
     "auction_statement_type": 2,
     "auction_statement_schema": 1,
     "settlement_entrypoint": "submit_settlement_with_proof_facts",
-    "proof_entrypoint": "compile_settlement_proof",
-    "proof_program_address": "0x040672ccaa58bb198eccefbf512606744a07daea87ee2d14d81a3c6e782b5bbd",
-    "proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "proof_program_address": "0x044f98b417c83b13c2e235cd16b7901ee9ec099b5b0e424062fe2422ceec7dae",
+    "proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
     "statement_proof_program_hashes": {
-      "ADMISSION": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "AUCTION_RESULT": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "NULLIFIER": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "RENEWAL": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "LIQUIDITY_POSITION": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "SETTLEMENT": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "SETTLEMENT_ORDER": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "SETTLEMENT_INPUT_MEMBERSHIP": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "SETTLEMENT_OUTPUT_RECOVERY": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "NOTE_CONSOLIDATION": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "AGGREGATE_SETTLEMENT": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "WITHDRAWAL": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-      "MULTI_PAIR": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57"
+      "ADMISSION": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "AUCTION_RESULT": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "NULLIFIER": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "RENEWAL": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "SETTLEMENT": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "SETTLEMENT_ORDER": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "SETTLEMENT_INPUT_MEMBERSHIP": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "SETTLEMENT_OUTPUT_RECOVERY": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "NOTE_CONSOLIDATION": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "AGGREGATE_SETTLEMENT": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "WITHDRAWAL": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "MULTI_PAIR": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "MULTI_PAIR_SETTLEMENT": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+      "EXTERNAL_MATCH_AUTH": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324"
     },
-    "admission_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "auction_result_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "nullifier_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "renewal_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "liquidity_position_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "settlement_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "settlement_order_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "settlement_input_membership_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "settlement_output_recovery_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "note_consolidation_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "aggregate_settlement_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "withdrawal_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "multi_pair_proof_program_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
-    "starknet_os_config_hash": "0x53f6c9fcfd31d27279ff7d7e422b44623550a732b59fe193354a7316a96daa1",
-    "settlement_statement_program_address": "0x04a7a20e51f6defde7c811d6347f358eb8610f34ab68daee2bd6824cb3789626",
-    "settlement_note_fee_statement_program_address": "0x0117eecd3bc089a1986f7b6764546b1df8695af625629ad1d37c6435867572e9",
-    "settlement_order_statement_program_address": "0x05b9d09c99bb16d24046321ebaf9c383ce7d0b795df20b55ffe2c64017e861f6",
-    "settlement_input_membership_statement_program_address": "0x05adcec002c310b680de06e329bc734eff10bfe61dfb291d3962c48b07848fa2",
-    "settlement_output_recovery_statement_program_address": "0x0020cb8b7cbda7a8e9eb3f67e6cf5ba22db893aee45b7f2783b9c445ab7b9eaf",
-    "nullifier_statement_program_address": "0x0286f744144053b5d989d976e07a6db3fb2cdaeb38da3e0694264ff25015bffb",
-    "renewal_statement_program_address": "0x06dbe4ffe997650cb59e19e6e0d5a5ee9002aeed150b4f7d106b4e4127adaa51",
-    "liquidity_position_statement_program_address": "0x0694fa9c6204cbc91255a94e48bcdd32949b3744e4a69bf2dd1337c0e7d82b09",
-    "note_consolidation_statement_program_address": "0x0389550cc3f31feb747c3ceeddd228ee965c77bbad06e117115702872bf8a8a6",
-    "withdrawal_statement_program_address": "0x00bd585b9b3a93d8a9013f36c7aa0f0950a1ec011b47f356c72248be31059950",
-    "admission_statement_program_address": "0x050473c6c964db62d38efd0bf8477815acb7612b49820bf8cf94d099b434acb0",
-    "auction_result_statement_program_address": "0x024005e0a9e5b7922c5bc1eda285cb7ade1be920b541de8696348bf2592e40e9",
-    "multi_pair_statement_program_address": "0x05e1f1599d4640ede659a5c73f632558c1327878f3f64e5ff2d700b6dea22315",
-    "proof_account_address": "0x61cb652187e949f5425db8f721f0d6bab36c40491d9806756514f8d501c96b6",
-    "settlement_account_address": "0x61cb652187e949f5425db8f721f0d6bab36c40491d9806756514f8d501c96b6",
-    "deposit_root_registrar_address": "0x06babf29617b1b1a24748959fd7b83a9ab572e1e2ccd2f41a55cb5edc8092b4c",
-    "initial_note_root": "0x35829a48d19b9c1ee2c20f38dee255a3deb9c36bab207a3ea72dd70bf68b7d3",
+    "admission_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "auction_result_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "nullifier_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "renewal_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "settlement_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "settlement_order_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "settlement_input_membership_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "settlement_output_recovery_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "note_consolidation_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "aggregate_settlement_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "withdrawal_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "multi_pair_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "multi_pair_settlement_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "external_match_authorization_proof_program_hash": "0x1c7be3225dfb33359b3ba9ffbe1542b7da27879b6d89f47b967e512463fd324",
+    "starknet_os_config_hash": "0x57ed4d5e20d617d8cc087a5882eae4f71d005172326be6439b2e1fd8b4dc57",
+    "settlement_statement_program_address": "0x04694e78dc6d9b06cdd1c96d85e26d50627833e8aeeee141c5b8f2f008660e32",
+    "settlement_note_fee_statement_program_address": "0x067cd0e7b3ffb29094f18de75ccc31d9cb2f0984f975f69193bacb9924e931a7",
+    "settlement_order_statement_program_address": "0x037239c060917cc40ee5b8e11f374c803ecdff6a6dbb1550739bf39b9a4b2bfa",
+    "settlement_input_membership_statement_program_address": "0x0223c0f590a574fe67f3f992c7c9e1069d205ace8c6044ab92ab85dfb22aa586",
+    "settlement_output_recovery_statement_program_address": "0x035de1d8665719a88601f913f904c4b83d824bdcade304d71ee716716007fce0",
+    "nullifier_statement_program_address": "0x0546a2f97ec10f8672ddb681248c2d39a8bf8fc1dfef06076bb84965147e62bd",
+    "renewal_statement_program_address": "0x0489c9c6dad6474f8adfe1cfc955e775d56657c3788d66c5c2f4e829a4cea8e2",
+    "note_consolidation_statement_program_address": "0x02052f4af6f3b64c136c54cdb67ce96e55f9e33ac176f40667d601016ddfce01",
+    "withdrawal_statement_program_address": "0x0216567f324ad22297e8c83bb2f933bd70cda6c4d20e42d69c9e6b9860067e2e",
+    "admission_statement_program_address": "0x07412da4cccb54612d01f269a55fd56bffac1d2e4052e778ef8dfb48dbf817d1",
+    "auction_result_statement_program_address": "0x05747c239e01523bc099e9efbd7b01da75c83690b675950d782601ed2b9dcddc",
+    "multi_pair_statement_program_address": "0x00bbbe9107a3f0bdcdcad3e7befbbe72eb7b310f7b12b148a3ea71ff40925bad",
+    "multi_pair_settlement_statement_program_address": "0x03f4285f3a0be4deb8ab2361c05d5ca4a117205b30c8b2f2f8d3b417eb964e32",
+    "external_match_authorization_statement_program_address": "0x06fb144a267f67c7c27ba2c822d41aaf5735a6440b4bc6b873cb0792ddc52ccb",
+    "proof_account_address": "0x2e9b1cbe47b786d736254ed276952594ef441b339303599fcb08f1cf446c4ac",
+    "settlement_account_address": "0x5c85617dd687320cddc1ec35caf73ab1a8a0184e018eaf1fa526bdc461f6a37",
+    "deposit_root_registrar_address": "0x030ca181cbe59a53fd87347250646c1fc2f40c1c08a5dd92d953fd445c486fbb",
+    "initial_note_root": "0x0",
     "initial_nullifier_root": "0x0",
     "initial_renewal_root": "0x0",
     "initial_fee_root": "0x0",
@@ -311,11 +253,10 @@
   },
   "roles": {
     "protocol_fee_recipient": "0x151310191061bb72006f20965378825b9255e4776daa499888a900fd055d55e",
-    "relay_fee_recipient": "0x3d7db19714bd6bb53a3499c89fc00d4771ca1eec3b2fb5cbef492cef5f535d2",
-    "pause_guardian_address": "0x61cb652187e949f5425db8f721f0d6bab36c40491d9806756514f8d501c96b6"
+    "pause_guardian_address": "0x33d2a600e78cccfa848f6506e58a32fb969c9da947f20484447ba591d7a6cf4"
   },
   "runtime": {
-    "batch_window_ms": 20000,
+    "batch_window_ms": 10000,
     "public_artifact_delay_min_epochs": 14,
     "public_artifact_delay_max_epochs": 36,
     "artifact_epoch_bucket_size": 8,

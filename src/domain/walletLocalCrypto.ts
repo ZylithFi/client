@@ -1,3 +1,5 @@
+export type WalletSignatureMessageVersion = 2 | 3;
+
 export type WalletSignatureVaultRecord = {
   version: 4;
   kdf: "wallet-signature-sha256-v2";
@@ -6,7 +8,7 @@ export type WalletSignatureVaultRecord = {
   chain_id: string;
   deployment_id: string;
   origin: string;
-  message_version: 2;
+  message_version: WalletSignatureMessageVersion;
   nonce: string;
   ciphertext: string;
 };
@@ -19,7 +21,7 @@ export type WalletSignatureVaultContext = {
   chainId: string;
   deploymentId: string;
   origin: string;
-  messageVersion: 2;
+  messageVersion: WalletSignatureMessageVersion;
 };
 
 export type EncryptedLocalStore = {
@@ -143,7 +145,7 @@ export function isWalletSignatureVaultRecord(
     typeof vault.chain_id === "string" &&
     typeof vault.deployment_id === "string" &&
     typeof vault.origin === "string" &&
-    vault.message_version === 2 &&
+    (vault.message_version === 2 || vault.message_version === 3) &&
     typeof vault.nonce === "string" &&
     typeof vault.ciphertext === "string"
   );
@@ -310,13 +312,14 @@ function normalizeWalletSignatureVaultContext(
     chainId: normalizeContextText(context.chainId),
     deploymentId: normalizeContextText(context.deploymentId),
     origin: context.origin.trim().toLowerCase(),
-    messageVersion: 2 as const,
+    messageVersion: context.messageVersion,
   };
   if (
     !normalized.walletAddress ||
     !normalized.chainId ||
     !normalized.deploymentId ||
     !normalized.origin ||
+    (normalized.messageVersion !== 2 && normalized.messageVersion !== 3) ||
     !signatureMaterialPresent(normalized.signature)
   ) {
     throw new Error("Wallet signature vault context is incomplete");

@@ -427,9 +427,14 @@ describe("WalletSlide", () => {
   });
 
   it("auto-unlocks signature vaults without showing a passphrase field", async () => {
-    const unlockWithWalletSignature = vi.fn().mockResolvedValue(true);
+    let ready = false;
+    const unlockWithWalletSignature = vi.fn(async () => {
+      ready = true;
+      return true;
+    });
     setWalletRuntime({
       vaultAuthMode: () => "wallet-signature",
+      isReady: () => ready,
       unlockWithWalletSignature,
     } as never);
     const onClose = vi.fn();
@@ -456,18 +461,22 @@ describe("WalletSlide", () => {
   });
 
   it("uses the selected wallet address when deciding whether to create or unlock", async () => {
-    const unlockWithWalletSignature = vi.fn().mockResolvedValue(true);
+    let ready = false;
+    const unlockWithWalletSignature = vi.fn(async () => {
+      ready = true;
+      return true;
+    });
     const createWalletWithWalletSignature = vi.fn().mockResolvedValue(true);
     setWalletRuntime({
       vaultAuthMode: (address?: string | null) =>
         address === "0xabc" ? "wallet-signature" : "none",
-      isReady: () => false,
+      isReady: () => ready,
       unlockWithWalletSignature,
       createWalletWithWalletSignature,
     } as never);
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request: vi.fn(async ({ type }: { type?: string }) =>
         type === "wallet_requestAccounts" ? [{ address: "0xabc" }] : null
       ),
@@ -486,7 +495,7 @@ describe("WalletSlide", () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: /Ready X/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Ready/i }));
 
     await waitFor(() => {
       expect(unlockWithWalletSignature).toHaveBeenCalledWith("0xabc");
@@ -547,13 +556,14 @@ describe("WalletSlide", () => {
     });
   });
 
-  it("falls back to fresh authorization after a stale vault unlock misses", async () => {
+  it("does not replace an existing private account when vault unlock misses", async () => {
     const unlockWithWalletSignature = vi
       .fn()
       .mockResolvedValueOnce(false);
     const createWalletWithWalletSignature = vi.fn().mockResolvedValue(true);
     setWalletRuntime({
       vaultAuthMode: () => "wallet-signature",
+      isReady: () => false,
       unlockWithWalletSignature,
       createWalletWithWalletSignature,
     } as never);
@@ -572,12 +582,42 @@ describe("WalletSlide", () => {
 
     await waitFor(() => {
       expect(unlockWithWalletSignature).toHaveBeenCalledTimes(1);
-      expect(createWalletWithWalletSignature).toHaveBeenCalledWith("0xabc");
-      expect(onClose).toHaveBeenCalled();
+      expect(createWalletWithWalletSignature).not.toHaveBeenCalled();
+      expect(
+        screen.getByText("Trading authorization failed. Retry in your wallet.")
+      ).toBeInTheDocument();
     });
+    expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("rescans and shows a Ready X provider injected after the panel opens", async () => {
+  it("keeps the dialog open when private authorization does not become ready", async () => {
+    setWalletRuntime({
+      vaultAuthMode: () => "none",
+      isReady: () => false,
+      createWalletWithWalletSignature: vi.fn().mockResolvedValue(false),
+    } as never);
+    const onClose = vi.fn();
+    render(
+      <WalletSlide
+        open
+        onClose={onClose}
+        runtimeStatus="ready"
+        hasVault={false}
+        starknetAddress="0xabc"
+        onStarknetConnected={vi.fn()}
+        onStarknetDisconnected={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Trading authorization failed. Retry in your wallet.")
+      ).toBeInTheDocument();
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("rescans and shows a Ready provider injected after the panel opens", async () => {
     render(
       <WalletSlide
         open
@@ -596,7 +636,7 @@ describe("WalletSlide", () => {
 
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = {
       id: "ready",
-      name: "Ready X",
+      name: "Ready",
       request: vi.fn(async () => null),
     };
 
@@ -604,7 +644,7 @@ describe("WalletSlide", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /Ready X/i })
+        screen.getByRole("button", { name: /Ready/i })
       ).toBeInTheDocument();
     });
   });

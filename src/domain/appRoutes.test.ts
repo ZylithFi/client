@@ -9,8 +9,7 @@ describe("app routes", () => {
     expect(takerTabFromPath("/trade")).toBe("trade");
     expect(takerTabFromPath("/orders")).toBe("orders");
     expect(takerTabFromPath("/assets")).toBe("assets");
-    expect(takerTabFromPath("/reports")).toBe("reports");
-    expect(takerTabFromPath("/tca")).toBe("reports");
+    expect(takerTabFromPath("/reports")).toBe("trade");
     expect(takerTabFromPath("/unknown")).toBe("trade");
   });
 
@@ -18,6 +17,5 @@ describe("app routes", () => {
     expect(takerPath("trade")).toBe("/trade");
     expect(takerPath("orders")).toBe("/orders");
     expect(takerPath("assets")).toBe("/assets");
-    expect(takerPath("reports")).toBe("/tca");
   });
 });

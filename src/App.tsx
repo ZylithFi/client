@@ -1,6 +1,4 @@
 import {
-  lazy,
-  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -8,6 +6,7 @@ import {
   useState,
 } from "react";
 import "./globals.css";
+import "./finalui/styles.css";
 import {
   type LocalOrder,
   type LocalOrderStatus,
@@ -35,39 +34,37 @@ import {
   walletRuntime,
 } from "./domain/browserWallet";
 import {
-  OrderTicket,
   type FundingPreview,
   type PairConfig,
+  type ReferencePriceSnapshot,
   type StratKind,
   type TicketShape,
   type TicketSubmitIntent,
-} from "./components/OrderTicket";
+} from "./domain/tradeIntent";
 import {
   type BatchSummary,
   type DeploymentConfig,
   type PublicSettlementTranscript,
+  apiArrivalReferenceAttestation,
   apiSubmittablePairBatch,
   lastClearingByPair,
   useBatches,
   useCoordinatorStatus,
-  useDeployment,
+  useDeploymentState,
   usePublicProofJobStatuses,
   usePublicSettlementTranscripts,
 } from "./domain/auctionEpoch";
 import { hasBatchSubmissionSafetyWindow } from "./domain/batchSubmission";
-import { PairHeader, PairList, ReportsStrip } from "./components/MarketPanels";
-import { RightColumn } from "./components/RightColumn";
 import { takerPath, takerTabFromPath, type AppTab } from "./domain/appRoutes";
-import {
-  TopNav,
-} from "./components/TopNav";
+import { AppHeader } from "./finalui/components/AppHeader";
+import { TradePage } from "./finalui/pages/TradePage";
+import { AssetsPage } from "./finalui/pages/AssetsPage";
+import { OrdersPage } from "./finalui/pages/OrdersPage";
 import {
   DepositSlide,
   WalletSlide,
   WithdrawSlide,
 } from "./components/WalletSlides";
-import { AssetsScreen } from "./screens/AssetsScreen";
-import { OrdersScreen } from "./screens/OrdersScreen";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import { sessionGet, sessionSet } from "./domain/safeSessionStorage";
 import {
@@ -90,12 +87,6 @@ import {
   storeSelfHostedRelayUrl,
   submitSelfHostedRenewalPackage,
 } from "./domain/selfHostedRenewalRelay";
-
-const ReportsScreen = lazy(() =>
-  import("./screens/ReportsScreen").then((module) => ({
-    default: module.ReportsScreen,
-  }))
-);
 
 function genRef(): string {
   return `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -160,7 +151,7 @@ const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 
 type ArrivalReferenceSnapshot = {
   price?: string;
-  source?: "last_clearing";
+  source?: "binance_midpoint_confirmed";
   observedAt?: number;
 };
 
@@ -189,26 +180,9 @@ type PrivateSettlementReportForApp = {
   order_execution_reports?: PrivateExecutionReportForApp[];
 };
 
-function lastClearingReference(
-  pair: PairConfig,
-  lastClearingPrice: {
-    batchId: string;
-    epochId: number;
-    clearingPrice: string;
-    priceBaseScale?: string;
-  } | null
-): ArrivalReferenceSnapshot {
-  if (!lastClearingPrice) return {};
-  return {
-    price: formatClearingPrice(lastClearingPrice, pair),
-    source: "last_clearing",
-    observedAt: Date.now(),
-  };
-}
-
 function displayBatchForPair(
   current: BatchSummary | undefined,
-  candidate: BatchSummary,
+  candidate: BatchSummary
 ) {
   if (!current) return candidate;
   const currentOpen = current.status === "Open";
@@ -223,14 +197,14 @@ function displayBatchForPair(
 async function resolveTicketSubmissionBatch(
   pair: PairConfig,
   displayedBatch: BatchSummary | null | undefined,
-  batchWindowMs?: number,
+  batchWindowMs?: number
 ): Promise<BatchSummary> {
   if (
     displayedBatch?.status === "Open" &&
     hasBatchSubmissionSafetyWindow(
       displayedBatch.close_time_unix_ms,
       Date.now(),
-      batchWindowMs,
+      batchWindowMs
     )
   ) {
     return displayedBatch;
@@ -244,10 +218,10 @@ async function resolveTicketSubmissionBatch(
   return submittable;
 }
 
-// ─── App ──────────────────────────────────────────────────────────────────────
+// app
 
 export default function App() {
-  const deployment = useDeployment();
+  const { deployment, error: deploymentError } = useDeploymentState();
   const coordinatorStatus = useCoordinatorStatus();
   const { batches, online } = useBatches();
   const recentSettlementTranscripts = usePublicSettlementTranscripts(batches);
@@ -314,21 +288,75 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // Trade state
+  // trade state
   const [activePairId, setActivePairId] = useState("STRK/USDC");
   const activePair =
     pairs.find((p) => p.pair_id === activePairId) ?? pairs[0] ?? null;
   const activeBatch = activePair
     ? batchByPair[activePair.pair_id] ?? null
     : null;
+  const [referenceByPair, setReferenceByPair] = useState<
+    Record<string, ReferencePriceSnapshot>
+  >({});
+  useEffect(() => {
+    if (!activePair || !deployment?.contracts?.auction_verifier) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    async function refreshReference() {
+      if (!activePair || !deployment?.contracts?.auction_verifier) return;
+      try {
+        const attestation = await apiArrivalReferenceAttestation(
+          activePair,
+          deployment.contracts.auction_verifier
+        );
+        if (cancelled) return;
+        setReferenceByPair((previous) => ({
+          ...previous,
+          [activePair.pair_id]: {
+            displayPrice: formatClearingPrice(
+              {
+                batchId: activeBatch?.batch_id ?? "",
+                epochId: activeBatch?.epoch_id ?? 0,
+                clearingPrice: attestation.midpointPrice,
+                priceBaseScale: attestation.priceBaseScale,
+              },
+              activePair
+            ),
+            midpointPrice: attestation.midpointPrice,
+            priceBaseScale: attestation.priceBaseScale,
+            observedAtUnixMs: attestation.observedAtUnixMs,
+          },
+        }));
+      } catch {
+        if (!cancelled) {
+          setReferenceByPair((previous) => {
+            const next = { ...previous };
+            delete next[activePair.pair_id];
+            return next;
+          });
+        }
+      }
+    }
+    function schedule(nextMs: number) {
+      timer = window.setTimeout(() => {
+        void refreshReference().finally(() => {
+          if (!cancelled) schedule(5_000);
+        });
+      }, nextMs);
+    }
+    void refreshReference().finally(() => {
+      if (!cancelled) schedule(5_000);
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activePair, activeBatch?.batch_id, activeBatch?.epoch_id, deployment?.contracts?.auction_verifier]);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [externalCompletionBusy, setExternalCompletionBusy] = useState<string | null>(
-    null
-  );
 
-  // UI state
+  // ui state
   const [openSlide, setOpenSlide] = useState<
     "wallet" | "deposit" | "withdraw" | null
   >(null);
@@ -384,7 +412,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Orders
+  // orders
   const [orderOwnerKey, setOrderOwnerKey] = useState<string | null>(() =>
     walletOrderOwnerKey(null)
   );
@@ -545,17 +573,15 @@ export default function App() {
               ? reportFundingCommitments
               : order.fundingNoteCommitments,
         };
-        const residualAmount = BigInt(
-          matched.execution.residual_amount || "0"
-        );
+        const residualAmount = BigInt(matched.execution.residual_amount || "0");
         const residualNoteCommitment = normalizeFeltForComparison(
           matched.execution.residual_note_commitment
         );
-        const previousExternal = order.externalCompletion;
+        const previousExternal = order.externalMatch;
         const sameResidual =
           Boolean(previousExternal) &&
           previousExternal?.residualNoteCommitment === residualNoteCommitment;
-        const externalCompletion =
+        const externalMatch =
           order.executionPreference === "PrivateThenExternal" &&
           residualAmount > 0n &&
           residualNoteCommitment
@@ -570,22 +596,9 @@ export default function App() {
                   order.fundingAsset ||
                   "",
                 residualAmount: residualAmount.toString(),
-                conversionTransactionHash: sameResidual
-                  ? previousExternal?.conversionTransactionHash
+                lastError: sameResidual
+                  ? previousExternal?.lastError
                   : undefined,
-                inputOpenNoteId: sameResidual
-                  ? previousExternal?.inputOpenNoteId
-                  : undefined,
-                transactionHash: sameResidual
-                  ? previousExternal?.transactionHash
-                  : undefined,
-                outputOpenNoteId: sameResidual
-                  ? previousExternal?.outputOpenNoteId
-                  : undefined,
-                quoteCommitment: sameResidual
-                  ? previousExternal?.quoteCommitment
-                  : undefined,
-                lastError: sameResidual ? previousExternal?.lastError : undefined,
               }
             : undefined;
         if (filledAtomic <= 0n) {
@@ -604,8 +617,8 @@ export default function App() {
           if (
             order.status === "no_fill" &&
             order.clearingPrice === clearingPrice &&
-            JSON.stringify(order.externalCompletion ?? null) ===
-              JSON.stringify(externalCompletion ?? null)
+            JSON.stringify(order.externalMatch ?? null) ===
+              JSON.stringify(externalMatch ?? null)
           )
             return order;
           changed = true;
@@ -613,7 +626,7 @@ export default function App() {
             ...order,
             status: "no_fill" as LocalOrderStatus,
             clearingPrice,
-            externalCompletion,
+            externalMatch,
           };
         }
         const nextStatus: LocalOrderStatus =
@@ -638,8 +651,8 @@ export default function App() {
           order.status === nextStatus &&
           order.clearingPrice === clearingPrice &&
           order.filledAmount === filledAmount &&
-          JSON.stringify(order.externalCompletion ?? null) ===
-            JSON.stringify(externalCompletion ?? null)
+          JSON.stringify(order.externalMatch ?? null) ===
+            JSON.stringify(externalMatch ?? null)
         ) {
           return order;
         }
@@ -649,7 +662,7 @@ export default function App() {
           status: nextStatus,
           clearingPrice,
           filledAmount,
-          externalCompletion,
+          externalMatch,
         };
       });
       successfulOrderKeys.forEach((syncKey) =>
@@ -852,7 +865,7 @@ export default function App() {
     walletReady,
   ]);
 
-  // Balance polling
+  // balance polling
   useEffect(() => {
     if (!walletReady || !ordersHydratedForOwner) return;
     let cancelled = false;
@@ -917,7 +930,7 @@ export default function App() {
     : [];
   const claimDelaySeconds = deployment?.proof?.output_claim_delay_seconds ?? 0;
 
-  // Status updates from batch state changes
+  // status updates from batch state changes
   useEffect(() => {
     if (!walletReady || !ordersHydratedForOwner) return;
     const updated = reconcileOrderLifecycle({
@@ -1154,7 +1167,7 @@ export default function App() {
     saveAndSet,
   ]);
 
-  // Submit order
+  // submit order
   function pairForIntent(intent: TicketSubmitIntent) {
     if (intent.pairId)
       return pairs.find((pair) => pair.pair_id === intent.pairId) ?? null;
@@ -1178,8 +1191,12 @@ export default function App() {
     try {
       const retryPrivateOnly =
         intent.shape === "limit" &&
-        intent.executionPreference === "PrivateOnly" &&
+        (intent.executionPreference === "PrivateOnly" ||
+          !submitPair.external_match_enabled) &&
         intent.keepTryingPrivate === true;
+      const executionPreference = submitPair.external_match_enabled
+        ? intent.executionPreference
+        : "PrivateOnly";
       if (
         (intent.shape === "strategy" || retryPrivateOnly) &&
         !coordinatorStatus?.batch_window_ms
@@ -1190,20 +1207,17 @@ export default function App() {
       const submissionBatch = await resolveTicketSubmissionBatch(
         submitPair,
         provisionalBatch,
-        coordinatorStatus?.batch_window_ms,
+        coordinatorStatus?.batch_window_ms
       );
 
       const wm = retryPrivateOnly
         ? "Repeat"
         : wireMode(intent.shape, intent.stratKind);
       const atomicAmount = toAtomicStr(intent.amount, submitPair.base_asset_id);
-      const atomicPrice =
-        toPriceAtomicStr(
-          intent.shape === "limit"
-            ? intent.limitPrice
-            : intent.priceLimit || "0",
-          submitPair.quote_asset_id
-        );
+      const atomicPrice = toPriceAtomicStr(
+        intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0",
+        submitPair.quote_asset_id
+      );
       const atomicMinFill = toAtomicStr(
         intent.minFill || "0",
         submitPair.base_asset_id
@@ -1232,7 +1246,9 @@ export default function App() {
         limitPrice: atomicPrice,
         minFill: atomicMinFill,
         fillOrKill: intent.fillOrKill,
-        batchId: submissionBatch.batch_id,
+        // resolve the accepting batch immediately before private ingress. the
+        // preflight batch can enter its safety window while the order is built.
+        batchId: undefined,
         batchWindowMs: coordinatorStatus?.batch_window_ms,
         priceBaseScale,
         durationBatches:
@@ -1245,7 +1261,7 @@ export default function App() {
               )
             : intent.shape === "strategy" &&
               intent.durationHours &&
-          coordinatorStatus?.batch_window_ms
+              coordinatorStatus?.batch_window_ms
             ? Math.ceil(
                 (Number(intent.durationHours) * 3_600_000) /
                   coordinatorStatus.batch_window_ms
@@ -1267,17 +1283,16 @@ export default function App() {
             : undefined,
         randomizedSlicing: retryPrivateOnly ? false : intent.jitter > 0,
         randomizedSlicingBps: retryPrivateOnly ? 0 : intent.jitter * 100,
-        executionPreference:
-          intent.executionPreference ?? "PrivateThenExternal",
+        executionPreference: executionPreference ?? "PrivateOnly",
         retryUnfilled: retryPrivateOnly,
         offlineDelegation: false,
         relayMode: orderRelayMode,
       };
 
-      const arrivalReference = lastClearingReference(
+      const arrivalReferencePromise = apiArrivalReferenceAttestation(
         submitPair,
-        lastClearingPrices[submitPair.pair_id] ?? null
-      );
+        deployment?.contracts?.auction_verifier
+      ).catch(() => null);
       const result = await w.submitPrivateOrder(draft);
       if (result.offline_package?.relay_mode === "ZylithRelay") {
         try {
@@ -1337,6 +1352,22 @@ export default function App() {
       }
 
       const submittedAt = Date.now();
+      const arrivalAttestation = await arrivalReferencePromise;
+      const arrivalReference: ArrivalReferenceSnapshot = arrivalAttestation
+        ? {
+            price: formatClearingPrice(
+              {
+                batchId: submissionBatch.batch_id,
+                epochId: submissionBatch.epoch_id,
+                clearingPrice: arrivalAttestation.midpointPrice,
+                priceBaseScale: arrivalAttestation.priceBaseScale,
+              },
+              submitPair
+            ),
+            source: "binance_midpoint_confirmed",
+            observedAt: arrivalAttestation.observedAtUnixMs,
+          }
+        : {};
       const acceptedBatchId =
         result.batch_id ??
         result.first_child_batch_id ??
@@ -1376,8 +1407,7 @@ export default function App() {
             : "",
         minFill: intent.minFill,
         fillOrKill: intent.fillOrKill,
-        executionPreference:
-          intent.executionPreference ?? "PrivateThenExternal",
+        executionPreference: executionPreference ?? "PrivateOnly",
         retryUnfilled: retryPrivateOnly,
         status:
           result.first_child_order_commitment || result.order_commitment
@@ -1400,40 +1430,6 @@ export default function App() {
     }
   }
 
-  async function handleExternalCompletion(order: LocalOrder) {
-    const w = walletRuntime();
-    if (!w || !w.isReady()) {
-      setSubmitError("Connect a Starknet wallet before completing the residual.");
-      return;
-    }
-    if (externalCompletionBusy) return;
-    setExternalCompletionBusy(order.orderCommitment);
-    setSubmitError(null);
-    try {
-      await w.submitExternalCompletion({
-        orderCommitment: order.orderCommitment,
-      });
-      setBalanceTick((value) => value + 1);
-      await w.refreshPrivateState().catch(() => undefined);
-      const refreshedOrders = await w
-        .loadLocalOrders()
-        .catch(() => [] as LocalOrder[]);
-      const activeDeploymentScope = deploymentOrderScope(deployment);
-      const normalizedOrders = refreshedOrders
-        .map(normalizeLocalOrder)
-        .filter(
-          (entry) => entry.deployment_scope === activeDeploymentScope
-        );
-      ordersRef.current = normalizedOrders;
-      setOrders(normalizedOrders);
-      setBalanceTick((value) => value + 1);
-    } catch (error) {
-      setSubmitError(userFacingErrorMessage(error));
-    } finally {
-      setExternalCompletionBusy(null);
-    }
-  }
-
   function handleFundingPreview(
     intent: TicketSubmitIntent
   ): FundingPreview | null {
@@ -1449,11 +1445,10 @@ export default function App() {
       assetScale(previewPair.base_asset_id).toString();
     const base = previewPair.base_asset_id;
     const quote = previewPair.quote_asset_id;
-    const atomicPrice =
-      toPriceAtomicStr(
-        intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0",
-        quote
-      );
+    const atomicPrice = toPriceAtomicStr(
+      intent.shape === "limit" ? intent.limitPrice : intent.priceLimit || "0",
+      quote
+    );
     let atomicAmount = toAtomicStr(intent.amount, base);
     let mode = wm;
 
@@ -1487,10 +1482,13 @@ export default function App() {
       fillOrKill: intent.fillOrKill,
       batchId: previewBatch.batch_id,
       priceBaseScale,
+      executionPreference: previewPair.external_match_enabled
+        ? intent.executionPreference
+        : "PrivateOnly",
     });
   }
 
-  // Cancel order
+  // cancel order
   async function cleanupZylithRenewalStrategyPackage(strategyId: string) {
     const renewalPackage = strategies.find(
       (strategy) => strategy.id === strategyId
@@ -1676,160 +1674,73 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TopNav
-        tab={tab}
-        setTab={changeTab}
-        onBrandClick={() => navigatePath("/trade")}
-        activeOrderCount={activeTakerOrders.length}
-        claimableOutputCount={claimableOutputCount}
-        walletReady={renderWalletReady}
+      <AppHeader
+        activePage={tab}
         starknetAddress={starknetAddress}
-        onOpenWallet={() => setOpenSlide("wallet")}
-        onDeposit={() => setOpenSlide("deposit")}
-        onWithdraw={() => setOpenSlide("withdraw")}
-        onLock={() => {
-          walletRuntime()?.lock();
-        }}
-        onDisconnectWallet={() => setStarknetAddress(null)}
+        walletReady={renderWalletReady}
+        onNavigate={changeTab}
+        onWallet={() => setOpenSlide("wallet")}
       />
 
-      <main className="screen">
-        {tab === "trade" && (
-          <div className="trade-grid">
-            <PairList
-              pairs={pairs}
-              activePairId={activePair?.pair_id ?? activePairId}
-              onSelect={setActivePairId}
-              batchByPair={renderBatchByPair}
-              lastClearingPrices={renderLastClearingPrices}
-            />
-
-            <div className="trade-center">
-              <PairHeader
-                pair={activePair}
-                lastClearing={
-                  activePair
-                    ? renderLastClearingPrices[activePair.pair_id] ?? null
-                    : null
-                }
-              />
-              <OrderTicket
-                pair={activePair}
-                balances={renderBalances}
-                batchWindowMs={coordinatorStatus?.batch_window_ms ?? 0}
-                walletReady={renderWalletReady}
-                hasPrivateBalance={renderBalances.some(
-                  (balance) =>
-                    BigInt(balance.available) > 0n ||
-                    BigInt(balance.locked) > 0n
-                )}
-                onOpenWallet={() => setOpenSlide("wallet")}
-                onDeposit={() => setOpenSlide("deposit")}
-                submitting={submitting}
-                submitError={submitError}
-                onPreviewFunding={handleFundingPreview}
-                onSubmit={handleSubmit}
-              />
-              <ReportsStrip
-                orders={renderTakerOrders}
-                onOpenReports={() => changeTab("reports")}
-              />
-            </div>
-
-            <RightColumn
-              activeBatch={renderActiveBatch}
-              activePairId={activePairId}
-              batchWindowMs={coordinatorStatus?.batch_window_ms ?? null}
-              settlementTranscripts={renderSettlementTranscripts}
-              online={renderOnline}
-              allAssets={allAssets}
-              pairs={pairs}
-              balances={renderBalances}
-              pendingDeposits={renderPendingDeposits}
-              withdrawableNotes={renderWithdrawableNotes}
-              claimDelaySeconds={claimDelaySeconds}
-              walletReady={renderWalletReady}
-              starknetAddress={starknetAddress}
-              activeOrders={activeTakerOrders}
-              setOpenSlide={setOpenSlide}
-              allOrders={renderTakerOrders}
-              onCancelOrder={handleCancelOrder}
-              onClaimNote={(note) => {
-                setSlideAsset(note.asset);
-                setClaimNoteCommitment(note.note_commitment);
-                setOpenSlide("withdraw");
-              }}
-            />
+      <div>
+        {deploymentError && (
+          <div className="slide-inline-notice" role="alert">
+            {deploymentError}. Trading is unavailable until the deployment
+            manifest is corrected.
           </div>
+        )}
+        {tab === "trade" && (
+          <TradePage
+            pairs={pairs}
+            pair={activePair}
+            referencePrice={activePair ? referenceByPair[activePair.pair_id] ?? null : null}
+            balances={renderBalances}
+            walletReady={renderWalletReady}
+            hasPrivateBalance={renderBalances.some(
+              balance => BigInt(balance.available) > 0n || BigInt(balance.locked) > 0n,
+            )}
+            submitting={submitting}
+            submitError={submitError}
+            orders={renderTakerOrders}
+            online={Boolean(renderOnline)}
+            onSelectPair={setActivePairId}
+            onOpenWallet={() => setOpenSlide("wallet")}
+            onDeposit={() => setOpenSlide("deposit")}
+            onSubmit={handleSubmit}
+            onViewOrders={() => changeTab("orders")}
+          />
         )}
 
         {tab === "orders" && (
-          <OrdersScreen
+          <OrdersPage
             orders={renderTakerOrders}
             onCancel={(order) => {
               void handleCancelOrder(order);
             }}
-            onCompleteExternal={(order) => {
-              void handleExternalCompletion(order);
-            }}
-            externalCompletionBusy={externalCompletionBusy}
             walletReady={renderWalletReady}
-          />
-        )}
-
-        {tab === "assets" && (
-          <AssetsScreen
-            allAssets={allAssets}
-            depositableAssets={depositableAssets}
-            pairs={pairs}
-            balances={renderBalances}
-            pendingDeposits={renderPendingDeposits}
-            withdrawableNotes={renderWithdrawableNotes}
-            settlementTranscripts={renderSettlementTranscripts}
-            claimDelaySeconds={claimDelaySeconds}
-            orders={renderOrders}
-            walletReady={renderWalletReady}
-            noteConsolidationAvailable={noteConsolidationAvailable}
-            starknetAddress={starknetAddress}
-            onDeposit={(asset) => {
-              if (asset) setSlideAsset(asset);
-              setOpenSlide("deposit");
-            }}
-            onWithdraw={(asset, noteCommitment) => {
-              if (asset) setSlideAsset(asset);
-              setClaimNoteCommitment(noteCommitment ?? null);
-              setOpenSlide("withdraw");
-            }}
-            onClaimNote={(note) => {
-              setSlideAsset(note.asset);
-              setClaimNoteCommitment(note.note_commitment);
-              setOpenSlide("withdraw");
-            }}
-            onConsolidateNotes={handleConsolidateNotes}
             onConnectWallet={() => setOpenSlide("wallet")}
           />
         )}
 
-        {tab === "reports" && (
-          <Suspense
-            fallback={
-              <div className="empty-zone">
-                <div className="empty-mark">-</div>
-                <div className="empty-body">Loading reports</div>
-              </div>
-            }
-          >
-            <ReportsScreen
-              orders={renderTakerOrders}
-              strategies={[]}
-              walletReady={renderWalletReady}
-              activeEpochId={renderActiveBatch?.epoch_id ?? null}
-              batchWindowMs={coordinatorStatus?.batch_window_ms ?? null}
-            />
-          </Suspense>
+        {tab === "assets" && (
+          <AssetsPage
+            allAssets={allAssets}
+            balances={renderBalances}
+            pendingDeposits={renderPendingDeposits}
+            walletReady={renderWalletReady}
+            onDeposit={(asset) => {
+              if (asset) setSlideAsset(asset);
+              setOpenSlide("deposit");
+            }}
+            onWithdraw={(asset) => {
+              if (asset) setSlideAsset(asset);
+              setOpenSlide("withdraw");
+            }}
+            onConnectWallet={() => setOpenSlide("wallet")}
+          />
         )}
 
-      </main>
+      </div>
 
       <WalletSlide
         open={openSlide === "wallet"}

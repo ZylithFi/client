@@ -212,7 +212,7 @@ export const DEFAULT_ASSET_DECIMALS: Record<string, number> = {
   STRK: 18,
   ETH: 18,
   USDC: 6,
-  strkBTC: 8,
+  strkBTC: 18,
   WBTC: 8,
   USDT: 6,
 };

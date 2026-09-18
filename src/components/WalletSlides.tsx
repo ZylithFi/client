@@ -56,7 +56,7 @@ async function ensureTradingAuthorized(
     mode === "wallet-signature"
       ? await runtime.unlockWithWalletSignature(starknetAddress)
       : false;
-  if (!ok) {
+  if (!ok && mode === "none") {
     ok = await runtime.createWalletWithWalletSignature(starknetAddress);
   }
   if (!ok || !runtime.isReady()) {
@@ -259,13 +259,14 @@ export function WalletSlide({
     setError("");
     let completed = false;
     try {
+      let authorized = false;
       if (addressHasVault) {
-        const ok = await w.unlockWithWalletSignature(address);
-        if (!ok) {
-          await w.createWalletWithWalletSignature(address);
-        }
+        authorized = await w.unlockWithWalletSignature(address);
       } else {
-        await w.createWalletWithWalletSignature(address);
+        authorized = await w.createWalletWithWalletSignature(address);
+      }
+      if (!authorized || !w.isReady()) {
+        throw new Error("Trading authorization failed. Retry in your wallet.");
       }
       completed = true;
       onClose();
