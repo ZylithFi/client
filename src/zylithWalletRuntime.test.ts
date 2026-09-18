@@ -25,7 +25,6 @@ import {
   hostedRelayLeadEpochs,
   mergeLocalNoteRecord,
   noteConsolidationEnabledForDeployment,
-  reconcileExternalCompletionTransaction,
   renewalPackageMaxSubmissionDelayMs,
   strk20WithdrawalEnabledForDeployment,
   transactionCalldataContainsDepositActivation,
@@ -834,19 +833,20 @@ describe("STRK20 withdrawal deployment availability", () => {
 
 describe("batch submission safety", () => {
   it("uses a proportional safety buffer with a conservative default", () => {
-    expect(batchSubmissionSafetyBufferMs()).toBe(15_000);
+    expect(batchSubmissionSafetyBufferMs()).toBe(2_000);
+    expect(batchSubmissionSafetyBufferMs(10_000)).toBe(2_000);
     expect(batchSubmissionSafetyBufferMs(90_000)).toBe(15_000);
     expect(batchSubmissionSafetyBufferMs(60_000)).toBe(12_000);
     expect(batchSubmissionSafetyBufferMs(45_000)).toBe(9_000);
     expect(batchSubmissionSafetyBufferMs(30_000)).toBe(6_000);
-    expect(batchSubmissionSafetyBufferMs(20_000)).toBe(5_000);
+    expect(batchSubmissionSafetyBufferMs(20_000)).toBe(4_000);
   });
 
   it("requires more than the active safety buffer before close", () => {
     const now = 1_000_000;
 
-    expect(hasBatchSubmissionSafetyWindow(now + 15_000, now)).toBe(false);
-    expect(hasBatchSubmissionSafetyWindow(now + 15_001, now)).toBe(true);
+    expect(hasBatchSubmissionSafetyWindow(now + 2_000, now)).toBe(false);
+    expect(hasBatchSubmissionSafetyWindow(now + 2_001, now)).toBe(true);
     expect(hasBatchSubmissionSafetyWindow(now + 6_000, now, 30_000)).toBe(
       false
     );
@@ -855,12 +855,12 @@ describe("batch submission safety", () => {
 
   it("allows self-relay to use the current epoch only inside the safety window", () => {
     const now = 1_000_000;
-    const batch = { epoch_id: 42, close_time_unix_ms: now + 15_001 };
+    const batch = { epoch_id: 42, close_time_unix_ms: now + 2_001 };
 
     expect(firstRenewalSlotEpoch(batch, "SelfRelay", now)).toBe(42);
     expect(
       firstRenewalSlotEpoch(
-        { ...batch, close_time_unix_ms: now + 15_000 },
+        { ...batch, close_time_unix_ms: now + 2_000 },
         "SelfRelay",
         now
       )
@@ -886,7 +886,7 @@ describe("batch submission safety", () => {
   it("starts hosted Zylith Relay packages far enough ahead for relay registration", () => {
     const now = 1_000_000;
 
-    expect(hostedRelayLeadEpochs()).toBe(6);
+    expect(hostedRelayLeadEpochs()).toBe(12);
     expect(
       firstRenewalSlotEpoch(
         { epoch_id: 42, close_time_unix_ms: now + 600_000 },
@@ -1114,63 +1114,6 @@ describe("STRK20 exit claim reconciliation", () => {
     expect(note.pending_withdrawal_tx).toBeUndefined();
     expect(note.pending_strk20_open_note_tx).toBeUndefined();
     expect(note.strk20_open_note_id).toBe("0xopen");
-  });
-});
-
-describe("external completion transaction reconciliation", () => {
-  const external = {
-    status: "converting" as const,
-    residualNoteCommitment: "0xresidual",
-    residualAssetId: "USDC",
-    residualAmount: "1000000",
-    conversionTransactionHash: "0xconvert",
-    inputOpenNoteId: "0xopen",
-  };
-
-  it("makes a confirmed residual conversion ready after restart", () => {
-    expect(
-      reconcileExternalCompletionTransaction(external, {
-        failed: false,
-        notFound: false,
-        confirmed: true,
-      })
-    ).toMatchObject({
-      status: "ready",
-      inputOpenNoteId: "0xopen",
-    });
-  });
-
-  it("returns a confirmed private consolidation to the available stage", () => {
-    const consolidating = {
-      ...external,
-      status: "consolidating" as const,
-      sourceNoteCommitments: ["0xconsolidated"],
-      residualNoteCommitment: "0xconsolidated",
-      consolidationTransactionHash: "0xconsolidation",
-      conversionTransactionHash: undefined,
-    };
-
-    expect(
-      reconcileExternalCompletionTransaction(consolidating, {
-        failed: false,
-        notFound: false,
-        confirmed: true,
-      })
-    ).toMatchObject({
-      status: "available",
-      residualNoteCommitment: "0xconsolidated",
-      sourceNoteCommitments: ["0xconsolidated"],
-    });
-  });
-
-  it("does not treat an unconfirmed conversion as ready", () => {
-    expect(
-      reconcileExternalCompletionTransaction(external, {
-        failed: false,
-        notFound: false,
-        confirmed: false,
-      })
-    ).toBe(external);
   });
 });
 

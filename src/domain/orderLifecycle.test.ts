@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  normalizeLocalOrder,
   reconcileOrderLifecycle,
   type LocalOrder,
 } from "./orderLifecycle";
@@ -16,7 +17,8 @@ function order(overrides: Partial<LocalOrder> = {}): LocalOrder {
     ordRef: overrides.ordRef ?? "ORD-1001",
     orderCommitment: overrides.orderCommitment ?? "0xorder",
     cancellationSecret: overrides.cancellationSecret ?? "0xcancel",
-    expectedOutputMetadataCommitment: overrides.expectedOutputMetadataCommitment,
+    expectedOutputMetadataCommitment:
+      overrides.expectedOutputMetadataCommitment,
     strategyId: overrides.strategyId,
     batchId: overrides.batchId ?? "batch-1",
     epochId: overrides.epochId ?? 10,
@@ -29,6 +31,7 @@ function order(overrides: Partial<LocalOrder> = {}): LocalOrder {
     limitPrice: overrides.limitPrice ?? "0.30",
     minFill: overrides.minFill ?? "",
     fillOrKill: overrides.fillOrKill ?? false,
+    executionPreference: overrides.executionPreference,
     status: overrides.status ?? "settling",
     submittedAt: overrides.submittedAt ?? 1_000,
     filledAmount: overrides.filledAmount,
@@ -44,8 +47,10 @@ const deps = {
   toAtomicStr: (human: string, assetId: string) => {
     const decimals = assetId === "USDC" ? 6 : 18;
     const [whole, frac = ""] = human.split(".");
-    return (BigInt(whole || "0") * 10n ** BigInt(decimals) +
-      BigInt(frac.padEnd(decimals, "0").slice(0, decimals) || "0")).toString();
+    return (
+      BigInt(whole || "0") * 10n ** BigInt(decimals) +
+      BigInt(frac.padEnd(decimals, "0").slice(0, decimals) || "0")
+    ).toString();
   },
   fromAtomicStr: (atomic: string, assetId: string) => {
     const decimals = assetId === "USDC" ? 6 : 18;
@@ -55,17 +60,55 @@ const deps = {
     const frac = value % scale;
     return frac === 0n
       ? whole.toString()
-      : `${whole}.${frac.toString().padStart(decimals, "0").replace(/0+$/, "")}`;
+      : `${whole}.${frac
+          .toString()
+          .padStart(decimals, "0")
+          .replace(/0+$/, "")}`;
   },
   assetScale: (assetId: string) => 10n ** BigInt(assetId === "USDC" ? 6 : 18),
 };
 
 describe("order lifecycle reconciliation", () => {
+  it("drops stale clearing-price benchmarks during local order normalization", () => {
+    const stale = {
+      ...order(),
+      arrivalReferencePrice: "99",
+      arrivalReferenceSource: "last_clearing",
+      arrivalReferenceAt: 1_000,
+    } as unknown as LocalOrder;
+
+    const normalized = normalizeLocalOrder(stale);
+
+    expect(normalized.arrivalReferencePrice).toBeUndefined();
+    expect(normalized.arrivalReferenceSource).toBeUndefined();
+    expect(normalized.arrivalReferenceAt).toBeUndefined();
+  });
+
+  it("fails closed to private-only when a persisted order has no current execution preference", () => {
+    const stale = {
+      ...order(),
+      executionPreference: "LegacyExternal",
+    } as unknown as LocalOrder;
+
+    expect(normalizeLocalOrder(stale).executionPreference).toBe("PrivateOnly");
+    expect(
+      normalizeLocalOrder(
+        order({ executionPreference: "PrivateThenExternal" })
+      ).executionPreference
+    ).toBe("PrivateThenExternal");
+  });
+
   it("attributes fills by expected output metadata, not by batch alone", () => {
     const updated = reconcileOrderLifecycle({
       orders: [
-        order({ ordRef: "ORD-match", expectedOutputMetadataCommitment: "0xmatch" }),
-        order({ ordRef: "ORD-miss", expectedOutputMetadataCommitment: "0xmiss" }),
+        order({
+          ordRef: "ORD-match",
+          expectedOutputMetadataCommitment: "0xmatch",
+        }),
+        order({
+          ordRef: "ORD-miss",
+          expectedOutputMetadataCommitment: "0xmiss",
+        }),
       ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
@@ -76,27 +119,35 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "1000000000000000000",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "10000000000000000000",
-        metadata_commitment: "0xmatch",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "10000000000000000000",
+          metadata_commitment: "0xmatch",
+        },
+      ],
       ...deps,
     });
 
-    expect(updated.find(o => o.ordRef === "ORD-match")?.status).toBe("filled");
-    expect(updated.find(o => o.ordRef === "ORD-miss")?.status).toBe("settling");
+    expect(updated.find((o) => o.ordRef === "ORD-match")?.status).toBe(
+      "filled"
+    );
+    expect(updated.find((o) => o.ordRef === "ORD-miss")?.status).toBe(
+      "settling"
+    );
   });
 
   it("recovers a no_fill order when the exact output metadata arrives later", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-late",
-        status: "no_fill",
-        expectedOutputMetadataCommitment: "0xlate",
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-late",
+          status: "no_fill",
+          expectedOutputMetadataCommitment: "0xlate",
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -106,13 +157,15 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "1000000000000000000",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "10000000000000000000",
-        metadata_commitment: "0xlate",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "10000000000000000000",
+          metadata_commitment: "0xlate",
+        },
+      ],
       ...deps,
     });
 
@@ -121,11 +174,13 @@ describe("order lifecycle reconciliation", () => {
 
   it("matches output metadata commitments after felt normalization", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-normalized",
-        status: "no_fill",
-        expectedOutputMetadataCommitment: "0x000abc",
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-normalized",
+          status: "no_fill",
+          expectedOutputMetadataCommitment: "0x000abc",
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -135,13 +190,15 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "1000000000000000000",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "10000000000000000000",
-        metadata_commitment: "0xabc",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "10000000000000000000",
+          metadata_commitment: "0xabc",
+        },
+      ],
       ...deps,
     });
 
@@ -172,11 +229,13 @@ describe("order lifecycle reconciliation", () => {
 
   it("uses the filled output asset when residual and fill notes share metadata", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-buy",
-        side: "Buy",
-        expectedOutputMetadataCommitment: "0xmeta",
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-buy",
+          side: "Buy",
+          expectedOutputMetadataCommitment: "0xmeta",
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -211,13 +270,15 @@ describe("order lifecycle reconciliation", () => {
 
   it("corrects a previously terminal fill when asset-filtered output metadata is available", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-buy",
-        side: "Buy",
-        status: "partial",
-        filledAmount: "0.000001",
-        expectedOutputMetadataCommitment: "0xmeta",
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-buy",
+          side: "Buy",
+          status: "partial",
+          filledAmount: "0.000001",
+          expectedOutputMetadataCommitment: "0xmeta",
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -252,11 +313,13 @@ describe("order lifecycle reconciliation", () => {
 
   it("does not mark taker-fee net output as partial when the gross order fully filled", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-buy-fee",
-        side: "Buy",
-        expectedOutputMetadataCommitment: "0xfee",
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-buy-fee",
+          side: "Buy",
+          expectedOutputMetadataCommitment: "0xfee",
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -266,13 +329,15 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "1000000000000000000",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "9996000000000000000",
-        metadata_commitment: "0xfee",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "9996000000000000000",
+          metadata_commitment: "0xfee",
+        },
+      ],
       ...deps,
     });
 
@@ -282,11 +347,13 @@ describe("order lifecycle reconciliation", () => {
 
   it("does not crash on malformed matched-output arithmetic fields", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-malformed-output",
-        side: "Buy",
-        expectedOutputMetadataCommitment: "0xbad-output",
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-malformed-output",
+          side: "Buy",
+          expectedOutputMetadataCommitment: "0xbad-output",
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -296,13 +363,15 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "0",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "not-a-number",
-        metadata_commitment: "0xbad-output",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "not-a-number",
+          metadata_commitment: "0xbad-output",
+        },
+      ],
       ...deps,
       formatClearingPrice: () => {
         throw new Error("bad clearing price");
@@ -358,21 +427,29 @@ describe("order lifecycle reconciliation", () => {
       ...deps,
     });
 
-    expect(updated.find(o => o.ordRef === "ORD-sell")?.status).toBe("settling");
-    expect(updated.find(o => o.ordRef === "ORD-buy")?.status).toBe("settling");
-    expect(updated.find(o => o.ordRef === "ORD-buy")?.filledAmount).toBeUndefined();
+    expect(updated.find((o) => o.ordRef === "ORD-sell")?.status).toBe(
+      "settling"
+    );
+    expect(updated.find((o) => o.ordRef === "ORD-buy")?.status).toBe(
+      "settling"
+    );
+    expect(
+      updated.find((o) => o.ordRef === "ORD-buy")?.filledAmount
+    ).toBeUndefined();
   });
 
   it("does not amount-match strategy outputs without metadata", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        ordRef: "ORD-relayed-strategy",
-        side: "Buy",
-        wireMode: "TWAP",
-        strategyId: "strategy-1",
-        relayMode: "ZylithRelay",
-        expectedOutputMetadataCommitment: undefined,
-      })],
+      orders: [
+        order({
+          ordRef: "ORD-relayed-strategy",
+          side: "Buy",
+          wireMode: "TWAP",
+          strategyId: "strategy-1",
+          relayMode: "ZylithRelay",
+          expectedOutputMetadataCommitment: undefined,
+        }),
+      ],
       batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {
         "batch-1": {
@@ -382,13 +459,15 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "1000000000000000000",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "9997000000000000000",
-        metadata_commitment: "0xrelayed-strategy-output",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "9997000000000000000",
+          metadata_commitment: "0xrelayed-strategy-output",
+        },
+      ],
       ...deps,
     });
 
@@ -398,7 +477,12 @@ describe("order lifecycle reconciliation", () => {
 
   it("settles from transcript and notes even when the batch aged out of the current batch list", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({ status: "in_batch", expectedOutputMetadataCommitment: "0xmatch" })],
+      orders: [
+        order({
+          status: "in_batch",
+          expectedOutputMetadataCommitment: "0xmatch",
+        }),
+      ],
       batches: [{ batch_id: "batch-latest", epoch_id: 20, status: "Open" }],
       settlementTranscripts: {
         "batch-1": {
@@ -408,13 +492,15 @@ describe("order lifecycle reconciliation", () => {
           price_base_scale: "1000000000000000000",
         },
       },
-      withdrawableNotes: [{
-        source: "settlement_output",
-        batch_id: "batch-1",
-        asset: "STRK",
-        amount: "10000000000000000000",
-        metadata_commitment: "0xmatch",
-      }],
+      withdrawableNotes: [
+        {
+          source: "settlement_output",
+          batch_id: "batch-1",
+          asset: "STRK",
+          amount: "10000000000000000000",
+          metadata_commitment: "0xmatch",
+        },
+      ],
       ...deps,
     });
 
@@ -527,11 +613,13 @@ describe("order lifecycle reconciliation", () => {
 
   it("does not regress private report fills while public artifacts are delayed", () => {
     const updated = reconcileOrderLifecycle({
-      orders: [order({
-        status: "filled",
-        clearingPrice: "0.0525",
-        filledAmount: "15",
-      })],
+      orders: [
+        order({
+          status: "filled",
+          clearingPrice: "0.0525",
+          filledAmount: "15",
+        }),
+      ],
       batches: [
         { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
         { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
@@ -578,9 +666,7 @@ describe("order lifecycle reconciliation", () => {
   it("does not treat public zero matched count as authoritative no-fill", () => {
     const updated = reconcileOrderLifecycle({
       orders: [order({ status: "settling" })],
-      batches: [
-        { batch_id: "batch-1", epoch_id: 10, status: "Settled" },
-      ],
+      batches: [{ batch_id: "batch-1", epoch_id: 10, status: "Settled" }],
       settlementTranscripts: {},
       proofStatuses: {
         "batch-1": {
@@ -617,6 +703,28 @@ describe("order lifecycle reconciliation", () => {
     });
 
     expect(updated[0].status).toBe("proof_failed");
+  });
+
+  it("marks a worker no-fill result as no_fill without waiting for epoch aging", () => {
+    const updated = reconcileOrderLifecycle({
+      orders: [order({ status: "in_batch" })],
+      batches: [
+        { batch_id: "batch-1", epoch_id: 10, status: "Closed" },
+        { batch_id: "batch-latest", epoch_id: 11, status: "Open" },
+      ],
+      settlementTranscripts: {},
+      proofStatuses: {
+        "batch-1": {
+          batch_id: "batch-1",
+          state: "no-fill",
+        },
+      },
+      withdrawableNotes: [],
+      stalledDisplayAfterEpochs: 10,
+      ...deps,
+    });
+
+    expect(updated[0].status).toBe("no_fill");
   });
 
   it("marks closed batches with no proof job as stalled after the blocked-settlement window", () => {

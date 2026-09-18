@@ -101,9 +101,7 @@ export function TopNav({
               ? "Trade"
               : nextTab === "orders"
               ? "Orders"
-              : nextTab === "assets"
-              ? "Assets"
-              : "TCA"}
+              : "Assets"}
             {nextTab === "orders" && activeOrderCount > 0 && (
               <span className="tab-count">{activeOrderCount}</span>
             )}

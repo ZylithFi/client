@@ -8,7 +8,15 @@ const pair: PairConfig = {
   quote_asset_id: "USDC",
   min_order_amount: "1",
   price_base_scale: "1000000000000000000",
+  external_match_enabled: true,
   enabled: true,
+};
+
+const referencePrice = {
+  displayPrice: "0.1",
+  midpointPrice: "100000",
+  priceBaseScale: "1000000000000000000",
+  observedAtUnixMs: Date.now(),
 };
 
 describe("OrderTicket", () => {
@@ -17,7 +25,6 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[]}
-        batchWindowMs={20_000}
         walletReady={false}
         hasPrivateBalance={false}
         submitting={false}
@@ -32,12 +39,12 @@ describe("OrderTicket", () => {
     expect(screen.getByRole("button", { name: /Connect wallet/i })).toHaveClass("gate-primary");
   });
 
-  it("keeps the taker ticket scoped to limit and program order entry", () => {
+  it("keeps the taker ticket scoped to midpoint swap entry", () => {
     render(
       <OrderTicket
         pair={pair}
         balances={[]}
-        batchWindowMs={20_000}
+        referencePrice={referencePrice}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}
@@ -48,9 +55,10 @@ describe("OrderTicket", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /Limit/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Program/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Pool/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Midpoint")).toBeInTheDocument();
+    expect(screen.getByText("0.1")).toBeInTheDocument();
+    expect(screen.getByText("Price protection")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Match residual" })).toBeInTheDocument();
   });
 
   it("submits the taker order when pressing Enter in a text field", async () => {
@@ -59,7 +67,7 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
-        batchWindowMs={20_000}
+        referencePrice={referencePrice}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}
@@ -72,17 +80,16 @@ describe("OrderTicket", () => {
 
     const inputs = screen.getAllByRole("textbox");
     fireEvent.change(inputs[0], { target: { value: "2" } });
-    fireEvent.change(inputs[1], { target: { value: "0.10" } });
 
     await act(async () => {
-      fireEvent.keyDown(inputs[1], { key: "Enter" });
+      fireEvent.keyDown(inputs[0], { key: "Enter" });
     });
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       side: "Buy",
       shape: "limit",
       amount: "2",
-      limitPrice: "0.10",
+      limitPrice: "0.1003",
       executionPreference: "PrivateThenExternal",
       keepTryingPrivate: false,
     }));
@@ -94,7 +101,7 @@ describe("OrderTicket", () => {
       <OrderTicket
         pair={pair}
         balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
-        batchWindowMs={20_000}
+        referencePrice={referencePrice}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}
@@ -107,13 +114,12 @@ describe("OrderTicket", () => {
 
     const inputs = screen.getAllByRole("textbox");
     fireEvent.change(inputs[0], { target: { value: "2" } });
-    fireEvent.change(inputs[1], { target: { value: "0.10" } });
     fireEvent.click(screen.getByRole("button", { name: "Private only" }));
     fireEvent.click(screen.getByLabelText("Keep trying privately"));
     fireEvent.click(screen.getByRole("button", { name: "12h" }));
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Submit Buy/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Buy order" }));
     });
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
@@ -123,12 +129,42 @@ describe("OrderTicket", () => {
     }));
   });
 
+  it("fails closed to private-only when the pair has no external matcher", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(true);
+    render(
+      <OrderTicket
+        pair={{ ...pair, external_match_enabled: false }}
+        balances={[{ asset: "USDC", available: "100000000", locked: "0" }]}
+        referencePrice={referencePrice}
+        walletReady={true}
+        hasPrivateBalance={true}
+        submitting={false}
+        submitError={null}
+        onOpenWallet={vi.fn()}
+        onDeposit={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const inputs = screen.getAllByRole("textbox");
+    fireEvent.change(inputs[0], { target: { value: "2" } });
+    expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Buy order" }));
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      executionPreference: "PrivateOnly",
+    }));
+  });
+
   it("keeps quick-fill safe when local balance or pair scale is malformed", () => {
     render(
       <OrderTicket
         pair={{ ...pair, price_base_scale: "bad-scale" }}
         balances={[{ asset: "USDC", available: "bad-balance", locked: "-1" }]}
-        batchWindowMs={20_000}
+        referencePrice={referencePrice}
         walletReady={true}
         hasPrivateBalance={true}
         submitting={false}

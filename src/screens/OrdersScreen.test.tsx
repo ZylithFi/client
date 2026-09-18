@@ -22,7 +22,7 @@ function order(overrides: Partial<LocalOrder> = {}): LocalOrder {
     filledAmount: overrides.filledAmount,
     clearingPrice: overrides.clearingPrice,
     cancelTransactionHash: overrides.cancelTransactionHash,
-    externalCompletion: overrides.externalCompletion,
+    externalMatch: overrides.externalMatch,
   };
 }
 
@@ -37,7 +37,8 @@ describe("OrdersScreen", () => {
     );
 
     expect(screen.getByText("ORD-1001")).toBeInTheDocument();
-    expect(screen.getAllByText("Limit")).toHaveLength(2);
+    expect(screen.getByText("Midpoint")).toBeInTheDocument();
+    expect(screen.getByText("Bound")).toBeInTheDocument();
     expect(screen.queryByText("Children")).not.toBeInTheDocument();
     expect(screen.queryByText("Child execution")).not.toBeInTheDocument();
   });
@@ -61,15 +62,14 @@ describe("OrdersScreen", () => {
     expect(screen.getByText("Filled")).toBeInTheDocument();
   });
 
-  it("exposes a retryable external completion for a private residual", () => {
-    const onCompleteExternal = vi.fn();
+  it("shows residuals as awaiting the external midpoint matcher", () => {
     render(
       <OrdersScreen
         walletReady
         orders={[
           order({
             status: "partial",
-            externalCompletion: {
+            externalMatch: {
               status: "available",
               residualNoteCommitment: "0xresidual",
               residualAssetId: "USDC",
@@ -78,38 +78,10 @@ describe("OrdersScreen", () => {
           }),
         ]}
         onCancel={vi.fn()}
-        onCompleteExternal={onCompleteExternal}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "History" }));
-    fireEvent.click(screen.getByRole("button", { name: "Complete via AVNU" }));
-    expect(onCompleteExternal).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not offer AVNU while private residual consolidation is pending", () => {
-    render(
-      <OrdersScreen
-        walletReady
-        orders={[
-          order({
-            status: "no_fill",
-            externalCompletion: {
-              status: "consolidating",
-              residualNoteCommitment: "0xnew",
-              residualAssetId: "USDC",
-              residualAmount: "1000000",
-              consolidationTransactionHash: "0xconsolidation",
-            },
-          }),
-        ]}
-        onCancel={vi.fn()}
-        onCompleteExternal={vi.fn()}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "History" }));
-    expect(screen.getByText("Preparing residual...")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Complete via AVNU" })).not.toBeInTheDocument();
+    expect(screen.getByText("Awaiting matcher")).toBeInTheDocument();
   });
 });

@@ -296,7 +296,7 @@ describe("userFacingErrorMessage", () => {
     );
 
     expect(message).toBe(
-      "No available USDC balance can fund this order. Cancel or edit existing positions if USDC is reserved, or deposit more USDC."
+      "No available USDC balance can fund this order. Cancel or edit existing orders if USDC is reserved, or deposit more USDC."
     );
   });
 

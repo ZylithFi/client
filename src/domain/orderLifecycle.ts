@@ -1,35 +1,28 @@
-export type LocalOrderWireMode =
-  | "Limit"
-  | "TWAP"
-  | "VWAP"
-  | "Repeat";
+export type LocalOrderWireMode = "Limit" | "TWAP" | "VWAP" | "Repeat";
 
 export type LocalOrderStatus =
-  | "queued" | "in_batch" | "proving" | "settling" | "settled_pending_output"
-  | "filled" | "partial" | "no_fill" | "rolled" | "cancelled" | "failed"
-  | "proof_failed" | "stalled";
+  | "queued"
+  | "in_batch"
+  | "proving"
+  | "settling"
+  | "settled_pending_output"
+  | "filled"
+  | "partial"
+  | "no_fill"
+  | "rolled"
+  | "cancelled"
+  | "failed"
+  | "proof_failed"
+  | "stalled";
 
-export type ExternalCompletionStatus =
-  | "available"
-  | "consolidating"
-  | "converting"
-  | "ready"
-  | "submitting"
-  | "completed"
-  | "failed";
+export type ExternalMatchStatus = "available";
 
-export type LocalExternalCompletion = {
-  status: ExternalCompletionStatus;
+export type LocalExternalMatch = {
+  status: ExternalMatchStatus;
   residualNoteCommitment: string;
   residualAssetId: string;
   residualAmount: string;
   sourceNoteCommitments?: string[];
-  consolidationTransactionHash?: string;
-  conversionTransactionHash?: string;
-  inputOpenNoteId?: string;
-  transactionHash?: string;
-  outputOpenNoteId?: string;
-  quoteCommitment?: string;
   lastError?: string;
 };
 
@@ -59,40 +52,60 @@ export type LocalOrder = {
   filledAmount?: string;
   clearingPrice?: string;
   arrivalReferencePrice?: string;
-  arrivalReferenceSource?: "last_clearing";
+  arrivalReferenceSource?: "binance_midpoint_confirmed";
   arrivalReferenceAt?: number;
-  externalCompletion?: LocalExternalCompletion;
+  externalMatch?: LocalExternalMatch;
   cancelTransactionHash?: string;
   relayMode?: "SelfRelay" | "ZylithRelay";
 };
 
 export function normalizeLocalOrder(order: LocalOrder): LocalOrder {
+  const arrivalReferenceSource = (order as { arrivalReferenceSource?: unknown })
+    .arrivalReferenceSource;
+  const executionPreference = (order as { executionPreference?: unknown })
+    .executionPreference;
   return {
     ...order,
-    wireMode: normalizeLocalOrderWireMode((order as { wireMode?: unknown }).wireMode),
-    externalCompletion: normalizeExternalCompletion(
-      (order as { externalCompletion?: unknown }).externalCompletion,
+    wireMode: normalizeLocalOrderWireMode(
+      (order as { wireMode?: unknown }).wireMode
+    ),
+    executionPreference:
+      executionPreference === "PrivateThenExternal"
+        ? "PrivateThenExternal"
+        : "PrivateOnly",
+    arrivalReferencePrice:
+      arrivalReferenceSource === "binance_midpoint_confirmed"
+        ? order.arrivalReferencePrice
+        : undefined,
+    arrivalReferenceSource:
+      arrivalReferenceSource === "binance_midpoint_confirmed"
+        ? arrivalReferenceSource
+        : undefined,
+    arrivalReferenceAt:
+      arrivalReferenceSource === "binance_midpoint_confirmed"
+        ? order.arrivalReferenceAt
+        : undefined,
+    externalMatch: normalizeExternalMatch(
+      (order as { externalMatch?: unknown }).externalMatch
     ),
   };
 }
 
-function normalizeExternalCompletion(value: unknown): LocalExternalCompletion | undefined {
+function normalizeExternalMatch(
+  value: unknown
+): LocalExternalMatch | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const candidate = value as Partial<LocalExternalCompletion>;
+  const candidate = value as Partial<LocalExternalMatch>;
   if (
-    candidate.status !== "available" &&
-    candidate.status !== "consolidating" &&
-    candidate.status !== "converting" &&
-    candidate.status !== "ready" &&
-    candidate.status !== "submitting" &&
-    candidate.status !== "completed" &&
-    candidate.status !== "failed"
-  ) return undefined;
+    candidate.status !== "available"
+  )
+    return undefined;
   if (
     typeof candidate.residualNoteCommitment !== "string" ||
     typeof candidate.residualAssetId !== "string" ||
     typeof candidate.residualAmount !== "string"
-  ) return undefined;
+  )
+    return undefined;
   return {
     status: candidate.status,
     residualNoteCommitment: candidate.residualNoteCommitment,
@@ -100,15 +113,9 @@ function normalizeExternalCompletion(value: unknown): LocalExternalCompletion | 
     residualAmount: candidate.residualAmount,
     sourceNoteCommitments: Array.isArray(candidate.sourceNoteCommitments)
       ? candidate.sourceNoteCommitments.filter(
-          (commitment): commitment is string => typeof commitment === "string",
+          (commitment): commitment is string => typeof commitment === "string"
         )
       : undefined,
-    consolidationTransactionHash: candidate.consolidationTransactionHash,
-    conversionTransactionHash: candidate.conversionTransactionHash,
-    inputOpenNoteId: candidate.inputOpenNoteId,
-    transactionHash: candidate.transactionHash,
-    outputOpenNoteId: candidate.outputOpenNoteId,
-    quoteCommitment: candidate.quoteCommitment,
     lastError: candidate.lastError,
   };
 }
@@ -148,7 +155,14 @@ export type PrivateStrategySummary = {
   mode: "TWAP" | "VWAP" | "Repeat";
   pair: string;
   side?: "Buy" | "Sell";
-  status: "active" | "delegated" | "pending_relay" | "paused" | "completed" | "failed" | "cancelled";
+  status:
+    | "active"
+    | "delegated"
+    | "pending_relay"
+    | "paused"
+    | "completed"
+    | "failed"
+    | "cancelled";
   total_amount: string;
   remaining_amount: string;
   child_amount: string;
@@ -186,7 +200,14 @@ export type PrivateStrategySummary = {
 export type OrderLifecycleBatch = {
   batch_id: string;
   epoch_id?: number;
-  status: "Open" | "Closed" | "Clearing" | "Settled" | "Cancelled" | "Proving" | "Settling";
+  status:
+    | "Open"
+    | "Closed"
+    | "Clearing"
+    | "Settled"
+    | "Cancelled"
+    | "Proving"
+    | "Settling";
 };
 
 export type OrderLifecyclePair = {
@@ -222,18 +243,32 @@ export type OrderLifecycleOutputNote = {
 
 export function statusLabel(s: LocalOrderStatus): string {
   const m: Record<LocalOrderStatus, string> = {
-    queued: "Queued", in_batch: "In batch", proving: "Proving",
-    settling: "Settling", settled_pending_output: "Output pending",
-    filled: "Filled", partial: "Partial",
-    no_fill: "No fill", rolled: "Rolled", cancelled: "Cancelled", failed: "Failed",
-    proof_failed: "Proof failed", stalled: "Stalled",
+    queued: "Queued",
+    in_batch: "In batch",
+    proving: "Proving",
+    settling: "Settling",
+    settled_pending_output: "Output pending",
+    filled: "Filled",
+    partial: "Partial",
+    no_fill: "No fill",
+    rolled: "Rolled",
+    cancelled: "Cancelled",
+    failed: "Failed",
+    proof_failed: "Proof failed",
+    stalled: "Stalled",
   };
   return m[s];
 }
 
 export function statusTone(s: LocalOrderStatus): string {
   if (s === "filled" || s === "partial") return "good";
-  if (s === "in_batch" || s === "proving" || s === "settling" || s === "settled_pending_output") return "info";
+  if (
+    s === "in_batch" ||
+    s === "proving" ||
+    s === "settling" ||
+    s === "settled_pending_output"
+  )
+    return "info";
   if (s === "queued") return "muted";
   if (s === "rolled" || s === "no_fill") return "warn";
   if (s === "stalled") return "warn";
@@ -245,7 +280,10 @@ function isPrivateReportTerminalStatus(status: LocalOrderStatus): boolean {
   return status === "filled" || status === "partial" || status === "no_fill";
 }
 
-export function ordersChanged(before: LocalOrder[], after: LocalOrder[]): boolean {
+export function ordersChanged(
+  before: LocalOrder[],
+  after: LocalOrder[]
+): boolean {
   if (before.length !== after.length) return true;
   return after.some((order, index) => {
     const previous = before[index];
@@ -255,10 +293,11 @@ export function ordersChanged(before: LocalOrder[], after: LocalOrder[]): boolea
       order.filledAmount !== previous.filledAmount ||
       order.fundingAsset !== previous.fundingAsset ||
       order.fundingAmount !== previous.fundingAmount ||
-      JSON.stringify(order.externalCompletion ?? null) !==
-        JSON.stringify(previous.externalCompletion ?? null) ||
+      JSON.stringify(order.externalMatch ?? null) !==
+        JSON.stringify(previous.externalMatch ?? null) ||
       order.relayMode !== previous.relayMode ||
-      JSON.stringify(order.fundingNoteCommitments ?? []) !== JSON.stringify(previous.fundingNoteCommitments ?? []) ||
+      JSON.stringify(order.fundingNoteCommitments ?? []) !==
+        JSON.stringify(previous.fundingNoteCommitments ?? []) ||
       order.cancelTransactionHash !== previous.cancelTransactionHash
     );
   });
@@ -271,8 +310,8 @@ export function reconcileOrderLifecycle({
   proofStatuses,
   withdrawableNotes,
   pairs,
-    noFillDisplayAfterEpochs = 10,
-    stalledDisplayAfterEpochs = 10,
+  noFillDisplayAfterEpochs = 10,
+  stalledDisplayAfterEpochs = 10,
   formatClearingPrice,
   toAtomicStr,
   fromAtomicStr,
@@ -286,12 +325,15 @@ export function reconcileOrderLifecycle({
   pairs: OrderLifecyclePair[];
   noFillDisplayAfterEpochs?: number;
   stalledDisplayAfterEpochs?: number;
-  formatClearingPrice: (price: {
-    batchId: string;
-    epochId: number;
-    clearingPrice: string;
-    priceBaseScale?: string;
-  }, pair: OrderLifecyclePair) => string;
+  formatClearingPrice: (
+    price: {
+      batchId: string;
+      epochId: number;
+      clearingPrice: string;
+      priceBaseScale?: string;
+    },
+    pair: OrderLifecyclePair
+  ) => string;
   toAtomicStr: (human: string, assetId: string) => string;
   fromAtomicStr: (atomic: string, assetId: string) => string;
   assetScale: (assetId: string) => bigint;
@@ -300,14 +342,12 @@ export function reconcileOrderLifecycle({
 
   const settlementOutputs = new Map<string, OrderLifecycleOutputNote[]>();
   const batchesById = new Map(
-    batches.map(batch => [batch.batch_id, batch] as const),
+    batches.map((batch) => [batch.batch_id, batch] as const)
   );
-  const pairsById = new Map(
-    pairs.map(pair => [pair.pair_id, pair] as const),
-  );
+  const pairsById = new Map(pairs.map((pair) => [pair.pair_id, pair] as const));
   const latestEpoch = batches.reduce(
     (max, batch) => Math.max(max, batch.epoch_id ?? 0),
-    0,
+    0
   );
   for (const note of withdrawableNotes) {
     if (note.source !== "settlement_output" || !note.batch_id) continue;
@@ -324,11 +364,18 @@ export function reconcileOrderLifecycle({
     if (["cancelled", "rolled", "failed"].includes(order.status)) {
       return order;
     }
-    if ((order.status === "proof_failed" || order.status === "stalled") && !transcript && !proofStatus) {
+    if (
+      (order.status === "proof_failed" || order.status === "stalled") &&
+      !transcript &&
+      !proofStatus
+    ) {
       return order;
     }
     if (!transcript && proofStatus?.failure) {
       return { ...order, status: "proof_failed" as LocalOrderStatus };
+    }
+    if (!transcript && proofStatus?.state === "no-fill") {
+      return { ...order, status: "no_fill" as LocalOrderStatus };
     }
     if (!transcript && isPrivateReportTerminalStatus(order.status)) {
       return order;
@@ -341,41 +388,62 @@ export function reconcileOrderLifecycle({
     }
     const batch = batchesById.get(order.batchId);
     if (!batch && !transcript) return order;
-    if (batch?.status === "Cancelled") return { ...order, status: "cancelled" as LocalOrderStatus };
+    if (batch?.status === "Cancelled")
+      return { ...order, status: "cancelled" as LocalOrderStatus };
     if (transcript || batch?.status === "Settled") {
-      if (!transcript) return { ...order, status: "settled_pending_output" as LocalOrderStatus };
+      if (!transcript)
+        return {
+          ...order,
+          status: "settled_pending_output" as LocalOrderStatus,
+        };
       const pair = pairsById.get(order.pair);
       const expectedOutputAsset = pair
-        ? order.side === "Buy" ? pair.base_asset_id : pair.quote_asset_id
+        ? order.side === "Buy"
+          ? pair.base_asset_id
+          : pair.quote_asset_id
         : undefined;
       const clearingPrice = pair
-        ? safeFormatClearingPrice({
-            batchId: transcript.batch_id,
-            epochId: transcript.batch_epoch,
-            clearingPrice: String(transcript.clearing_price),
-            priceBaseScale: transcript.price_base_scale === undefined
-              ? undefined
-              : String(transcript.price_base_scale),
-          }, pair, formatClearingPrice)
+        ? safeFormatClearingPrice(
+            {
+              batchId: transcript.batch_id,
+              epochId: transcript.batch_epoch,
+              clearingPrice: String(transcript.clearing_price),
+              priceBaseScale:
+                transcript.price_base_scale === undefined
+                  ? undefined
+                  : String(transcript.price_base_scale),
+            },
+            pair,
+            formatClearingPrice
+          )
         : String(transcript.clearing_price);
       const batchOutputs = settlementOutputs.get(order.batchId) ?? [];
       const exactOutput = order.expectedOutputMetadataCommitment
-        ? batchOutputs
-            .find(note =>
+        ? batchOutputs.find(
+            (note) =>
               !usedOutputCommitments.has(note.metadata_commitment) &&
-              sameFelt(note.metadata_commitment, order.expectedOutputMetadataCommitment) &&
+              sameFelt(
+                note.metadata_commitment,
+                order.expectedOutputMetadataCommitment
+              ) &&
               (!expectedOutputAsset || note.asset === expectedOutputAsset)
-            )
+          )
         : null;
       const matchedOutput = exactOutput ?? null;
       if (matchedOutput && pair) {
-        const amountAtomic = safeToAtomic(toAtomicStr, order.amount, pair.base_asset_id);
+        const amountAtomic = safeToAtomic(
+          toAtomicStr,
+          order.amount,
+          pair.base_asset_id
+        );
         const priceBaseScale = parseNonNegativeBigInt(
           transcript.price_base_scale === undefined
             ? pair.price_base_scale ?? assetScale(pair.base_asset_id).toString()
-            : String(transcript.price_base_scale),
+            : String(transcript.price_base_scale)
         );
-        const clearingAtomic = parseNonNegativeBigInt(String(transcript.clearing_price));
+        const clearingAtomic = parseNonNegativeBigInt(
+          String(transcript.clearing_price)
+        );
         const outputAtomic = parseNonNegativeBigInt(matchedOutput.amount);
         const feeBpsValue = orderTotalFeeBps(order, pair);
         if (
@@ -394,24 +462,32 @@ export function reconcileOrderLifecycle({
             clearingPrice,
           };
         }
-        const grossOutputAtomic = order.side === "Buy"
-          ? amountAtomic
-          : (amountAtomic * clearingAtomic) / priceBaseScale;
+        const grossOutputAtomic =
+          order.side === "Buy"
+            ? amountAtomic
+            : (amountAtomic * clearingAtomic) / priceBaseScale;
         const feeBps = BigInt(feeBpsValue);
         const feeDenominator = 10_000n;
         const fullOutputAtomic =
           (grossOutputAtomic * (feeDenominator - feeBps)) / feeDenominator;
         const isPartial = outputAtomic > 0n && outputAtomic < fullOutputAtomic;
-        const feeAdjustedOutput = feeBps > 0n
-          ? (outputAtomic * feeDenominator) / (feeDenominator - feeBps)
-          : outputAtomic;
+        const feeAdjustedOutput =
+          feeBps > 0n
+            ? (outputAtomic * feeDenominator) / (feeDenominator - feeBps)
+            : outputAtomic;
         const filledAmount = !isPartial
           ? order.amount
           : order.side === "Buy"
-            ? fromAtomicStr(feeAdjustedOutput.toString(), pair.base_asset_id)
-            : clearingAtomic > 0n
-              ? fromAtomicStr(((feeAdjustedOutput * priceBaseScale) / clearingAtomic).toString(), pair.base_asset_id)
-              : undefined;
+          ? fromAtomicStr(feeAdjustedOutput.toString(), pair.base_asset_id)
+          : clearingAtomic > 0n
+          ? fromAtomicStr(
+              (
+                (feeAdjustedOutput * priceBaseScale) /
+                clearingAtomic
+              ).toString(),
+              pair.base_asset_id
+            )
+          : undefined;
         usedOutputCommitments.add(matchedOutput.metadata_commitment);
         return {
           ...order,
@@ -434,20 +510,38 @@ export function reconcileOrderLifecycle({
         latestEpoch > 0 &&
         latestEpoch - transcriptEpoch >= noFillDisplayAfterEpochs
       ) {
-        return { ...order, status: "no_fill" as LocalOrderStatus, clearingPrice };
+        return {
+          ...order,
+          status: "no_fill" as LocalOrderStatus,
+          clearingPrice,
+        };
       }
-      return { ...order, status: "settling" as LocalOrderStatus, clearingPrice };
+      return {
+        ...order,
+        status: "settling" as LocalOrderStatus,
+        clearingPrice,
+      };
     }
     if (!batch) return order;
     if (batch.status === "Open" && order.status === "queued") {
       return { ...order, status: "in_batch" as LocalOrderStatus };
     }
     if (
-      (batch.status === "Closed" || batch.status === "Clearing" || batch.status === "Proving") &&
-      (order.status === "queued" || order.status === "in_batch" || order.status === "proving" || order.status === "settling")
+      (batch.status === "Closed" ||
+        batch.status === "Clearing" ||
+        batch.status === "Proving") &&
+      (order.status === "queued" ||
+        order.status === "in_batch" ||
+        order.status === "proving" ||
+        order.status === "settling")
     ) {
-      if (proofStatus?.state === "proving") return { ...order, status: "proving" as LocalOrderStatus };
-      if (proofStatus?.state === "proof-generated" || proofStatus?.state === "submitting-onchain" || proofStatus?.state === "submitted-onchain") {
+      if (proofStatus?.state === "proving")
+        return { ...order, status: "proving" as LocalOrderStatus };
+      if (
+        proofStatus?.state === "proof-generated" ||
+        proofStatus?.state === "submitting-onchain" ||
+        proofStatus?.state === "submitted-onchain"
+      ) {
         return { ...order, status: "settling" as LocalOrderStatus };
       }
       const batchEpoch = batch.epoch_id ?? order.epochId;
@@ -458,12 +552,16 @@ export function reconcileOrderLifecycle({
       ) {
         return { ...order, status: "stalled" as LocalOrderStatus };
       }
-      if (batch.status === "Closed") return { ...order, status: "in_batch" as LocalOrderStatus };
+      if (batch.status === "Closed")
+        return { ...order, status: "in_batch" as LocalOrderStatus };
       return { ...order, status: "proving" as LocalOrderStatus };
     }
     if (
       batch.status === "Settling" &&
-      (order.status === "queued" || order.status === "in_batch" || order.status === "proving" || order.status === "settling")
+      (order.status === "queued" ||
+        order.status === "in_batch" ||
+        order.status === "proving" ||
+        order.status === "settling")
     ) {
       const batchEpoch = batch.epoch_id ?? order.epochId;
       if (
@@ -492,12 +590,15 @@ function safeFormatClearingPrice(
     priceBaseScale?: string;
   },
   pair: OrderLifecyclePair,
-  formatter: (price: {
-    batchId: string;
-    epochId: number;
-    clearingPrice: string;
-    priceBaseScale?: string;
-  }, pair: OrderLifecyclePair) => string,
+  formatter: (
+    price: {
+      batchId: string;
+      epochId: number;
+      clearingPrice: string;
+      priceBaseScale?: string;
+    },
+    pair: OrderLifecyclePair
+  ) => string
 ): string {
   try {
     return formatter(price, pair);
@@ -509,7 +610,7 @@ function safeFormatClearingPrice(
 function safeToAtomic(
   formatter: (human: string, assetId: string) => string,
   human: string,
-  assetId: string,
+  assetId: string
 ): bigint | null {
   try {
     return parseNonNegativeBigInt(formatter(human, assetId));
@@ -518,7 +619,9 @@ function safeToAtomic(
   }
 }
 
-function parseNonNegativeBigInt(value: string | number | bigint | undefined): bigint | null {
+function parseNonNegativeBigInt(
+  value: string | number | bigint | undefined
+): bigint | null {
   if (value === undefined) return null;
   try {
     const parsed = BigInt(String(value));
@@ -528,7 +631,10 @@ function parseNonNegativeBigInt(value: string | number | bigint | undefined): bi
   }
 }
 
-export function sameFelt(left: string | undefined, right: string | undefined): boolean {
+export function sameFelt(
+  left: string | undefined,
+  right: string | undefined
+): boolean {
   return normalizeFelt(left) === normalizeFelt(right);
 }
 
@@ -540,7 +646,8 @@ function normalizeFelt(value: string | undefined): string {
     return `0x${BigInt(trimmed).toString(16)}`;
   } catch {
     const normalized = trimmed.toLowerCase();
-    if (!normalized.startsWith("0x")) return `0x${normalized.replace(/^0+/, "") || "0"}`;
+    if (!normalized.startsWith("0x"))
+      return `0x${normalized.replace(/^0+/, "") || "0"}`;
     return `0x${normalized.slice(2).replace(/^0+/, "") || "0"}`;
   }
 }

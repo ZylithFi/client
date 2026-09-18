@@ -1,25 +1,30 @@
 import { useEffect, useState } from "react";
-import { fetchWithTimeout as runtimeFetchWithTimeout } from "./runtimeHttp";
-import { browserSafeServiceUrl, localServiceUrl, normalizeUrl } from "./serviceUrls";
+import { normalizeConfiguredFelt } from "./felt";
+import {
+  fetchWithTimeout as runtimeFetchWithTimeout,
+  postJson,
+} from "./runtimeHttp";
+import {
+  browserSafeServiceUrl,
+  localServiceUrl,
+  normalizeUrl,
+} from "./serviceUrls";
 
-export const COORDINATOR_URL: string =
-  browserSafeServiceUrl(
-    normalizeUrl(import.meta.env.VITE_ZYLITH_COORDINATOR_URL) ||
-      localServiceUrl(3000, "coordinator"),
-    "coordinator",
-  );
-export const INDEXER_URL: string =
-  browserSafeServiceUrl(
-    normalizeUrl(import.meta.env.VITE_ZYLITH_INDEXER_URL) ||
-      localServiceUrl(3300, "indexer"),
-    "indexer",
-  );
-export const PROVER_URL: string =
-  browserSafeServiceUrl(
-    normalizeUrl(import.meta.env.VITE_ZYLITH_PRIVATE_INGRESS_URL) ||
-      localServiceUrl(3200, "prover"),
-    "prover",
-  );
+export const COORDINATOR_URL: string = browserSafeServiceUrl(
+  normalizeUrl(import.meta.env.VITE_ZYLITH_COORDINATOR_URL) ||
+    localServiceUrl(3000, "coordinator"),
+  "coordinator"
+);
+export const INDEXER_URL: string = browserSafeServiceUrl(
+  normalizeUrl(import.meta.env.VITE_ZYLITH_INDEXER_URL) ||
+    localServiceUrl(3300, "indexer"),
+  "indexer"
+);
+export const PROVER_URL: string = browserSafeServiceUrl(
+  normalizeUrl(import.meta.env.VITE_ZYLITH_PRIVATE_INGRESS_URL) ||
+    localServiceUrl(3200, "prover"),
+  "prover"
+);
 
 const BACKGROUND_FETCH_TIMEOUT_MS = 8_000;
 const BULK_BATCH_ID_PAGE_SIZE = 16;
@@ -30,7 +35,14 @@ export type BatchSummary = {
   pair_id: string;
   epoch_id: number;
   close_time_unix_ms: number;
-  status: "Open" | "Closed" | "Clearing" | "Settled" | "Cancelled" | "Proving" | "Settling";
+  status:
+    | "Open"
+    | "Closed"
+    | "Clearing"
+    | "Settled"
+    | "Cancelled"
+    | "Proving"
+    | "Settling";
   order_count_bucket: string;
 };
 
@@ -49,26 +61,35 @@ export type DeploymentConfig = {
   chain_id: string;
   rpc_url: string;
   product: {
-    assets?: Record<string, {
-      asset_id: string;
-      min_trade_amount: string;
-      decimals?: number;
-      enabled: boolean;
-    }>;
-    pairs: Record<string, {
-      pair_id: string;
-      base_asset_id: string;
-      quote_asset_id: string;
-      min_order_amount: string;
-      price_base_scale: string;
-      heartbeat_cover_price: string;
-      taker_fee_bps: number;
-      enabled: boolean;
-    }>;
+    assets?: Record<
+      string,
+      {
+        asset_id: string;
+        min_trade_amount: string;
+        decimals?: number;
+        enabled: boolean;
+      }
+    >;
+    pairs: Record<
+      string,
+      {
+        pair_id: string;
+        base_asset_id: string;
+        quote_asset_id: string;
+        min_order_amount: string;
+        price_base_scale: string;
+        heartbeat_cover_price: string;
+        taker_fee_bps: number;
+        external_match_enabled: boolean;
+        enabled: boolean;
+      }
+    >;
   };
   token_addresses: Record<string, string>;
   contracts?: {
     auction_verifier?: string;
+    external_match_executor?: string;
+    ekubo_external_match_router?: string;
   };
   proof?: {
     proof_version?: string;
@@ -89,6 +110,7 @@ export type DeploymentConfig = {
     withdrawal_proof_program_hash?: string;
     multi_pair_proof_program_hash?: string;
     multi_pair_settlement_proof_program_hash?: string;
+    external_match_authorization_proof_program_hash?: string;
     native_tx_prover_url?: string;
     settlement_note_fee_statement_program_address?: string;
     settlement_order_statement_program_address?: string;
@@ -98,6 +120,7 @@ export type DeploymentConfig = {
     auction_result_statement_program_address?: string;
     multi_pair_statement_program_address?: string;
     multi_pair_settlement_statement_program_address?: string;
+    external_match_authorization_statement_program_address?: string;
   };
   proof_config?: Record<string, unknown>;
 };
@@ -138,6 +161,8 @@ const CONTRACT_FIELDS = new Set([
   "batch_registry",
   "shielded_asset_adapter",
   "privacy_deposit_bridge",
+  "external_match_executor",
+  "ekubo_external_match_router",
   "auction_verifier",
 ]);
 
@@ -186,8 +211,8 @@ const OPTIONAL_STARKNET_PRIVACY_FUNDING_FIELDS = new Set([
 
 const REQUIRED_STARKNET_PRIVACY_FUNDING_FIELDS = new Set(
   [...STARKNET_PRIVACY_FUNDING_FIELDS].filter(
-    (field) => !OPTIONAL_STARKNET_PRIVACY_FUNDING_FIELDS.has(field),
-  ),
+    (field) => !OPTIONAL_STARKNET_PRIVACY_FUNDING_FIELDS.has(field)
+  )
 );
 
 const FUNDING_ASSET_FIELDS = new Set([
@@ -218,6 +243,7 @@ const PRODUCT_PAIR_FIELDS = new Set([
   "price_base_scale",
   "heartbeat_cover_price",
   "taker_fee_bps",
+  "external_match_enabled",
   "enabled",
 ]);
 
@@ -229,7 +255,14 @@ const REQUIRED_PRODUCT_PAIR_FIELDS = new Set([
   "price_base_scale",
   "heartbeat_cover_price",
   "taker_fee_bps",
+  "external_match_enabled",
   "enabled",
+]);
+
+const UNAPPROVED_WRAPPER_PAIRS = new Set([
+  "strkBTC/USDC",
+  "STRK/strkBTC",
+  "WBTC/strkBTC",
 ]);
 
 const PROOF_FIELDS = new Set([
@@ -240,7 +273,6 @@ const PROOF_FIELDS = new Set([
   "auction_statement_type",
   "auction_statement_schema",
   "settlement_entrypoint",
-  "proof_entrypoint",
   "proof_program_address",
   "proof_program_hash",
   "auction_verifier_class_hash",
@@ -258,6 +290,7 @@ const PROOF_FIELDS = new Set([
   "withdrawal_proof_program_hash",
   "multi_pair_proof_program_hash",
   "multi_pair_settlement_proof_program_hash",
+  "external_match_authorization_proof_program_hash",
   "starknet_os_config_hash",
   "proof_account_address",
   "settlement_statement_program_address",
@@ -271,6 +304,7 @@ const PROOF_FIELDS = new Set([
   "auction_result_statement_program_address",
   "multi_pair_statement_program_address",
   "multi_pair_settlement_statement_program_address",
+  "external_match_authorization_statement_program_address",
   "note_consolidation_statement_program_address",
   "withdrawal_statement_program_address",
   "settlement_account_address",
@@ -308,12 +342,14 @@ const OPTIONAL_PROOF_FIELDS = new Set([
   "withdrawal_proof_program_hash",
   "multi_pair_proof_program_hash",
   "multi_pair_settlement_proof_program_hash",
+  "external_match_authorization_proof_program_hash",
   "multi_pair_statement_program_address",
   "multi_pair_settlement_statement_program_address",
+  "external_match_authorization_statement_program_address",
 ]);
 
 const REQUIRED_PROOF_FIELDS = new Set(
-  [...PROOF_FIELDS].filter((field) => !OPTIONAL_PROOF_FIELDS.has(field)),
+  [...PROOF_FIELDS].filter((field) => !OPTIONAL_PROOF_FIELDS.has(field))
 );
 
 const ROLE_FIELDS = new Set([
@@ -330,7 +366,7 @@ const RUNTIME_FIELDS = new Set([
 ]);
 
 export function assertCurrentDeploymentManifestShape(
-  deployment: unknown,
+  deployment: unknown
 ): asserts deployment is DeploymentConfig {
   if (!isPlainObject(deployment)) {
     throw new Error("Deployment manifest must be a JSON object");
@@ -339,28 +375,67 @@ export function assertCurrentDeploymentManifestShape(
   assertRequiredFields(deployment, [], REQUIRED_TOP_LEVEL_DEPLOYMENT_FIELDS);
   assertAllowedObjectFields(deployment, ["deployment"], DEPLOYMENT_META_FIELDS);
   assertAllowedObjectFields(deployment, ["contracts"], CONTRACT_FIELDS);
-  assertAllowedObjectFields(deployment, ["funding"], FUNDING_FIELDS, REQUIRED_FUNDING_FIELDS);
+  assertAllowedObjectFields(
+    deployment,
+    ["funding"],
+    FUNDING_FIELDS,
+    REQUIRED_FUNDING_FIELDS
+  );
   assertOptionalObjectAllowedFields(
     deployment,
     ["funding", "capabilities"],
-    FUNDING_CAPABILITY_FIELDS,
+    FUNDING_CAPABILITY_FIELDS
   );
   assertAllowedObjectFields(
     deployment,
     ["funding", "starknet_privacy"],
     STARKNET_PRIVACY_FUNDING_FIELDS,
-    REQUIRED_STARKNET_PRIVACY_FUNDING_FIELDS,
+    REQUIRED_STARKNET_PRIVACY_FUNDING_FIELDS
   );
-  assertAllowedRecordFields(deployment, ["funding", "assets"], FUNDING_ASSET_FIELDS);
+  assertAllowedRecordFields(
+    deployment,
+    ["funding", "assets"],
+    FUNDING_ASSET_FIELDS
+  );
   assertAllowedObjectFields(deployment, ["product"], PRODUCT_FIELDS);
-  assertAllowedRecordFields(deployment, ["product", "assets"], PRODUCT_ASSET_FIELDS);
+  assertAllowedRecordFields(
+    deployment,
+    ["product", "assets"],
+    PRODUCT_ASSET_FIELDS
+  );
   assertAllowedRecordFields(
     deployment,
     ["product", "pairs"],
     PRODUCT_PAIR_FIELDS,
-    REQUIRED_PRODUCT_PAIR_FIELDS,
+    REQUIRED_PRODUCT_PAIR_FIELDS
   );
-  assertAllowedObjectFields(deployment, ["proof"], PROOF_FIELDS, REQUIRED_PROOF_FIELDS);
+  const pairConfigs = readObjectPath(deployment, ["product", "pairs"]);
+  if (pairConfigs === null) {
+    throw new Error(
+      "Deployment manifest field product.pairs must be an object"
+    );
+  }
+  for (const [pairId, pairConfig] of Object.entries(pairConfigs)) {
+    if (
+      !isPlainObject(pairConfig) ||
+      typeof pairConfig.external_match_enabled !== "boolean"
+    ) {
+      throw new Error(
+        `Deployment manifest field product.pairs.${pairId}.external_match_enabled must be boolean`
+      );
+    }
+    if (UNAPPROVED_WRAPPER_PAIRS.has(pairId) && pairConfig.enabled === true) {
+      throw new Error(
+        `Deployment manifest field product.pairs.${pairId}.enabled must be false until wrapper parity is authenticated`
+      );
+    }
+  }
+  assertAllowedObjectFields(
+    deployment,
+    ["proof"],
+    PROOF_FIELDS,
+    REQUIRED_PROOF_FIELDS
+  );
   assertOptionalObjectAllowedFields(deployment, ["proof_config"], PROOF_FIELDS);
   assertAllowedObjectFields(deployment, ["roles"], ROLE_FIELDS);
   assertAllowedObjectFields(deployment, ["runtime"], RUNTIME_FIELDS);
@@ -370,14 +445,18 @@ function assertAllowedObjectFields(
   source: unknown,
   path: readonly string[],
   allowedFields: ReadonlySet<string>,
-  requiredFields: ReadonlySet<string> = allowedFields,
+  requiredFields: ReadonlySet<string> = allowedFields
 ) {
   const value = readObjectPath(source, path);
   if (value === null) {
-    throw new Error(`Deployment manifest field ${path.join(".")} must be an object`);
+    throw new Error(
+      `Deployment manifest field ${path.join(".")} must be an object`
+    );
   }
   if (!isPlainObject(value)) {
-    throw new Error(`Deployment manifest field ${path.join(".")} must be an object`);
+    throw new Error(
+      `Deployment manifest field ${path.join(".")} must be an object`
+    );
   }
   assertAllowedFields(value, path, allowedFields);
   assertRequiredFields(value, path, requiredFields);
@@ -386,12 +465,14 @@ function assertAllowedObjectFields(
 function assertOptionalObjectAllowedFields(
   source: unknown,
   path: readonly string[],
-  allowedFields: ReadonlySet<string>,
+  allowedFields: ReadonlySet<string>
 ) {
   const value = readOptionalObjectPath(source, path);
   if (value === undefined) return;
   if (!isPlainObject(value)) {
-    throw new Error(`Deployment manifest field ${path.join(".")} must be an object`);
+    throw new Error(
+      `Deployment manifest field ${path.join(".")} must be an object`
+    );
   }
   assertAllowedFields(value, path, allowedFields);
 }
@@ -400,22 +481,30 @@ function assertAllowedRecordFields(
   source: unknown,
   path: readonly string[],
   allowedFields: ReadonlySet<string>,
-  requiredFields: ReadonlySet<string> = allowedFields,
+  requiredFields: ReadonlySet<string> = allowedFields
 ) {
   const record = readObjectPath(source, path);
   if (record === null) {
-    throw new Error(`Deployment manifest field ${path.join(".")} must be an object`);
+    throw new Error(
+      `Deployment manifest field ${path.join(".")} must be an object`
+    );
   }
   if (!isPlainObject(record)) {
-    throw new Error(`Deployment manifest field ${path.join(".")} must be an object`);
+    throw new Error(
+      `Deployment manifest field ${path.join(".")} must be an object`
+    );
   }
   if (Object.keys(record).length === 0) {
-    throw new Error(`Deployment manifest field ${path.join(".")} must not be empty`);
+    throw new Error(
+      `Deployment manifest field ${path.join(".")} must not be empty`
+    );
   }
   for (const [entryKey, entryValue] of Object.entries(record)) {
     if (!isPlainObject(entryValue)) {
       throw new Error(
-        `Deployment manifest field ${[...path, entryKey].join(".")} must be an object`,
+        `Deployment manifest field ${[...path, entryKey].join(
+          "."
+        )} must be an object`
       );
     }
     assertAllowedFields(entryValue, [...path, entryKey], allowedFields);
@@ -426,12 +515,14 @@ function assertAllowedRecordFields(
 function assertAllowedFields(
   value: Record<string, unknown>,
   path: readonly string[],
-  allowedFields: ReadonlySet<string>,
+  allowedFields: ReadonlySet<string>
 ) {
   for (const field of Object.keys(value)) {
     if (!allowedFields.has(field)) {
       const dottedPath = [...path, field].join(".");
-      throw new Error(`Deployment manifest includes unsupported field ${dottedPath}`);
+      throw new Error(
+        `Deployment manifest includes unsupported field ${dottedPath}`
+      );
     }
   }
 }
@@ -439,12 +530,14 @@ function assertAllowedFields(
 function assertRequiredFields(
   value: Record<string, unknown>,
   path: readonly string[],
-  requiredFields: ReadonlySet<string>,
+  requiredFields: ReadonlySet<string>
 ) {
   for (const field of requiredFields) {
-    if (!(field in value)) {
+    if (!Object.prototype.hasOwnProperty.call(value, field)) {
       const dottedPath = [...path, field].join(".");
-      throw new Error(`Deployment manifest is missing required field ${dottedPath}`);
+      throw new Error(
+        `Deployment manifest is missing required field ${dottedPath}`
+      );
     }
   }
 }
@@ -485,12 +578,152 @@ export type LastClearingPrice = {
   priceBaseScale?: string;
 };
 
+export type ArrivalReferenceAttestation = {
+  midpointPrice: string;
+  priceBaseScale: string;
+  observedAtUnixMs: number;
+};
+
+type ReferencePricePair = {
+  pair_id: string;
+  base_asset_id: string;
+  quote_asset_id: string;
+  price_base_scale?: string;
+};
+
+const REFERENCE_ATTESTATION_TIMEOUT_MS = 3_000;
+const REFERENCE_ATTESTATION_CLOCK_SKEW_MS = 30_000;
+const U128_MAX = (1n << 128n) - 1n;
+
+export async function apiArrivalReferenceAttestation(
+  pair: ReferencePricePair,
+  auctionVerifierAddress: string | undefined
+): Promise<ArrivalReferenceAttestation> {
+  const response = await postJson<unknown>(
+    PROVER_URL,
+    "/api/public/reference-prices/attestation",
+    { pair_id: pair.pair_id },
+    {},
+    { timeoutMs: REFERENCE_ATTESTATION_TIMEOUT_MS }
+  );
+  return assertArrivalReferenceAttestation(
+    response,
+    pair,
+    auctionVerifierAddress,
+    Date.now()
+  );
+}
+
+export function assertArrivalReferenceAttestation(
+  response: unknown,
+  pair: ReferencePricePair,
+  auctionVerifierAddress: string | undefined,
+  nowUnixMs: number
+): ArrivalReferenceAttestation {
+  if (!isPlainObject(response) || !isPlainObject(response.attestation)) {
+    throw new Error("Reference-price attestation response is malformed");
+  }
+  const attestation = response.attestation;
+  const envelope = attestation.envelope;
+  const signature = attestation.signature;
+  const expectedVerifier = normalizeConfiguredFelt(auctionVerifierAddress);
+  const actualVerifier = normalizeConfiguredFelt(
+    attestation.auction_verifier_address
+  );
+  const midpoint = decimalU128(
+    isPlainObject(envelope) ? envelope.midpoint_price : undefined
+  );
+  const lower = decimalU128(
+    isPlainObject(envelope) ? envelope.lower_price : undefined
+  );
+  const upper = decimalU128(
+    isPlainObject(envelope) ? envelope.upper_price : undefined
+  );
+  const priceScale = decimalU128(
+    isPlainObject(envelope) ? envelope.price_base_scale : undefined
+  );
+  const configuredPriceScale = decimalU128(pair.price_base_scale);
+  const observedAt = isPlainObject(envelope)
+    ? envelope.observed_at_unix_ms
+    : undefined;
+  const sourceCount = isPlainObject(envelope)
+    ? envelope.source_count
+    : undefined;
+  const validUntil = attestation.valid_until_unix_ms;
+  const nonce = attestation.nonce;
+  const signatureR = isPlainObject(signature)
+    ? normalizeConfiguredFelt(signature.signature_r)
+    : "";
+  const signatureS = isPlainObject(signature)
+    ? normalizeConfiguredFelt(signature.signature_s)
+    : "";
+
+  if (
+    !expectedVerifier ||
+    actualVerifier !== expectedVerifier ||
+    !isPlainObject(envelope) ||
+    envelope.pair_id !== pair.pair_id ||
+    envelope.base_asset_id !== pair.base_asset_id ||
+    envelope.quote_asset_id !== pair.quote_asset_id ||
+    midpoint === null ||
+    midpoint === 0n ||
+    lower === null ||
+    lower === 0n ||
+    upper === null ||
+    upper === 0n ||
+    lower > midpoint ||
+    midpoint > upper ||
+    priceScale === null ||
+    priceScale === 0n ||
+    configuredPriceScale === null ||
+    priceScale !== configuredPriceScale ||
+    typeof sourceCount !== "number" ||
+    !Number.isInteger(sourceCount) ||
+    sourceCount < 3 ||
+    typeof observedAt !== "number" ||
+    !Number.isSafeInteger(observedAt) ||
+    observedAt <= 0 ||
+    observedAt > nowUnixMs + REFERENCE_ATTESTATION_CLOCK_SKEW_MS ||
+    typeof validUntil !== "number" ||
+    !Number.isSafeInteger(validUntil) ||
+    validUntil < nowUnixMs - REFERENCE_ATTESTATION_CLOCK_SKEW_MS ||
+    validUntil < observedAt ||
+    typeof nonce !== "number" ||
+    !Number.isSafeInteger(nonce) ||
+    nonce < 0 ||
+    !normalizeConfiguredFelt(attestation.source_set_commitment) ||
+    !normalizeConfiguredFelt(attestation.signer_public_key) ||
+    !signatureR ||
+    !signatureS
+  ) {
+    throw new Error("Reference-price attestation response is malformed");
+  }
+
+  return {
+    midpointPrice: midpoint.toString(),
+    priceBaseScale: priceScale.toString(),
+    observedAtUnixMs: observedAt,
+  };
+}
+
+function decimalU128(value: unknown): bigint | null {
+  if (typeof value !== "string" || !/^(0|[1-9]\d*)$/.test(value)) return null;
+  try {
+    const parsed = BigInt(value);
+    return parsed <= U128_MAX ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function apiSubmittablePairBatch(
   base: string,
-  quote: string,
+  quote: string
 ): Promise<BatchSummary> {
   const r = await fetchWithTimeout(
-    `${COORDINATOR_URL}/api/pairs/${encodeURIComponent(base)}/${encodeURIComponent(quote)}/batches/submittable`,
+    `${COORDINATOR_URL}/api/pairs/${encodeURIComponent(
+      base
+    )}/${encodeURIComponent(quote)}/batches/submittable`
   );
   if (!r.ok) throw new Error(`Coordinator ${r.status}`);
   return assertBatchSummary(await r.json(), "Coordinator submittable batch");
@@ -512,18 +745,22 @@ async function apiStatus(): Promise<CoordinatorStatus> {
   return r.json() as Promise<CoordinatorStatus>;
 }
 
-export async function apiBatchTranscripts(batchIds: string[]): Promise<PublicSettlementTranscript[]> {
+export async function apiBatchTranscripts(
+  batchIds: string[]
+): Promise<PublicSettlementTranscript[]> {
   if (batchIds.length === 0) return [];
   const loaded: PublicSettlementTranscript[] = [];
   for (const page of chunks(uniqueStrings(batchIds), BULK_BATCH_ID_PAGE_SIZE)) {
     const query = page.map(encodeURIComponent).join(",");
     const path = `/api/batches/transcripts?batch_ids=${query}`;
-    const bases = INDEXER_URL ? [COORDINATOR_URL, INDEXER_URL] : [COORDINATOR_URL];
+    const bases = INDEXER_URL
+      ? [COORDINATOR_URL, INDEXER_URL]
+      : [COORDINATOR_URL];
     for (const base of bases) {
       try {
         const r = await fetchWithTimeout(`${base}${path}`);
         if (!r.ok) continue;
-        loaded.push(...await r.json() as PublicSettlementTranscript[]);
+        loaded.push(...((await r.json()) as PublicSettlementTranscript[]));
         break;
       } catch {
         continue;
@@ -533,15 +770,19 @@ export async function apiBatchTranscripts(batchIds: string[]): Promise<PublicSet
   return loaded;
 }
 
-export async function apiProofJobStatuses(batchIds: string[]): Promise<PublicProofJobStatus[]> {
+export async function apiProofJobStatuses(
+  batchIds: string[]
+): Promise<PublicProofJobStatus[]> {
   if (!PROVER_URL || batchIds.length === 0) return [];
   const loaded: PublicProofJobStatus[] = [];
   for (const page of chunks(uniqueStrings(batchIds), BULK_BATCH_ID_PAGE_SIZE)) {
     const query = page.map(encodeURIComponent).join(",");
     try {
-      const r = await fetchWithTimeout(`${PROVER_URL}/api/public/proof-jobs?batch_ids=${query}`);
+      const r = await fetchWithTimeout(
+        `${PROVER_URL}/api/public/proof-jobs?batch_ids=${query}`
+      );
       if (r.ok) {
-        loaded.push(...await r.json() as PublicProofJobStatus[]);
+        loaded.push(...((await r.json()) as PublicProofJobStatus[]));
       }
     } catch {
       continue;
@@ -560,7 +801,10 @@ async function loadDeployment(): Promise<DeploymentConfig> {
   return deployment;
 }
 
-export function useBatches(): { batches: BatchSummary[]; online: boolean | null } {
+export function useBatches(): {
+  batches: BatchSummary[];
+  online: boolean | null;
+} {
   const [batches, setBatches] = useState<BatchSummary[]>([]);
   const [online, setOnline] = useState<boolean | null>(null);
 
@@ -569,14 +813,22 @@ export function useBatches(): { batches: BatchSummary[]; online: boolean | null 
     async function poll() {
       try {
         const data = await apiBatches();
-        if (!cancelled) { setBatches(data); setOnline(true); }
+        if (!cancelled) {
+          setBatches(data);
+          setOnline(true);
+        }
       } catch {
         if (!cancelled) setOnline(false);
       }
     }
     void poll();
-    const t = setInterval(() => { void poll(); }, 5000);
-    return () => { cancelled = true; clearInterval(t); };
+    const t = setInterval(() => {
+      void poll();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
 
   return { batches, online };
@@ -584,22 +836,32 @@ export function useBatches(): { batches: BatchSummary[]; online: boolean | null 
 
 export function usePublicSettlementTranscripts(
   batches: BatchSummary[],
-  extraBatchIds: string[] = [],
+  extraBatchIds: string[] = []
 ): Record<string, PublicSettlementTranscript> {
-  const [transcripts, setTranscripts] = useState<Record<string, PublicSettlementTranscript>>({});
-  const latestEpochByPair = batches.reduce<Record<string, number>>((acc, batch) => {
-    const pairId = batch.pair_id || "unknown";
-    acc[pairId] = Math.max(acc[pairId] ?? 0, batch.epoch_id ?? 0);
-    return acc;
-  }, {});
+  const [transcripts, setTranscripts] = useState<
+    Record<string, PublicSettlementTranscript>
+  >({});
+  const latestEpochByPair = batches.reduce<Record<string, number>>(
+    (acc, batch) => {
+      const pairId = batch.pair_id || "unknown";
+      acc[pairId] = Math.max(acc[pairId] ?? 0, batch.epoch_id ?? 0);
+      return acc;
+    },
+    {}
+  );
   const settledKey = batches
-    .filter(b => {
+    .filter((b) => {
       const latestEpoch = latestEpochByPair[b.pair_id || "unknown"] ?? 0;
       if (latestEpoch <= 0) return false;
-      if (!["Settled", "Closed", "Clearing", "Proving", "Settling"].includes(b.status)) return false;
+      if (
+        !["Settled", "Closed", "Clearing", "Proving", "Settling"].includes(
+          b.status
+        )
+      )
+        return false;
       return latestEpoch - b.epoch_id <= 16;
     })
-    .map(b => b.batch_id)
+    .map((b) => b.batch_id)
     .sort()
     .join("|");
   const extraKey = [...new Set(extraBatchIds)].filter(Boolean).sort().join("|");
@@ -609,7 +871,7 @@ export function usePublicSettlementTranscripts(
       ...extraKey.split("|").filter(Boolean),
     ]),
   ]
-    .filter(batchId => !transcripts[batchId])
+    .filter((batchId) => !transcripts[batchId])
     .sort()
     .join("|");
 
@@ -618,37 +880,51 @@ export function usePublicSettlementTranscripts(
     let cancelled = false;
 
     async function loadSettledTranscripts() {
-      const settledIds = pendingKey.split("|").filter(Boolean).slice(0, BACKGROUND_BATCH_ID_POLL_LIMIT);
+      const settledIds = pendingKey
+        .split("|")
+        .filter(Boolean)
+        .slice(0, BACKGROUND_BATCH_ID_POLL_LIMIT);
       if (settledIds.length === 0) return;
 
-      const loaded = await apiBatchTranscripts(settledIds)
-        .catch(() => [] as PublicSettlementTranscript[]);
+      const loaded = await apiBatchTranscripts(settledIds).catch(
+        () => [] as PublicSettlementTranscript[]
+      );
 
       if (cancelled) return;
       const next: Record<string, PublicSettlementTranscript> = {};
       for (const transcript of loaded) {
-        next[transcript.batch_id] = { ...transcript, loaded_at_unix_ms: Date.now() };
+        next[transcript.batch_id] = {
+          ...transcript,
+          loaded_at_unix_ms: Date.now(),
+        };
       }
       if (Object.keys(next).length > 0) {
-        setTranscripts(prev => ({ ...prev, ...next }));
+        setTranscripts((prev) => ({ ...prev, ...next }));
       }
     }
 
     void loadSettledTranscripts();
-    const t = setInterval(() => { void loadSettledTranscripts(); }, 15000);
-    return () => { cancelled = true; clearInterval(t); };
+    const t = setInterval(() => {
+      void loadSettledTranscripts();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, [pendingKey]);
 
   return transcripts;
 }
 
 export function usePublicProofJobStatuses(
-  batchIds: string[],
+  batchIds: string[]
 ): Record<string, PublicProofJobStatus> {
-  const [statuses, setStatuses] = useState<Record<string, PublicProofJobStatus>>({});
+  const [statuses, setStatuses] = useState<
+    Record<string, PublicProofJobStatus>
+  >({});
   const key = [...new Set(batchIds)]
     .filter(Boolean)
-    .filter(batchId => !isTerminalProofStatus(statuses[batchId]))
+    .filter((batchId) => !isTerminalProofStatus(statuses[batchId]))
     .sort()
     .join("|");
 
@@ -657,21 +933,31 @@ export function usePublicProofJobStatuses(
     let cancelled = false;
 
     async function loadStatuses() {
-      const ids = key.split("|").filter(Boolean).slice(0, BACKGROUND_BATCH_ID_POLL_LIMIT);
-      const loaded = await apiProofJobStatuses(ids).catch(() => [] as PublicProofJobStatus[]);
+      const ids = key
+        .split("|")
+        .filter(Boolean)
+        .slice(0, BACKGROUND_BATCH_ID_POLL_LIMIT);
+      const loaded = await apiProofJobStatuses(ids).catch(
+        () => [] as PublicProofJobStatus[]
+      );
       if (cancelled) return;
       const next: Record<string, PublicProofJobStatus> = {};
       for (const status of loaded) {
         next[status.batch_id] = status;
       }
       if (Object.keys(next).length > 0) {
-        setStatuses(prev => ({ ...prev, ...next }));
+        setStatuses((prev) => ({ ...prev, ...next }));
       }
     }
 
     void loadStatuses();
-    const t = setInterval(() => { void loadStatuses(); }, 2500);
-    return () => { cancelled = true; clearInterval(t); };
+    const t = setInterval(() => {
+      void loadStatuses();
+    }, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, [key]);
 
   return statuses;
@@ -683,12 +969,28 @@ function isTerminalProofStatus(status?: PublicProofJobStatus): boolean {
   return ["confirmed-onchain", "failed", "cancelled"].includes(status.state);
 }
 
-export function useDeployment(): DeploymentConfig | null {
+export function useDeploymentState(): {
+  deployment: DeploymentConfig | null;
+  error: string | null;
+} {
   const [deployment, setDeployment] = useState<DeploymentConfig | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    loadDeployment().then(setDeployment).catch(() => { /* noop */ });
+    loadDeployment()
+      .then((value) => {
+        setDeployment(value);
+        setError(null);
+      })
+      .catch((reason: unknown) => {
+        setDeployment(null);
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "Deployment configuration is unavailable"
+        );
+      });
   }, []);
-  return deployment;
+  return { deployment, error };
 }
 
 export function useCoordinatorStatus(): CoordinatorStatus | null {
@@ -704,14 +1006,19 @@ export function useCoordinatorStatus(): CoordinatorStatus | null {
       }
     }
     void poll();
-    const t = setInterval(() => { void poll(); }, 15000);
-    return () => { cancelled = true; clearInterval(t); };
+    const t = setInterval(() => {
+      void poll();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, []);
   return status;
 }
 
 export function lastClearingByPair(
-  transcripts: Record<string, PublicSettlementTranscript>,
+  transcripts: Record<string, PublicSettlementTranscript>
 ): Record<string, LastClearingPrice> {
   const result: Record<string, LastClearingPrice> = {};
   for (const transcript of Object.values(transcripts)) {
@@ -722,15 +1029,25 @@ export function lastClearingByPair(
       batchId: transcript.batch_id,
       epochId: transcript.batch_epoch,
       clearingPrice: String(transcript.clearing_price),
-      priceBaseScale: transcript.price_base_scale === undefined ? undefined : String(transcript.price_base_scale),
+      priceBaseScale:
+        transcript.price_base_scale === undefined
+          ? undefined
+          : String(transcript.price_base_scale),
     };
   }
   return result;
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<Response> {
   try {
-    return await runtimeFetchWithTimeout(input, init, BACKGROUND_FETCH_TIMEOUT_MS);
+    return await runtimeFetchWithTimeout(
+      input,
+      init,
+      BACKGROUND_FETCH_TIMEOUT_MS
+    );
   } catch {
     throw new Error("Network request failed. Check your connection and retry.");
   }
@@ -740,7 +1057,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-export function assertBatchSummary(value: unknown, label: string): BatchSummary {
+export function assertBatchSummary(
+  value: unknown,
+  label: string
+): BatchSummary {
   if (!isPlainObject(value)) throw new Error(`${label} response is malformed`);
   const batch = value as Record<string, unknown>;
   const batchId = batch.batch_id;
@@ -776,22 +1096,28 @@ export function assertBatchSummary(value: unknown, label: string): BatchSummary 
 
 function readObjectPath(
   root: unknown,
-  path: readonly string[],
+  path: readonly string[]
 ): Record<string, unknown> | null {
   let current: unknown = root;
   for (const segment of path) {
     if (!isPlainObject(current)) return null;
-    current = current[segment];
+    const property = Object.getOwnPropertyDescriptor(current, segment);
+    if (!property) return null;
+    current = property.value;
   }
   return isPlainObject(current) ? current : null;
 }
 
-function readOptionalObjectPath(root: unknown, path: readonly string[]): unknown {
+function readOptionalObjectPath(
+  root: unknown,
+  path: readonly string[]
+): unknown {
   let current: unknown = root;
   for (const segment of path) {
     if (!isPlainObject(current)) return undefined;
-    if (!(segment in current)) return undefined;
-    current = current[segment];
+    const property = Object.getOwnPropertyDescriptor(current, segment);
+    if (!property) return undefined;
+    current = property.value;
   }
   return current;
 }

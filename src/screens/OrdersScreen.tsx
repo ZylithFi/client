@@ -19,17 +19,19 @@ function fmtAddr(s: string): string {
   return `${s.slice(0, 6)}…${s.slice(-4)}`;
 }
 
+function orderModeLabel(order: LocalOrder): string {
+  if (order.retryUnfilled) return "Private retry";
+  if (order.executionPreference === "PrivateThenExternal") return "Midpoint matcher";
+  return "Midpoint";
+}
+
 export function OrdersScreen({
   orders,
   onCancel,
-  onCompleteExternal,
-  externalCompletionBusy,
   walletReady,
 }: {
   orders: LocalOrder[];
   onCancel: (o: LocalOrder) => void;
-  onCompleteExternal?: (o: LocalOrder) => void;
-  externalCompletionBusy?: string | null;
   walletReady: boolean;
 }) {
   const [filter, setFilter] = useState<"active" | "history">("active");
@@ -88,7 +90,7 @@ export function OrdersScreen({
                 <th>Side</th>
                 <th>Mode</th>
                 <th>Amount</th>
-                <th>Limit</th>
+                <th>Bound</th>
                 <th>Clearing</th>
                 <th>Status</th>
                 <th>Time</th>
@@ -109,7 +111,7 @@ export function OrdersScreen({
                         {order.side}
                       </span>
                     </td>
-                    <td>{order.wireMode}</td>
+                    <td>{orderModeLabel(order)}</td>
                     <td className="num">{order.amount}</td>
                     <td className="num">{order.limitPrice || "-"}</td>
                     <td className="num">{order.clearingPrice || "-"}</td>
@@ -124,29 +126,7 @@ export function OrdersScreen({
                           onClick={() => onCancel(order)}
                         >Cancel</button>
                       )}
-                      {onCompleteExternal &&
-                        order.externalCompletion &&
-                        ["available", "ready", "failed"].includes(
-                          order.externalCompletion.status
-                        ) && (
-                          <button
-                            style={{
-                              marginLeft: 8,
-                              fontSize: 10,
-                              color: "var(--z-accent)",
-                              letterSpacing: "0.04em",
-                            }}
-                            disabled={
-                              externalCompletionBusy === order.orderCommitment
-                            }
-                            onClick={() => onCompleteExternal(order)}
-                          >
-                            {externalCompletionBusy === order.orderCommitment
-                              ? "Completing..."
-                              : "Complete via AVNU"}
-                          </button>
-                        )}
-                      {order.externalCompletion?.status === "consolidating" && (
+                      {order.externalMatch && (
                         <span
                           style={{
                             marginLeft: 8,
@@ -154,8 +134,9 @@ export function OrdersScreen({
                             color: "var(--z-status-info)",
                             letterSpacing: "0.04em",
                           }}
+                          title={order.externalMatch.lastError || undefined}
                         >
-                          Preparing residual...
+                          Awaiting matcher
                         </span>
                       )}
                     </td>

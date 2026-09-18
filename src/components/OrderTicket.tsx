@@ -6,7 +6,7 @@ import type { WalletBalance } from "../domain/shieldedBalances";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
 
 export type TicketShape = "limit" | "strategy";
-export type StratKind = "TWAP" | "VWAP" | "Repeat";
+export type StratKind = "Repeat";
 export type ExecutionPreference = "PrivateOnly" | "PrivateThenExternal";
 
 export type PairConfig = {
@@ -16,7 +16,15 @@ export type PairConfig = {
   min_order_amount: string;
   price_base_scale?: string;
   taker_fee_bps?: number;
+  external_match_enabled: boolean;
   enabled: boolean;
+};
+
+export type ReferencePriceSnapshot = {
+  displayPrice: string;
+  midpointPrice: string;
+  priceBaseScale?: string;
+  observedAtUnixMs?: number;
 };
 
 export type TicketSubmitIntent = {
@@ -65,6 +73,7 @@ type OrderTicketState = {
   childSize: string;
   priceLimit: string;
   jitter: number;
+  priceProtectionBps: string;
   executionPreference: ExecutionPreference;
   keepTryingPrivate: boolean;
   retryHours: string;
@@ -78,7 +87,7 @@ type TicketAction =
 const initialTicketState: OrderTicketState = {
   side: "Buy",
   shape: "limit",
-  stratKind: "TWAP",
+  stratKind: "Repeat",
   amount: "",
   limitPrice: "",
   minFill: "",
@@ -87,6 +96,7 @@ const initialTicketState: OrderTicketState = {
   childSize: "",
   priceLimit: "",
   jitter: 12,
+  priceProtectionBps: "30",
   executionPreference: "PrivateThenExternal",
   keepTryingPrivate: false,
   retryHours: "4",
@@ -103,6 +113,7 @@ function ticketReducer(state: OrderTicketState, action: TicketAction): OrderTick
     fillOrKill: false,
     childSize: "",
     priceLimit: "",
+    priceProtectionBps: "30",
     executionPreference: "PrivateThenExternal",
     keepTryingPrivate: false,
     retryHours: "4",
@@ -111,34 +122,13 @@ function ticketReducer(state: OrderTicketState, action: TicketAction): OrderTick
 
 function submitLabel(state: OrderTicketState, submitting: boolean) {
   if (submitting) return "Submitting...";
-  if (state.shape === "strategy") return `Submit ${state.stratKind}`;
-  return `Submit ${state.side}`;
-}
-
-function ShapeTab({
-  active,
-  title,
-  onClick,
-}: {
-  active: boolean;
-  title: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={`shape-tab ${active ? "on" : ""}`}
-      onClick={onClick}
-    >
-      <span className="shape-tab-title">{title}</span>
-    </button>
-  );
+  return `${state.side}`;
 }
 
 export function OrderTicket({
   pair,
   balances,
-  batchWindowMs,
+  referencePrice,
   walletReady,
   hasPrivateBalance,
   submitting,
@@ -150,7 +140,7 @@ export function OrderTicket({
 }: {
   pair: PairConfig | null;
   balances: WalletBalance[];
-  batchWindowMs: number;
+  referencePrice?: ReferencePriceSnapshot | null;
   walletReady: boolean;
   hasPrivateBalance: boolean;
   submitting: boolean;
@@ -174,6 +164,10 @@ export function OrderTicket({
 
   const baseAsset = pair.base_asset_id;
   const quoteAsset = pair.quote_asset_id;
+  const externalMatchEnabled = pair.external_match_enabled;
+  const executionPreference = externalMatchEnabled
+    ? state.executionPreference
+    : "PrivateOnly";
   const priceBaseScaleValue = pair.price_base_scale ?? assetScale(baseAsset).toString();
   const fundingAsset = state.side === "Buy" ? quoteAsset : baseAsset;
   const fundingBal = balances.find(b => b.asset === fundingAsset);
@@ -185,6 +179,12 @@ export function OrderTicket({
   const lockedDisplay = fundingBal && walletReady && fundingLocked > 0n
     ? safeFromAtomicStr(fundingBal.locked, fundingAsset)
     : null;
+  const referenceQuoteAtomic = referenceQuoteAtomicPerBase(pair, referencePrice);
+  const priceProtectionBps = normalizedProtectionBps(state.priceProtectionBps);
+  const limitPrice = referenceQuoteAtomic === null
+    ? ""
+    : protectedLimitPrice(referenceQuoteAtomic, quoteAsset, state.side, priceProtectionBps);
+  const protectionLabel = state.side === "Buy" ? "Max price" : "Min price";
 
   if (!walletReady) {
     return (
@@ -222,8 +222,7 @@ export function OrderTicket({
       dispatch({ type: "patch", patch: { amount: safeFromAtomicStr(portion, baseAsset, "0") } });
       return;
     }
-    const priceInput = state.shape === "strategy" ? state.priceLimit : state.limitPrice;
-    const price = BigInt(toPriceAtomicStr(priceInput, quoteAsset));
+    const price = BigInt(toPriceAtomicStr(limitPrice, quoteAsset));
     if (price <= 0n) return;
     const priceBaseScale = safeAtomicAmount(priceBaseScaleValue);
     if (priceBaseScale <= 0n) return;
@@ -234,47 +233,47 @@ export function OrderTicket({
   const canQuickFill = Boolean(
     walletReady &&
       fundingBal &&
+      fundingAvailable > 0n &&
       (state.side === "Sell" || (() => {
-        const priceInput = state.shape === "strategy" ? state.priceLimit : state.limitPrice;
-        return Number.isFinite(Number(priceInput)) && Number(priceInput) > 0;
+        return Number.isFinite(Number(limitPrice)) && Number(limitPrice) > 0;
       })()),
   );
-  const durationOptions = [
-    { label: "1h", value: "1" },
-    { label: "4h", value: "4" },
-    { label: "12h", value: "12" },
-    { label: "24h", value: "24" },
-  ];
   const retryOptions = [
     { label: "1h", value: "1" },
     { label: "4h", value: "4" },
     { label: "12h", value: "12" },
   ];
-  const batchTimingReady = batchWindowMs > 0;
-  const strategyChildCount = batchTimingReady
-    ? Math.max(1, Math.ceil((Number(state.durationHours || "0") * 3_600_000) / batchWindowMs))
-    : null;
-  const strategyChildSize = state.childSize.trim()
-    ? state.childSize
-    : state.amount.trim() && strategyChildCount !== null && strategyChildCount > 0
-      ? (Number(state.amount) / strategyChildCount).toLocaleString("en-US", { maximumFractionDigits: 8 })
-      : "auto";
 
   const canSubmit = walletReady && !submitting && (() => {
     if (fundingAvailable <= 0n) return false;
-    if (state.shape === "limit") return state.amount.trim() !== "" && state.limitPrice.trim() !== "";
-    if (state.shape === "strategy") return batchTimingReady && state.amount.trim() !== "" && state.priceLimit.trim() !== "";
-    return false;
+    return state.amount.trim() !== "" && limitPrice.trim() !== "";
   })();
 
   async function submitStandard() {
-    const ok = await onSubmit(state);
+    const ok = await onSubmit({
+      ...state,
+      shape: "limit",
+      stratKind: "Repeat",
+      limitPrice,
+      priceLimit: "",
+      childSize: "",
+      jitter: 0,
+      executionPreference,
+    });
     if (ok !== false) dispatch({ type: "resetAfterSubmit" });
   }
 
-  const summaryPrice = state.shape === "limit" ? state.limitPrice : state.priceLimit;
-  const showSummary = state.amount.trim() !== "" && summaryPrice.trim() !== "";
-  const previewIntent: TicketSubmitIntent = state;
+  const showSummary = state.amount.trim() !== "" && limitPrice.trim() !== "";
+  const previewIntent: TicketSubmitIntent = {
+    ...state,
+    shape: "limit",
+    stratKind: "Repeat",
+    limitPrice,
+    priceLimit: "",
+    childSize: "",
+    jitter: 0,
+    executionPreference,
+  };
   let fundingPreview: FundingPreview | null = null;
   let fundingPreviewError: string | null = null;
   if (showSummary && onPreviewFunding) {
@@ -345,61 +344,69 @@ export function OrderTicket({
             </div>
           )}
         </div>
-        <div
-          className="ticket-shape-row"
-          style={{ gridTemplateColumns: "1fr 1fr" }}
-        >
-          <ShapeTab
-            title="Limit"
-            active={state.shape === "limit"}
-            onClick={() => dispatch({ type: "patch", patch: { shape: "limit" } })}
-          />
-          <ShapeTab
-            title="Program"
-            active={state.shape === "strategy"}
-            onClick={() => dispatch({ type: "patch", patch: { shape: "strategy" } })}
-          />
-        </div>
+        <>
+          <div className="midpoint-ticket-panel">
+            <div>
+              <span>Midpoint</span>
+              <strong>{referencePrice?.displayPrice ?? "-"}</strong>
+            </div>
+            <div>
+              <span>{protectionLabel}</span>
+              <strong>{limitPrice || "-"}</strong>
+            </div>
+          </div>
 
-        {state.shape === "limit" && (
-          <>
-            <div className="f-row">
-              <label className="f-label">{state.side === "Buy" ? "Max price" : "Min price"}</label>
-              <div className="f-input-box">
-                <input className="f-input" type="text" inputMode="decimal" placeholder="0"
-                  value={state.limitPrice} onChange={e => dispatch({ type: "patch", patch: { limitPrice: e.target.value } })} />
-                <span className="f-unit">{quoteAsset}</span>
-              </div>
-            </div>
-            <div className="f-row">
-              <label className="f-label">Completion</label>
-              <div className="f-select-row" style={{ height: 36 }}>
+          <div className="f-row">
+            <label className="f-label">Price protection</label>
+            <div className="f-select-row" style={{ height: 36 }}>
+              {["10", "30", "50", "100"].map(opt => (
                 <button
+                  key={opt}
                   type="button"
-                  className={`f-select-opt ${state.executionPreference === "PrivateThenExternal" ? "on" : ""}`}
-                  onClick={() => dispatch({
-                    type: "patch",
-                    patch: {
-                      executionPreference: "PrivateThenExternal",
-                      keepTryingPrivate: false,
-                    },
-                  })}
+                  className={`f-select-opt ${state.priceProtectionBps === opt ? "on" : ""}`}
+                  onClick={() => dispatch({ type: "patch", patch: { priceProtectionBps: opt } })}
                 >
-                  Complete
+                  {Number(opt) / 100}%
                 </button>
-                <button
-                  type="button"
-                  className={`f-select-opt ${state.executionPreference === "PrivateOnly" ? "on" : ""}`}
-                  onClick={() => dispatch({
-                    type: "patch",
-                    patch: { executionPreference: "PrivateOnly" },
-                  })}
-                >
-                  Private only
-                </button>
-              </div>
+              ))}
             </div>
-            {state.executionPreference === "PrivateOnly" && (
+            {!referencePrice && (
+              <div className="field-note warn">
+                Waiting for the signed midpoint reference.
+              </div>
+            )}
+          </div>
+            {externalMatchEnabled && (
+              <div className="f-row">
+                <label className="f-label">Completion</label>
+                <div className="f-select-row" style={{ height: 36 }}>
+                  <button
+                    type="button"
+                    className={`f-select-opt ${executionPreference === "PrivateThenExternal" ? "on" : ""}`}
+                    onClick={() => dispatch({
+                      type: "patch",
+                      patch: {
+                        executionPreference: "PrivateThenExternal",
+                        keepTryingPrivate: false,
+                      },
+                    })}
+                  >
+                    Match residual
+                  </button>
+                  <button
+                    type="button"
+                    className={`f-select-opt ${executionPreference === "PrivateOnly" ? "on" : ""}`}
+                    onClick={() => dispatch({
+                      type: "patch",
+                      patch: { executionPreference: "PrivateOnly" },
+                    })}
+                  >
+                    Private only
+                  </button>
+                </div>
+              </div>
+            )}
+            {executionPreference === "PrivateOnly" && (
               <div className="f-row">
                 <label className="f-check" style={{ marginBottom: 10 }}>
                   <input
@@ -452,61 +459,7 @@ export function OrderTicket({
                 </label>
               </>
             )}
-          </>
-        )}
-
-        {state.shape === "strategy" && (
-          <>
-            <div className="f-select-row" style={{ marginBottom: 14, height: 30 }}>
-              {(["TWAP", "VWAP", "Repeat"] as StratKind[]).map(k => (
-                <button key={k} className={`f-select-opt ${state.stratKind === k ? "on" : ""}`} onClick={() => dispatch({ type: "patch", patch: { stratKind: k } })}>{k}</button>
-              ))}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-              <div className="f-row" style={{ marginBottom: 0 }}>
-                <label className="f-label">Duration</label>
-                <div className="f-select-row" style={{ height: 36 }}>
-                  {durationOptions.map(opt => (
-                    <button
-                      key={opt.value}
-                      className={`f-select-opt ${state.durationHours === opt.value ? "on" : ""}`}
-                      onClick={() => dispatch({ type: "patch", patch: { durationHours: opt.value } })}
-                    >{opt.label}</button>
-                  ))}
-                </div>
-              </div>
-              <div className="f-row" style={{ marginBottom: 0 }}>
-                <label className="f-label">Child size</label>
-                <div className="f-input-box" style={{ height: 36 }}>
-                  <input className="f-input" type="text" inputMode="decimal" placeholder="auto"
-                    value={state.childSize} onChange={e => dispatch({ type: "patch", patch: { childSize: e.target.value } })} style={{ fontSize: 14 }} />
-                </div>
-              </div>
-            </div>
-            <div className="f-row">
-              <label className="f-label">Price limit</label>
-              <div className="f-input-box">
-                <input className="f-input" type="text" inputMode="decimal" placeholder="0"
-                  value={state.priceLimit} onChange={e => dispatch({ type: "patch", patch: { priceLimit: e.target.value } })} />
-                <span className="f-unit">{quoteAsset}</span>
-              </div>
-            </div>
-            <div className="f-row">
-              <label className="f-label">Randomness ±{state.jitter}%</label>
-              <input className="z-range" type="range" min={0} max={40} value={state.jitter} onChange={e => dispatch({ type: "patch", patch: { jitter: Number(e.target.value) } })} />
-            </div>
-            <div className="strategy-explainer">
-              <div className="strategy-preview">
-                {strategyChildCount === null
-                  ? "Auction timing loading"
-                  : `${strategyChildCount} slice${strategyChildCount !== 1 ? "s" : ""} · ${strategyChildSize} ${baseAsset} each`}
-              </div>
-              {state.stratKind === "TWAP" && "TWAP splits your order into equal time-weighted slices."}
-              {state.stratKind === "VWAP" && "VWAP-style execution uses a deterministic private weight schedule for child sizes; it does not depend on public venue volume."}
-              {state.stratKind === "Repeat" && "Repeat submits the configured child size until the total amount is exhausted or the parent is cancelled."}
-            </div>
-          </>
-        )}
+        </>
 
         <>
           {showSummary && (
@@ -517,8 +470,16 @@ export function OrderTicket({
                   <span className="r">{state.amount} {baseAsset}</span>
                 </div>
                 <div className="wc-row">
-                  <span className="l">{state.shape === "strategy" ? "Price limit" : state.side === "Buy" ? "Max price" : "Min price"}</span>
-                  <span className="r">{summaryPrice} {quoteAsset}</span>
+                  <span className="l">Midpoint</span>
+                  <span className="r">{referencePrice?.displayPrice ?? "-"} {quoteAsset}</span>
+                </div>
+                <div className="wc-row">
+                  <span className="l">{protectionLabel}</span>
+                  <span className="r">{limitPrice} {quoteAsset}</span>
+                </div>
+                <div className="wc-row">
+                  <span className="l">Protection</span>
+                  <span className="r">{Number(priceProtectionBps) / 100}%</span>
                 </div>
                 <div className="wc-row">
                   <span className="l">Side</span>
@@ -527,11 +488,11 @@ export function OrderTicket({
                 <div className="wc-row">
                   <span className="l">Completion</span>
                   <span className="r">
-                    {state.executionPreference === "PrivateOnly"
+                    {executionPreference === "PrivateOnly"
                       ? state.keepTryingPrivate
                         ? `${state.retryHours}h private`
                         : "Private only"
-                      : "Private + AVNU"}
+                      : "Midpoint matcher"}
                   </span>
                 </div>
                 <div className="wc-divider" />
@@ -561,11 +522,6 @@ export function OrderTicket({
                       <span className="l">Expected change</span>
                       <span className="r">{safeFromAtomicStr(fundingPreview.expected_change, fundingPreview.asset)} {fundingPreview.asset}</span>
                     </div>
-                    {state.shape === "strategy" && (
-                      <div className="wc-note">
-                        Preview uses the next child slice; randomized slicing can move the final lock slightly.
-                      </div>
-                    )}
                   </>
                 )}
                 {fundingPreviewError && (
@@ -585,6 +541,7 @@ export function OrderTicket({
           )}
           <button
             className={`submit-btn ${state.side === "Sell" ? "sell-mode" : "buy-mode"}`}
+            aria-label={`${state.side} order`}
             disabled={!canSubmit}
             onClick={() => { void submitStandard(); }}
           >
@@ -594,4 +551,39 @@ export function OrderTicket({
       </div>
     </div>
   );
+}
+
+function normalizedProtectionBps(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 30;
+  return Math.min(1_000, Math.max(1, Math.round(parsed)));
+}
+
+function referenceQuoteAtomicPerBase(
+  pair: PairConfig,
+  referencePrice?: ReferencePriceSnapshot | null,
+): bigint | null {
+  if (!referencePrice) return null;
+  try {
+    const baseScale = assetScale(pair.base_asset_id);
+    const priceBaseScale = BigInt(referencePrice.priceBaseScale ?? pair.price_base_scale ?? baseScale.toString());
+    if (priceBaseScale <= 0n) return null;
+    return (BigInt(referencePrice.midpointPrice) * baseScale) / priceBaseScale;
+  } catch {
+    return null;
+  }
+}
+
+function protectedLimitPrice(
+  quoteAtomicPerBase: bigint,
+  quoteAsset: string,
+  side: "Buy" | "Sell",
+  protectionBps: number,
+): string {
+  const denominator = 10_000n;
+  const bps = BigInt(protectionBps);
+  const adjusted = side === "Buy"
+    ? (quoteAtomicPerBase * (denominator + bps) + denominator - 1n) / denominator
+    : (quoteAtomicPerBase * (denominator - bps)) / denominator;
+  return safeFromAtomicStr(adjusted, quoteAsset, "0");
 }

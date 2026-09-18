@@ -8,7 +8,6 @@ import {
 } from "@starkware-libs/starknet-privacy-sdk/browser";
 import type {
   CallAndProof,
-  Note,
   PrivateRegistry,
   Warning,
 } from "@starkware-libs/starknet-privacy-sdk";
@@ -23,7 +22,6 @@ import {
   constants,
   ec,
   hash,
-  transaction as starknetTransaction,
   type Call,
 } from "starknet";
 import { STARKNET_FIELD_PRIME, normalizeStrictFelt } from "../domain/felt";
@@ -148,73 +146,6 @@ export type SubmitPrivacyOpenNoteWithdrawalResult = {
   openNoteId: string;
   sdkRegistry: PrivateRegistry;
 };
-
-export type AvnuPrivateExecutorCall = {
-  contract_address: string;
-  entrypoint: string;
-  calldata: string[];
-};
-
-export type SubmitPrivacyAvnuSwapInput = {
-  seedHex: string;
-  chainId: string;
-  rpcUrl: string;
-  privacyPoolAddress: string;
-  tokenAddress: string;
-  buyTokenAddress: string;
-  executorAddress: string;
-  executorCalls: AvnuPrivateExecutorCall[];
-  sellAmount: bigint;
-  inputNote: Note;
-  discoveryUrl: string;
-  provingUrl: string;
-  provingOhttpEnabled?: boolean;
-  paymasterAddress?: string;
-  paymasterUrl?: string;
-  privacyProofSignerClassHash?: string;
-  minProvingDelayBlocks: number;
-  sdkRegistry: PrivateRegistry;
-};
-
-export type SubmitPrivacyAvnuSwapResult = {
-  transactionHash: string;
-  outputOpenNoteId: string;
-  sdkRegistry: PrivateRegistry;
-};
-
-/**
- * AVNU's private executor expects Cairo 1's canonical `Call[]` encoding with
- * the output open-note id appended as the final felt. Keep this conversion in
- * one tested function so the route payload cannot accidentally be submitted
- * as a normal public multicall.
- */
-export function avnuPrivateExecutorCalldata(input: {
-  buyTokenAddress: string;
-  executorCalls: AvnuPrivateExecutorCall[];
-  outputOpenNoteId: string;
-}): string[] {
-  if (input.executorCalls.length === 0) {
-    throw new Error("AVNU private completion returned no executor calls");
-  }
-  const calls: Call[] = input.executorCalls.map((call) => ({
-    contractAddress: normalizeAddress(call.contract_address),
-    entrypoint: call.entrypoint,
-    calldata: call.calldata.map(String),
-  }));
-  if (calls.some((call) => !call.contractAddress || !call.entrypoint)) {
-    throw new Error(
-      "AVNU private completion returned an invalid executor call"
-    );
-  }
-  const serializedCalls = starknetTransaction
-    .fromCallsToExecuteCalldata_cairo1(calls)
-    .map(String);
-  return [
-    normalizeAddress(input.buyTokenAddress),
-    ...serializedCalls,
-    normalizeAddress(input.outputOpenNoteId),
-  ];
-}
 
 export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
   return [
@@ -660,172 +591,6 @@ export async function submitPrivacyOpenNoteWithdrawal(
   });
 }
 
-export async function submitPrivacyAvnuSwap(
-  input: SubmitPrivacyAvnuSwapInput
-): Promise<SubmitPrivacyAvnuSwapResult> {
-  const tokenAddress = normalizeAddress(input.tokenAddress);
-  const buyTokenAddress = normalizeAddress(input.buyTokenAddress);
-  const executorAddress = normalizeAddress(input.executorAddress);
-  if (!tokenAddress || !buyTokenAddress || !executorAddress) {
-    throw new Error(
-      "AVNU private completion contains an invalid Starknet address"
-    );
-  }
-  if (tokenAddress === buyTokenAddress) {
-    throw new Error(
-      "AVNU private completion requires distinct input and output tokens"
-    );
-  }
-  if (input.sellAmount <= 0n) {
-    throw new Error("AVNU private completion requires a positive input amount");
-  }
-  if (input.inputNote.amount < input.sellAmount) {
-    throw new Error(
-      "AVNU private completion input note is smaller than the quoted amount"
-    );
-  }
-
-  const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
-  const txDelayBlocks = Math.max(
-    input.minProvingDelayBlocks,
-    STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS
-  );
-  const account = await runFundingStage(
-    "Private external completion signer setup failed",
-    () =>
-      createEmbeddedPrivacyProofAccount({
-        seedHex: input.seedHex,
-        rpcProvider,
-        paymasterUrl: input.paymasterUrl,
-        privacyProofSignerClassHash: input.privacyProofSignerClassHash,
-        minProvingDelayBlocks: txDelayBlocks,
-      })
-  );
-  const discoveryProvider = new IndexerDiscoveryProvider(
-    serviceBaseUrl(input.discoveryUrl),
-    input.privacyPoolAddress
-  );
-  await runFundingStage(
-    "Private external completion service check failed",
-    () => requireHealthyDiscovery(discoveryProvider, input.discoveryUrl)
-  );
-
-  let outputOpenNoteId = "";
-  return runProofDelayRetryLoop({
-    proofDelayScheduleBlocks: STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS,
-    retryStagePrefix: "Private external completion",
-    fallbackErrorMessage: "Private external completion proof submission failed",
-    classifier: {
-      isProofBlockTooRecent,
-      isProofExpired,
-      isContractVisibilityLag: async (error) =>
-        isProofProviderContractVisibilityLag(error) &&
-        (await isClassDeployed(rpcProvider, input.privacyPoolAddress).catch(
-          () => false
-        )),
-      isProviderBusy: isProofProviderServiceBusy,
-      isProviderTransient: isProofProviderTransientNetworkError,
-    },
-    setStage: setFundingStage,
-    runAttempt: async (proofDelayBlocks) => {
-      const provingBlockId = await runFundingStage(
-        "Private external completion proof setup failed",
-        () => provingBlock(rpcProvider, proofDelayBlocks)
-      );
-      const execution = await runFundingStage(
-        "Private external completion proof failed",
-        () =>
-          executeWithProvingTransportFallback({
-            flow: "external-completion",
-            chainId: input.chainId,
-            rpcUrl: input.rpcUrl,
-            privacyPoolAddress: input.privacyPoolAddress,
-            provingUrl: input.provingUrl,
-            provingBlockId,
-            provingOhttpEnabled: input.provingOhttpEnabled,
-            execute: (provingProvider) => {
-              const transfers = createPrivateTransfers({
-                account: account as never,
-                viewingKeyProvider: {
-                  getViewingKey: async () =>
-                    derivePrivacyViewingKey(input.seedHex),
-                },
-                provingProvider,
-                discoveryProvider,
-                poolContractAddress: input.privacyPoolAddress,
-              });
-              return transfers
-                .build({
-                  autoRegister: true,
-                  autoSetup: true,
-                  autoDiscover: { notes: "refresh", channels: "refresh" },
-                  registry: input.sdkRegistry,
-                  registryConst: true,
-                })
-                .with(tokenAddress, (token) =>
-                  token
-                    .inputs(input.inputNote)
-                    .withdraw({
-                      recipient: executorAddress,
-                      amount: input.sellAmount,
-                    })
-                    .surplusTo(account.address, false)
-                )
-                .with(buyTokenAddress, (token) =>
-                  token.transfer({
-                    recipient: account.address,
-                    amount: Open,
-                  })
-                )
-                .invoke(({ openNotes }) => {
-                  const openNote = openNotes.find((entry) =>
-                    sameFelt(entry.token, buyTokenAddress)
-                  );
-                  if (!openNote) {
-                    throw new Error(
-                      "AVNU private completion output open note was not built correctly"
-                    );
-                  }
-                  outputOpenNoteId = normalizeAddress(openNote.noteId);
-                  if (!outputOpenNoteId) {
-                    throw new Error(
-                      "AVNU private completion returned an invalid output open note"
-                    );
-                  }
-                  return {
-                    contractAddress: executorAddress,
-                    calldata: avnuPrivateExecutorCalldata({
-                      buyTokenAddress,
-                      executorCalls: input.executorCalls,
-                      outputOpenNoteId,
-                    }),
-                  };
-                })
-                .execute({ provingBlockId });
-            },
-          })
-      );
-      assertNoSdkPrivacyWarnings(execution.warnings, "external completion");
-      const transactionHash = await runFundingStage(
-        "Private external completion submission failed",
-        () =>
-          submitProofBearingCall({
-            signerAddress: account.address,
-            chainId: input.chainId,
-            paymasterAddress: input.paymasterAddress,
-            paymasterUrl: input.paymasterUrl,
-            callAndProof: execution.callAndProof,
-          })
-      );
-      return {
-        transactionHash,
-        outputOpenNoteId,
-        sdkRegistry: execution.registry,
-      };
-    },
-  });
-}
-
 async function requireHealthyDiscovery(
   discoveryProvider: IndexerDiscoveryProvider,
   discoveryUrl: string
@@ -884,7 +649,7 @@ async function runFundingStage<T>(
 
 function assertNoSdkPrivacyWarnings(
   warnings: Warning[],
-  flow: "deposit" | "withdrawal" | "external completion"
+  flow: "deposit" | "withdrawal"
 ) {
   if (warnings.length === 0) return;
   throw new Error(
@@ -905,7 +670,7 @@ export function summarizeSdkPrivacyWarnings(warnings: Warning[]) {
 }
 
 async function executeWithProvingTransportFallback<T>(input: {
-  flow: "deposit" | "withdrawal" | "external-completion";
+  flow: "deposit" | "withdrawal";
   chainId: string;
   rpcUrl: string;
   privacyPoolAddress: string;
@@ -933,7 +698,7 @@ async function executeWithProvingTransportFallback<T>(input: {
 }
 
 export async function runProvingTransportAttempts<T>(input: {
-  flow: "deposit" | "withdrawal" | "external-completion";
+  flow: "deposit" | "withdrawal";
   provingOhttpEnabled?: boolean;
   setStage: (stage: string) => void;
   run: (useOhttp: boolean) => Promise<T>;

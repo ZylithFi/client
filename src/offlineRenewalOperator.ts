@@ -275,7 +275,7 @@ async function priorSlotReuseGuard(
       return slotResult(
         slot,
         "awaiting_settlement",
-        `Prior child batch ${prior.batch_id} proof failed; refresh this package before reusing position capital.`
+        `Prior child batch ${prior.batch_id} proof failed; refresh this package before reusing order capital.`
       );
     }
     if (proofJobConfirmed(status)) {
@@ -284,13 +284,13 @@ async function priorSlotReuseGuard(
         return slotResult(
           slot,
           "awaiting_wallet_refresh",
-          `Prior child batch ${prior.batch_id} settled; refresh this package before reusing position capital.`
+          `Prior child batch ${prior.batch_id} settled; refresh this package before reusing order capital.`
         );
       }
       return slotResult(
         slot,
         "awaiting_wallet_refresh",
-        `Prior child batch ${prior.batch_id} settled; refresh this package before reusing position capital.`
+        `Prior child batch ${prior.batch_id} settled; refresh this package before reusing order capital.`
       );
     }
     return slotResult(

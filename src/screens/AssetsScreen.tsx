@@ -379,7 +379,7 @@ export function AssetsScreen({
                     <td className="num">{plan.sourceNoteCount}</td>
                     <td className="num">{plan.sourceAmountDisplay}</td>
                     <td className="num">{plan.targetNoteCount}</td>
-                    <td className="tca-muted-cell">
+                    <td className="muted-cell">
                       {plan.reason}
                       {consolidationError && (
                         <div className="danger-text">{consolidationError}</div>

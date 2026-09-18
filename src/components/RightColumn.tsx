@@ -106,6 +106,12 @@ function ClaimSection({
   );
 }
 
+function activeOrderModeLabel(order: LocalOrder): string {
+  if (order.retryUnfilled) return "Private retry";
+  if (order.executionPreference === "PrivateThenExternal") return "Midpoint matcher";
+  return "Midpoint";
+}
+
 export function RightColumn({
   activeBatch,
   activePairId,
@@ -308,11 +314,11 @@ export function RightColumn({
               <div className="active-body">
                 <div className="active-top">
                   <span className="active-pair">{order.pair}</span>
-                  <span className="active-shape">{order.wireMode}</span>
+                  <span className="active-shape">{activeOrderModeLabel(order)}</span>
                 </div>
                 <div className="active-bot">
                   <span className="active-amt">{order.amount}</span>
-                  {order.limitPrice && <span className="active-px">@ {order.limitPrice}</span>}
+                  {order.limitPrice && <span className="active-px">bound {order.limitPrice}</span>}
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
