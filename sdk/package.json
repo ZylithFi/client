@@ -1,0 +1,40 @@
+{
+  "name": "@zylith/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "sideEffects": false,
+  "files": [
+    "dist/common.*",
+    "dist/exchange.*",
+    "dist/index.*",
+    "dist/wallet.*"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./common": {
+      "types": "./dist/common.d.ts",
+      "import": "./dist/common.js"
+    },
+    "./exchange": {
+      "types": "./dist/exchange.d.ts",
+      "import": "./dist/exchange.js"
+    },
+    "./wallet": {
+      "types": "./dist/wallet.d.ts",
+      "import": "./dist/wallet.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

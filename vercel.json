@@ -1,0 +1,40 @@
+{
+  "installCommand": "npm ci --include=dev",
+  "buildCommand": "node -e 'const fs=require(\"fs\"); const v=process.env.ZYLITH_DEPLOYMENT_JSON; if(!v) throw new Error(\"ZYLITH_DEPLOYMENT_JSON missing\"); JSON.parse(v); fs.writeFileSync(\"public/deployment.json\", v);' && npm run build:app",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/starknet-privacy-discovery/:path*",
+      "destination": "https://api.zylith.fi/starknet-privacy-discovery/:path*"
+    },
+    {
+      "source": "/starknet-privacy-prover",
+      "destination": "https://api.zylith.fi/starknet-privacy-prover"
+    },
+    {
+      "source": "/starknet-privacy-prover/:path*",
+      "destination": "https://api.zylith.fi/starknet-privacy-prover/:path*"
+    },
+    {
+      "source": "/starknet-privacy-prover-sepolia",
+      "destination": "https://api.zylith.fi/starknet-privacy-prover-sepolia"
+    },
+    {
+      "source": "/starknet-privacy-prover-sepolia/:path*",
+      "destination": "https://api.zylith.fi/starknet-privacy-prover-sepolia/:path*"
+    },
+    {
+      "source": "/paymaster/:path*",
+      "destination": "https://api.zylith.fi/paymaster/:path*"
+    },
+    {
+      "source": "/market-data/:path*",
+      "destination": "https://api.zylith.fi/market-data/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

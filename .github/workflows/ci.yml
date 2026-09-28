@@ -1,0 +1,60 @@
+name: client ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  checks:
+    name: client, sdk, and wallet checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@ebb3d1676050bfd0971c36c1e215b5751473994d # 1.96.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: setup node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            sdk/package-lock.json
+      - name: install client dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.STARKWARE_PACKAGES_TOKEN || github.token }}
+        run: npm ci
+      - name: install sdk dependencies
+        working-directory: sdk
+        run: npm ci
+      - name: install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.123 --locked
+      - name: rust format
+        run: cargo fmt --all --check
+      - name: rust lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: rust tests
+        run: cargo test --workspace
+      - name: wallet wasm matches sources
+        run: scripts/wallet_wasm_source_hash.sh --check
+      - name: client tests and build
+        run: |
+          npm test -- --run
+          npm run build
+          node --test scripts/check-bundle-budget.test.mjs
+          node scripts/check-bundle-budget.mjs
+      - name: sdk tests and package
+        working-directory: sdk
+        run: |
+          npm test -- --run
+          npm run build
+          npm pack --dry-run
