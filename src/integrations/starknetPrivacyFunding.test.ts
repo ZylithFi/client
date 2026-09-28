@@ -127,7 +127,7 @@ describe("runProvingTransportAttempts", () => {
     await expect(result).resolves.toBe("direct-ok");
     expect(attempts).toEqual([true, false]);
     expect(stages).toEqual([
-      "Private deposit proof retrying over direct HTTPS transport",
+      "Private deposit proof continuing over direct HTTPS because best-effort OHTTP is unavailable",
     ]);
   });
 

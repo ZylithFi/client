@@ -16,6 +16,10 @@ export type PairConfig = {
 };
 
 export type DeploymentConfig = {
+  deployment: {
+    finalized: boolean;
+    release_commit: string;
+  };
   network: string;
   chain_id: string;
   rpc_url: string;
@@ -50,6 +54,19 @@ export type DeploymentConfig = {
     assets?: Record<string, { asset_id: string; min_trade_amount: string; decimals?: number; enabled: boolean; token_address?: string }>;
     pairs: Record<string, PairConfig>;
   };
+  proof: {
+    proof_program_address: string;
+    virtual_program_hash: string;
+    starknet_os_config_hash: string;
+    proof_account_address: string;
+    settlement_account_address: string;
+    config_locked_after_deploy: boolean;
+  };
+  roles: {
+    protocol_fee_recipient: string;
+    pause_guardian_address: string;
+    reference_price_signer: string;
+  };
   runtime: {
     epoch_ms: number;
     max_close_delay_ms: number;
@@ -62,7 +79,7 @@ export type DeploymentConfig = {
 };
 
 const DEPLOYMENT_MANIFEST_TIMEOUT_MS = 10_000;
-const REQUIRED_FIELDS = ["network", "chain_id", "rpc_url", "contracts", "token_addresses", "funding", "product", "runtime"] as const;
+const REQUIRED_FIELDS = ["deployment", "network", "chain_id", "rpc_url", "contracts", "token_addresses", "funding", "product", "proof", "roles", "runtime"] as const;
 const REQUIRED_CONTRACTS = ["commitment_registry", "privacy_deposit_bridge", "exchange"] as const;
 
 export const OPERATOR_URL = serviceUrl(import.meta.env.VITE_ZYLITH_OPERATOR_URL, 3200, "prover");
@@ -101,6 +118,25 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
   for (const contract of REQUIRED_CONTRACTS) {
     if (!normalizeConfiguredFelt(contracts?.[contract])) {
       throw new Error(`Deployment manifest contract ${contract} must be a nonzero address`);
+    }
+  }
+  const deployment = record.deployment as Record<string, unknown>;
+  if (deployment.finalized !== true || !/^[0-9a-f]{40}$/.test(String(deployment.release_commit ?? "")) || /^0+$/.test(String(deployment.release_commit))) {
+    throw new Error("Deployment manifest is not a finalized release");
+  }
+  const proof = record.proof as Record<string, unknown>;
+  if (proof.config_locked_after_deploy !== true) {
+    throw new Error("Deployment manifest proof configuration is not locked");
+  }
+  for (const field of ["proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) {
+    if (!normalizeConfiguredFelt(proof[field])) {
+      throw new Error(`Deployment manifest proof ${field} must be a nonzero felt`);
+    }
+  }
+  const roles = record.roles as Record<string, unknown>;
+  for (const field of ["protocol_fee_recipient", "pause_guardian_address", "reference_price_signer"]) {
+    if (!normalizeConfiguredFelt(roles[field])) {
+      throw new Error(`Deployment manifest role ${field} must be a nonzero felt`);
     }
   }
   const pairs = (record.product as { pairs?: unknown })?.pairs;

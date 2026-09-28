@@ -734,7 +734,7 @@ export async function runProvingTransportAttempts<T>(input: {
   } catch (error) {
     if (!shouldRetryDirectProvingTransport(error)) throw error;
     input.setStage(
-      `Private ${input.flow} proof retrying over direct HTTPS transport`
+      `Private ${input.flow} proof continuing over direct HTTPS because best-effort OHTTP is unavailable`
     );
     return runWithDeadline(false, STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS);
   }
