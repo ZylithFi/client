@@ -51,6 +51,7 @@ import {
   transactionHashFromResult,
 } from "./starknetPrivacyTransport";
 import { runProofDelayRetryLoop } from "./starknetPrivacyProofRetry";
+import { requestStarknetWalletTypedSignature } from "../wallet/starknetProvider";
 
 type StarknetProviderLike = {
   account?: {
@@ -97,12 +98,14 @@ export type SubmitPrivacyBridgeDepositInput = {
 };
 
 export type WarmUpStarknetPrivacyFundingInput = {
+  provider?: StarknetProviderLike;
   seedHex: string;
   chainId: string;
   rpcUrl: string;
   privacyPoolAddress: string;
   tokenAddresses: string[];
   paymasterUrl?: string;
+  paymasterAddress?: string;
   privacyProofSignerClassHash?: string;
   minProvingDelayBlocks: number;
 };
@@ -254,9 +257,12 @@ export async function warmUpStarknetPrivacyFunding(
     STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS
   );
   const account = await createEmbeddedPrivacyProofAccount({
+    provider: input.provider,
     seedHex: input.seedHex,
+    chainId: input.chainId,
     rpcProvider,
     paymasterUrl: input.paymasterUrl,
+    paymasterAddress: input.paymasterAddress,
     privacyProofSignerClassHash: input.privacyProofSignerClassHash,
     minProvingDelayBlocks: delayBlocks,
   });
@@ -321,23 +327,27 @@ async function submitPrivacyBridgeDepositViaProver(
     STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS
   );
   const proofDelayScheduleBlocks = STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS;
-  const account = await runFundingStage(
-    "Private deposit signer setup failed",
-    () =>
-      createEmbeddedPrivacyProofAccount({
-        seedHex: input.seedHex,
-        rpcProvider,
-        paymasterUrl: input.paymasterUrl,
-        privacyProofSignerClassHash: input.privacyProofSignerClassHash,
-        minProvingDelayBlocks: txDelayBlocks,
-      })
-  );
   const depositorAddress = await resolveConnectedStarknetAddress(
     input.provider
   );
   if (!depositorAddress) {
     throw new Error("Connect a Starknet wallet before depositing");
   }
+  const account = await runFundingStage(
+    "Private deposit signer setup failed",
+    () =>
+      createEmbeddedPrivacyProofAccount({
+        provider: input.provider,
+        sponsorAddress: depositorAddress,
+        seedHex: input.seedHex,
+        chainId: input.chainId,
+        rpcProvider,
+        paymasterUrl: input.paymasterUrl,
+        paymasterAddress: input.paymasterAddress,
+        privacyProofSignerClassHash: input.privacyProofSignerClassHash,
+        minProvingDelayBlocks: txDelayBlocks,
+      })
+  );
   await runFundingStage("Private deposit funding setup failed", () =>
     ensureEmbeddedPrivacyAccountReady({
       provider: input.provider,
@@ -474,8 +484,10 @@ export async function submitPrivacyOpenNoteWithdrawal(
     () =>
       createEmbeddedPrivacyProofAccount({
         seedHex: input.seedHex,
+        chainId: input.chainId,
         rpcProvider,
         paymasterUrl: input.paymasterUrl,
+        paymasterAddress: input.paymasterAddress,
         privacyProofSignerClassHash: input.privacyProofSignerClassHash,
         minProvingDelayBlocks: txDelayBlocks,
       })
@@ -1266,9 +1278,13 @@ type EmbeddedPrivacyProofAccount = {
 };
 
 async function createEmbeddedPrivacyProofAccount(input: {
+  provider?: StarknetProviderLike;
+  sponsorAddress?: string;
   seedHex: string;
+  chainId: string;
   rpcProvider: RpcProvider;
   paymasterUrl?: string;
+  paymasterAddress?: string;
   privacyProofSignerClassHash?: string;
   minProvingDelayBlocks: number;
 }): Promise<EmbeddedPrivacyProofAccount> {
@@ -1287,6 +1303,10 @@ async function createEmbeddedPrivacyProofAccount(input: {
     signerPublicKey: publicKey,
     salt,
     classHash: input.privacyProofSignerClassHash,
+    chainId: input.chainId,
+    paymasterAddress: input.paymasterAddress,
+    provider: input.provider,
+    sponsorAddress: input.sponsorAddress,
     rpcProvider: input.rpcProvider,
     minProvingDelayBlocks: input.minProvingDelayBlocks,
   });
@@ -1302,22 +1322,67 @@ async function ensurePrivacyProofSignerContract(input: {
   signerPublicKey: string;
   salt: string;
   classHash: string;
+  chainId: string;
+  paymasterAddress?: string;
+  provider?: StarknetProviderLike;
+  sponsorAddress?: string;
   rpcProvider: RpcProvider;
   minProvingDelayBlocks: number;
 }) {
-  const json = await postFundingRelayJson<{
+  type EnsureResponse = {
     contract_address?: string;
     deployed?: boolean;
     transaction_hash?: string;
-  }>(
-    paymasterPrivacySignerEnsureUrl(input.paymasterUrl),
-    {
-      signer_public_key: input.signerPublicKey,
+  };
+  const url = paymasterPrivacySignerEnsureUrl(input.paymasterUrl);
+  const baseRequest = {
+    signer_public_key: input.signerPublicKey,
+    salt: input.salt,
+    class_hash: input.classHash,
+  };
+  let json: EnsureResponse;
+  try {
+    json = await postFundingRelayJson<EnsureResponse>(
+      url,
+      baseRequest,
+      "Transaction relay signer setup timed out before returning a signer address"
+    );
+  } catch (error) {
+    if (!/signer deployment authorization required/i.test(errorMessage(error))) {
+      throw error;
+    }
+    if (!input.provider || !input.sponsorAddress || !input.paymasterAddress) {
+      throw new Error(
+        "Connect a Starknet wallet to authorize private signer deployment"
+      );
+    }
+    const nonce = randomFelt();
+    const expiresAt = String(Math.floor(Date.now() / 1000) + 5 * 60);
+    const typedData = privacySignerDeploymentSponsorshipTypedData({
+      chainId: input.chainId,
+      paymasterAddress: input.paymasterAddress,
+      signerPublicKey: input.signerPublicKey,
       salt: input.salt,
-      class_hash: input.classHash,
-    },
-    "Transaction relay signer setup timed out before returning a signer address"
-  );
+      classHash: input.classHash,
+      nonce,
+      expiresAt,
+    });
+    const rawSignature = await requestStarknetWalletTypedSignature(
+      input.provider as never,
+      typedData
+    );
+    json = await postFundingRelayJson<EnsureResponse>(
+      url,
+      {
+        ...baseRequest,
+        sponsor_address: input.sponsorAddress,
+        sponsor_signature: normalizeWalletSignatureFelts(rawSignature),
+        sponsor_nonce: nonce,
+        sponsor_expires_at: expiresAt,
+      },
+      "Transaction relay signer setup timed out before returning a signer address"
+    );
+  }
   const address = normalizeAddress(json.contract_address);
   if (!address) {
     throw new Error("Transaction relay did not return a proof signer address");
@@ -1331,6 +1396,79 @@ async function ensurePrivacyProofSignerContract(input: {
     );
   }
   return address;
+}
+
+export function privacySignerDeploymentSponsorshipTypedData(input: {
+  chainId: string;
+  paymasterAddress: string;
+  signerPublicKey: string;
+  salt: string;
+  classHash: string;
+  nonce: string;
+  expiresAt: string;
+}) {
+  return {
+    types: {
+      StarknetDomain: [
+        { name: "name", type: "shortstring" },
+        { name: "version", type: "shortstring" },
+        { name: "chainId", type: "shortstring" },
+        { name: "revision", type: "shortstring" },
+      ],
+      ZylithSignerSponsorship: [
+        { name: "action", type: "shortstring" },
+        { name: "paymaster", type: "ContractAddress" },
+        { name: "signerPublicKey", type: "felt" },
+        { name: "salt", type: "felt" },
+        { name: "classHash", type: "felt" },
+        { name: "nonce", type: "felt" },
+        { name: "expiresAt", type: "u64" },
+      ],
+    },
+    primaryType: "ZylithSignerSponsorship",
+    domain: {
+      name: "Zylith",
+      version: "1",
+      chainId: input.chainId,
+      revision: "1",
+    },
+    message: {
+      action: "DeploySigner",
+      paymaster: input.paymasterAddress,
+      signerPublicKey: input.signerPublicKey,
+      salt: input.salt,
+      classHash: input.classHash,
+      nonce: input.nonce,
+      expiresAt: input.expiresAt,
+    },
+  };
+}
+
+function normalizeWalletSignatureFelts(value: unknown): string[] {
+  let entries: unknown[];
+  if (Array.isArray(value)) {
+    entries = value;
+  } else if (value && typeof value === "object") {
+    const signature = value as { r?: unknown; s?: unknown };
+    entries = signature.r !== undefined && signature.s !== undefined
+      ? [signature.r, signature.s]
+      : [];
+  } else {
+    entries = [];
+  }
+  const normalized = entries.map((entry) =>
+    normalizeStrictFelt(
+      typeof entry === "bigint" ? entry.toString() : String(entry ?? "")
+    )
+  );
+  if (
+    normalized.length === 0 ||
+    normalized.length > 8 ||
+    normalized.some((entry) => !entry)
+  ) {
+    throw new Error("Connected Starknet wallet returned an invalid signature");
+  }
+  return normalized;
 }
 
 function proofDetailsForCall(callAndProof: CallAndProof) {

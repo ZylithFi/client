@@ -12,6 +12,7 @@ import {
   privacyBridgeStrk20ExitClaimCalldata,
   privacyBridgeStrk20ExitClaimFlatCalldata,
   privacyBridgeStrk20ExitClaimInvokeCall,
+  privacySignerDeploymentSponsorshipTypedData,
   sanitizeFundingRelayErrorBody,
   shouldRetryDirectProvingTransport,
   runProvingTransportAttempts,
@@ -37,6 +38,37 @@ describe("starknet privacy proof delay schedule", () => {
         STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS[i - 1],
       );
     }
+  });
+});
+
+describe("privacy signer deployment sponsorship", () => {
+  it("binds the signer, deployment, paymaster, chain, nonce and expiry", () => {
+    expect(privacySignerDeploymentSponsorshipTypedData({
+      chainId: "0x534e5f5345504f4c4941",
+      paymasterAddress: "0xabc",
+      signerPublicKey: "0x111",
+      salt: "0x222",
+      classHash: "0x333",
+      nonce: "0x444",
+      expiresAt: "1700000300",
+    })).toMatchObject({
+      primaryType: "ZylithSignerSponsorship",
+      domain: {
+        name: "Zylith",
+        version: "1",
+        chainId: "0x534e5f5345504f4c4941",
+        revision: "1",
+      },
+      message: {
+        action: "DeploySigner",
+        paymaster: "0xabc",
+        signerPublicKey: "0x111",
+        salt: "0x222",
+        classHash: "0x333",
+        nonce: "0x444",
+        expiresAt: "1700000300",
+      },
+    });
   });
 });
 
