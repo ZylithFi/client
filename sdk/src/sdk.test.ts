@@ -29,12 +29,14 @@ afterEach(() => {
 });
 
 describe("@zylith/sdk common", () => {
-  it("knows the traded assets' decimals, and the manifest overrides them", () => {
+  it("requires the deployment registry to define every asset's decimals", () => {
     configureAssetDecimals(undefined);
+    expect(() => assetDecimals("USDC")).toThrow(/not defined/);
+    configureAssetDecimals({ USDC: { decimals: 6 }, ETH: { decimals: 18 } });
     expect(assetDecimals("USDC")).toBe(6);
     expect(toAtomicStr("0.001", "ETH")).toBe("1000000000000000");
-    configureAssetDecimals({ USDC: { decimals: 18 } });
-    expect(assetDecimals("USDC")).toBe(18);
+    expect(() => assetDecimals("UNKNOWN")).toThrow(/not defined/);
+    expect(() => configureAssetDecimals({ BROKEN: {} })).toThrow(/invalid decimals/);
     configureAssetDecimals(undefined);
   });
 
@@ -445,7 +447,7 @@ const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
 function transition(seq: number) {
-  return { seq, block_number: seq, transaction_hash: "0x1", new_book_root: "0x2", note_root: "0x3", output_root: "0x4", outputs: [] };
+  return { seq, block_number: seq, transaction_hash: "0x1", new_book_root: "0x2", note_root: "0x3", output_root: "0x4", note_batch_index: seq, outputs: [] };
 }
 
 describe("@zylith/sdk exchange", () => {
@@ -490,6 +492,60 @@ describe("@zylith/sdk exchange", () => {
       fetchImpl: vi.fn(async () => json({ start: 0, end: 63, latest_seq: 99, transitions: [transition(99)] })) as unknown as typeof fetch,
     });
     await expect(stray.transitions(0, 63)).rejects.toThrow(/outside the requested range/);
+  });
+
+  it("downloads the public note accumulator roots in bounded generic ranges", async () => {
+    const urls: string[] = [];
+    const roots = Array.from({ length: 300 }, (_, index) => `0x${(index + 1).toString(16)}`);
+    const client = new ZylithExchangeClient({
+      operatorUrl: "https://operator.example",
+      indexerUrl: "https://indexer.example",
+      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        const [start, end] = url.split("/").slice(-2).map(Number);
+        return json({ start, end, total: roots.length, roots: roots.slice(start, end + 1) });
+      }) as unknown as typeof fetch,
+    });
+    await expect(client.allNoteBatchRoots()).resolves.toEqual(roots);
+    expect(urls).toEqual([
+      "https://indexer.example/api/note-batches/range/0/255",
+      "https://indexer.example/api/note-batches/range/256/511",
+    ]);
+  });
+
+  it("fetches every reference price through one market-independent endpoint", async () => {
+    const fetchImpl = vi.fn(async () => json({
+      prices: [
+        { pair: "ETH/USDC", midpoint: "2500000000", scale: "1000000", observed_at_ms: 1, valid_until_ms: 2 },
+        { pair: "STRK/USDC", midpoint: "500000", scale: "1000000", observed_at_ms: 1, valid_until_ms: 2 },
+      ],
+    }));
+    const client = new ZylithExchangeClient({
+      operatorUrl: "https://operator.example",
+      indexerUrl: "https://indexer.example",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(client.referencePrice("STRK/USDC")).resolves.toMatchObject({ midpoint: "500000" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0][0]).toBe("https://operator.example/api/public/reference-prices");
+  });
+
+  it("rejects duplicate or incomplete reference-price batches", async () => {
+    const duplicate = { pair: "ETH/USDC", midpoint: "1", scale: "1", observed_at_ms: 1, valid_until_ms: 2 };
+    const client = new ZylithExchangeClient({
+      operatorUrl: "https://operator.example",
+      indexerUrl: "https://indexer.example",
+      fetchImpl: vi.fn(async () => json({ prices: [duplicate, duplicate] })) as unknown as typeof fetch,
+    });
+
+    await expect(client.referencePrices()).rejects.toThrow(/invalid reference-price batch/);
+    await expect(new ZylithExchangeClient({
+      operatorUrl: "https://operator.example",
+      indexerUrl: "https://indexer.example",
+      fetchImpl: vi.fn(async () => json({ prices: [] })) as unknown as typeof fetch,
+    }).referencePrice("ETH/USDC")).rejects.toThrow(/no reference price/);
   });
 
   it("opens sealed answers, surfaces refusals and redacts operator errors", async () => {

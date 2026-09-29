@@ -6,9 +6,13 @@ use starknet_crypto::Felt;
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 use zylith_core::exchange::{
-    NoteFields, OrderTerms, OutputRecord, PrivateRequest, RecoveredOutput, SealedRequest,
-    StatusRequest, WalletKeys, asset_id, chunk_status, pair_id, random_felt, recover_order_outputs,
-    seal_request,
+    NoteAccumulator, NoteFields, NoteMembership, OrderTerms, OutputRecord, PrivateRequest,
+    RecoveredOutput, RecoveryCapacity, RecoveryExit, ResidualNote, ResidualRecoveryInput,
+    SealedRequest, Signature, StatusRequest, WalletKeys, asset_id, build_residual_recovery,
+    chunk_status, output_tree_root, pair_id, preview_residual_recovery, public_key, random_felt,
+    recover_order_outputs, recover_order_residual, residual_recovery_amounts,
+    residual_recovery_authorization_message, residual_recovery_calldata, seal_request,
+    short_string, sign_message, sponge,
 };
 use zylith_core::{
     AssetId, DepositIntent, DepositSubmissionPlan, PrivateExecutionKeyRegistry, RecoveryArtifact,
@@ -104,6 +108,32 @@ pub fn zylith_wallet_derive_public_config(seed_hex: &str) -> Result<String, JsVa
             keys.withdraw_auth_key,
         )))
         .map_err(js_error)?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarketIdsInput {
+    pub pair: String,
+    pub base_asset: String,
+    pub quote_asset: String,
+}
+
+#[derive(Serialize)]
+pub struct MarketIdsOutput {
+    pub pair_id: String,
+    pub base_asset_id: String,
+    pub quote_asset_id: String,
+}
+
+/// the canonical protocol ids for a manifest market.
+#[wasm_bindgen]
+pub fn zylith_wallet_market_ids(input_json: &str) -> Result<String, JsValue> {
+    let input: MarketIdsInput = from_json(input_json)?;
+    to_json(&MarketIdsOutput {
+        pair_id: format!("{:#x}", pair_id(&input.pair)),
+        base_asset_id: format!("{:#x}", asset_id(&input.base_asset)),
+        quote_asset_id: format!("{:#x}", asset_id(&input.quote_asset)),
     })
 }
 
@@ -341,6 +371,234 @@ pub fn zylith_wallet_recover_order_outputs(input_json: &str) -> Result<String, J
     to_json(&recovered)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverResidualInput {
+    pub chain_context: String,
+    pub terms: OrderTerms,
+    pub base_asset: String,
+    pub quote_asset: String,
+    pub transitions: Vec<TransitionRecords>,
+}
+
+/// the order's residual generations recoverable from public transition records.
+#[wasm_bindgen]
+pub fn zylith_wallet_recover_order_residuals(input_json: &str) -> Result<String, JsValue> {
+    let input: RecoverResidualInput = from_json(input_json)?;
+    let (base, quote) = (asset_id(&input.base_asset), asset_id(&input.quote_asset));
+    let chain_context = felt(&input.chain_context)?;
+    to_json(
+        &input
+            .transitions
+            .iter()
+            .filter_map(|transition| {
+                recover_order_residual(
+                    chain_context,
+                    &input.terms,
+                    base,
+                    quote,
+                    transition.seq,
+                    &transition.outputs,
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResidualRecoveryQuoteInput {
+    pub note: ResidualNote,
+    pub capacity: RecoveryCapacity,
+    #[serde(with = "u128_decimal")]
+    pub fee_bps: u128,
+}
+
+#[derive(Serialize)]
+pub struct ResidualRecoveryQuoteOutput {
+    pub input_amount: String,
+    pub output_amount: String,
+    pub fee_amount: String,
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_quote_residual_recovery(input_json: &str) -> Result<String, JsValue> {
+    let input: ResidualRecoveryQuoteInput = from_json(input_json)?;
+    let (input_amount, output_amount, fee_amount) =
+        residual_recovery_amounts(&input.note, input.capacity, input.fee_bps).map_err(js_error)?;
+    to_json(&ResidualRecoveryQuoteOutput {
+        input_amount: input_amount.to_string(),
+        output_amount: output_amount.to_string(),
+        fee_amount: fee_amount.to_string(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildResidualRecoveryInput {
+    pub seed_hex: String,
+    pub note_root: String,
+    pub note: ResidualNote,
+    pub membership: NoteMembership,
+    pub output_asset_id: String,
+    #[serde(with = "u128_decimal")]
+    pub fee_bps: u128,
+    pub capacity: RecoveryCapacity,
+    #[serde(default)]
+    pub input_exit_commitment: Option<String>,
+    #[serde(default)]
+    pub output_exit_commitment: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BuildResidualRecoveryOutput {
+    pub public: zylith_core::exchange::ResidualRecoveryPublic,
+    pub witness: Vec<String>,
+    pub calldata: Vec<String>,
+    pub input_exit_commitment: Option<String>,
+    pub output_exit_commitment: Option<String>,
+}
+
+fn residual_exit_nonce(keys: &WalletKeys, note: &ResidualNote, leg: u64) -> Felt {
+    let nonce = sponge(&[
+        short_string("zylith_res_exit_nonce_v1"),
+        keys.withdraw_key,
+        note.chain_context,
+        note.commitment(),
+        Felt::from(leg),
+    ]);
+    if nonce == Felt::ZERO {
+        Felt::ONE
+    } else {
+        nonce
+    }
+}
+
+#[wasm_bindgen]
+pub fn zylith_wallet_build_residual_recovery(input_json: &str) -> Result<String, JsValue> {
+    let input: BuildResidualRecoveryInput = from_json(input_json)?;
+    let keys = wallet_keys(&input.seed_hex)?;
+    if input.note.owner != keys.owner(input.note.owner.nonce) {
+        return Err(js_error(
+            "the residual authority does not belong to this wallet",
+        ));
+    }
+    let (input_amount, output_amount, _) =
+        residual_recovery_amounts(&input.note, input.capacity, input.fee_bps).map_err(js_error)?;
+    let exit = |amount: u128,
+                leg: u64,
+                supplied: Option<&String>|
+     -> Result<(RecoveryExit, Option<Felt>), JsValue> {
+        if amount == 0 {
+            if supplied.is_some() {
+                return Err(js_error(
+                    "a zero recovery leg cannot carry an exit commitment",
+                ));
+            }
+            return Ok((RecoveryExit::default(), None));
+        }
+        let commitment = match supplied {
+            Some(value) => felt(value)?,
+            None => residual_exit_nonce(&keys, &input.note, leg),
+        };
+        let authority = public_key(&keys.exit_key(input.note.chain_context, commitment));
+        Ok((
+            RecoveryExit {
+                commitment,
+                authority,
+            },
+            Some(commitment),
+        ))
+    };
+    let (input_exit, input_exit_commitment) =
+        exit(input_amount, 0, input.input_exit_commitment.as_ref())?;
+    let (output_exit, output_exit_commitment) =
+        exit(output_amount, 1, input.output_exit_commitment.as_ref())?;
+    let mut recovery = ResidualRecoveryInput {
+        note_root: felt(&input.note_root)?,
+        note: input.note,
+        membership: input.membership,
+        output_asset_id: felt(&input.output_asset_id)?,
+        fee_bps: input.fee_bps,
+        capacity: input.capacity,
+        input_exit,
+        output_exit,
+        authorization: Signature {
+            r: Felt::ZERO,
+            s: Felt::ZERO,
+        },
+    };
+    let preview = preview_residual_recovery(&recovery).map_err(js_error)?;
+    recovery.authorization = sign_message(
+        &keys.withdraw_key,
+        &residual_recovery_authorization_message(preview.commitment),
+    )
+    .map_err(js_error)?;
+    let (public, witness) = build_residual_recovery(&recovery).map_err(js_error)?;
+    let calldata = residual_recovery_calldata(&public);
+    to_json(&BuildResidualRecoveryOutput {
+        public,
+        witness: witness.iter().map(|value| format!("{value:#x}")).collect(),
+        calldata: calldata.iter().map(|value| format!("{value:#x}")).collect(),
+        input_exit_commitment: input_exit_commitment.map(|value| format!("{value:#x}")),
+        output_exit_commitment: output_exit_commitment.map(|value| format!("{value:#x}")),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildNoteMembershipInput {
+    pub batch_roots: Vec<String>,
+    pub batch_index: usize,
+    pub batch_leaves: Vec<String>,
+    pub leaf_index: usize,
+}
+
+#[derive(Serialize)]
+pub struct BuildNoteMembershipOutput {
+    pub note_root: String,
+    pub membership: NoteMembership,
+}
+
+/// rebuilds one membership from the public, globally ordered note-batch history.
+#[wasm_bindgen]
+pub fn zylith_wallet_build_note_membership(input_json: &str) -> Result<String, JsValue> {
+    let input: BuildNoteMembershipInput = from_json(input_json)?;
+    if input.batch_roots.is_empty()
+        || input.batch_index >= input.batch_roots.len()
+        || input.batch_leaves.is_empty()
+        || input.leaf_index >= input.batch_leaves.len()
+    {
+        return Err(js_error("note membership position is out of range"));
+    }
+    let roots = input
+        .batch_roots
+        .iter()
+        .map(|root| felt(root))
+        .collect::<Result<Vec<_>, _>>()?;
+    let leaves = input
+        .batch_leaves
+        .iter()
+        .map(|leaf| felt(leaf))
+        .collect::<Result<Vec<_>, _>>()?;
+    if output_tree_root(&leaves) != roots[input.batch_index] {
+        return Err(js_error(
+            "the note batch leaves do not match its public root",
+        ));
+    }
+    let mut accumulator = NoteAccumulator::default();
+    for root in roots {
+        accumulator.append(root);
+    }
+    let membership = accumulator
+        .membership(input.batch_index, &leaves, input.leaf_index)
+        .ok_or_else(|| js_error("the note membership cannot be constructed"))?;
+    to_json(&BuildNoteMembershipOutput {
+        note_root: format!("{:#x}", accumulator.root()),
+        membership,
+    })
+}
+
 #[derive(Serialize)]
 pub struct NoteSummary {
     pub commitment: String,
@@ -512,6 +770,24 @@ mod tests {
     }
 
     #[test]
+    fn market_ids_use_the_protocol_encodings() {
+        let encoded = call(
+            zylith_wallet_market_ids,
+            json!({
+                "pair": "STRK/USDC",
+                "base_asset": "STRK",
+                "quote_asset": "USDC",
+            }),
+        );
+        assert_eq!(encoded["pair_id"], format!("{:#x}", pair_id("STRK/USDC")));
+        assert_eq!(encoded["base_asset_id"], format!("{:#x}", asset_id("STRK")));
+        assert_eq!(
+            encoded["quote_asset_id"],
+            format!("{:#x}", asset_id("USDC"))
+        );
+    }
+
+    #[test]
     fn a_deposited_note_funds_a_sealed_order_whose_outputs_recover_from_the_chain() {
         let (seller, buyer) = ("11".repeat(32), "22".repeat(32));
         let (public, private) = execution_key("k1", 5);
@@ -562,6 +838,30 @@ mod tests {
         }];
         let result = build_transition(&transition).unwrap();
 
+        let membership = call(
+            zylith_wallet_build_note_membership,
+            json!({
+                "batch_roots": [
+                    format!("{:#x}", base.output_leaf()),
+                    format!("{:#x}", quote.output_leaf()),
+                    format!("{:#x}", result.public.output_root),
+                ],
+                "batch_index": 2,
+                "batch_leaves": result.public.output_records.iter().map(|record| format!("{:#x}", record.leaf)).collect::<Vec<_>>(),
+                "leaf_index": 0,
+            }),
+        );
+        assert_eq!(
+            membership["note_root"],
+            format!("{:#x}", {
+                let mut accumulator = NoteAccumulator::default();
+                accumulator.append(base.output_leaf());
+                accumulator.append(quote.output_leaf());
+                accumulator.append(result.public.output_root);
+                accumulator.root()
+            })
+        );
+
         for terms in terms {
             let recovered: Vec<RecoveredOutput> = serde_json::from_value(call(
                 zylith_wallet_recover_order_outputs,
@@ -589,6 +889,81 @@ mod tests {
     }
 
     #[test]
+    fn residual_recovery_retries_reuse_the_same_one_time_exit() {
+        let seed_hex = "44".repeat(32);
+        let keys = wallet_keys(&seed_hex).unwrap();
+        let base = deposit(&seed_hex, "STRK", 10, 9);
+        let chain = Felt::from_hex("0x5eed").unwrap();
+        let pair = pair_id("STRK/USDC");
+        let quote = asset_id("USDC");
+        let mut notes = NoteAccumulator::default();
+        notes.append(base.output_leaf());
+        let order = keys
+            .order(
+                chain,
+                pair,
+                true,
+                false,
+                10,
+                95,
+                1_000_000,
+                vec![base.clone()],
+            )
+            .unwrap();
+        let membership = notes.membership(0, &[base.output_leaf()], 0).unwrap();
+        let mut transition = input(
+            1,
+            vec![],
+            vec![order.into_new_order(vec![membership])],
+            notes.root(),
+            100,
+        );
+        transition.chain_context = chain;
+        transition.objective_numeraire_asset_id = quote;
+        transition.markets = vec![Market {
+            pair_id: pair,
+            base_asset_id: base.asset_id,
+            quote_asset_id: quote,
+            ..transition.markets[0].clone()
+        }];
+        let result = build_transition(&transition).unwrap();
+        let residual = result.residual_outputs[0].clone();
+        notes.append(result.public.output_root);
+        let membership = notes
+            .membership(
+                1,
+                &result
+                    .public
+                    .output_records
+                    .iter()
+                    .map(|record| record.leaf)
+                    .collect::<Vec<_>>(),
+                residual.index,
+            )
+            .unwrap();
+        let input = json!({
+            "seed_hex": seed_hex,
+            "note_root": format!("{:#x}", notes.root()),
+            "note": residual.note,
+            "membership": membership,
+            "output_asset_id": format!("{quote:#x}"),
+            "fee_bps": "30",
+            "capacity": RecoveryCapacity::default(),
+        });
+        let first = call(zylith_wallet_build_residual_recovery, input.clone());
+        let retry = call(zylith_wallet_build_residual_recovery, input);
+        assert_eq!(
+            first["input_exit_commitment"],
+            retry["input_exit_commitment"]
+        );
+        assert_eq!(
+            first["output_exit_commitment"],
+            retry["output_exit_commitment"]
+        );
+        assert_eq!(first["public"]["commitment"], retry["public"]["commitment"]);
+    }
+
+    #[test]
     fn a_registry_fingerprint_ignores_key_order_but_not_keys() {
         let (first, _) = execution_key("k1", 8);
         let (second, _) = execution_key("k2", 9);
@@ -610,11 +985,11 @@ mod tests {
     fn a_status_request_is_answered_under_its_response_key() {
         let (public, private) = execution_key("k1", 7);
         let registry = PrivateExecutionKeyRegistry { keys: vec![public] };
-        let heartbeat = call(
+        let idle = call(
             zylith_wallet_build_status_requests,
             json!({ "registry": registry, "orders": [], "nullifiers": [] }),
         );
-        assert_eq!(heartbeat.as_array().unwrap().len(), 1);
+        assert!(idle.as_array().unwrap().is_empty());
         let many = call(
             zylith_wallet_build_status_requests,
             json!({ "registry": registry, "orders": vec![json!({ "order_id": "0x77" }); 40], "nullifiers": [] }),

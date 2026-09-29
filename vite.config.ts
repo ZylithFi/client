@@ -6,10 +6,9 @@ const e2eDisableHmr = process.env.ZYLITH_E2E_DISABLE_HMR === "1";
 const apiProxyTarget = process.env.VITE_ZYLITH_API_PROXY_TARGET ?? "https://api.zylith.fi";
 const coordinatorProxyTarget =
   process.env.VITE_ZYLITH_COORDINATOR_PROXY_TARGET ?? apiProxyTarget;
-const proverProxyTarget = process.env.VITE_ZYLITH_PROVER_PROXY_TARGET ?? apiProxyTarget;
+const operatorProxyTarget = process.env.VITE_ZYLITH_OPERATOR_PROXY_TARGET ?? apiProxyTarget;
 const indexerProxyTarget = process.env.VITE_ZYLITH_INDEXER_PROXY_TARGET ?? apiProxyTarget;
 const paymasterProxyTarget = process.env.VITE_ZYLITH_PAYMASTER_PROXY_TARGET ?? apiProxyTarget;
-const relayProxyTarget = process.env.VITE_ZYLITH_RELAY_PROXY_TARGET ?? apiProxyTarget;
 const privacyProxyTarget = process.env.VITE_ZYLITH_PRIVACY_PROXY_TARGET ?? apiProxyTarget;
 const starknetRpcProxyTarget =
   process.env.VITE_ZYLITH_STARKNET_RPC_PROXY_TARGET ?? apiProxyTarget;
@@ -80,10 +79,10 @@ export default defineConfig({
         timeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
         proxyTimeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
       },
-      "/prover": {
-        target: proverProxyTarget,
+      "/operator": {
+        target: operatorProxyTarget,
         changeOrigin: true,
-        rewrite: localServiceRewrite("/prover", proverProxyTarget),
+        rewrite: localServiceRewrite("/operator", operatorProxyTarget),
         timeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
         proxyTimeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
       },
@@ -99,13 +98,6 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: localServiceRewrite("/paymaster", paymasterProxyTarget),
         headers: hostedProxyHeaders(paymasterProxyTarget),
-        timeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
-        proxyTimeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
-      },
-      "/relay": {
-        target: relayProxyTarget,
-        changeOrigin: true,
-        rewrite: localServiceRewrite("/relay", relayProxyTarget),
         timeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
         proxyTimeout: LONG_RUNNING_SERVICE_TIMEOUT_MS,
       },

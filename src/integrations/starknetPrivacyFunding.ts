@@ -9,6 +9,7 @@ import {
 import type {
   CallAndProof,
   PrivateRegistry,
+  ProofInvocation,
   Warning,
 } from "@starkware-libs/starknet-privacy-sdk";
 import {
@@ -22,12 +23,14 @@ import {
   constants,
   ec,
   hash,
+  stark,
   type Call,
 } from "starknet";
 import { STARKNET_FIELD_PRIME, normalizeStrictFelt } from "../domain/felt";
+import type { OhttpPolicy } from "../domain/fundingRail";
 import {
   CONNECTED_WALLET_NOT_ACTIVATED_ERROR,
-  ETH_DEPOSIT_FEE_HEADROOM_ERROR,
+  CONNECTED_WALLET_FEE_HEADROOM_ERROR,
 } from "../domain/privateDepositErrors";
 import { setPrivacyFundingStage } from "../domain/privacyFundingStage";
 import { fetchWithTimeout } from "../domain/runtimeHttp";
@@ -86,9 +89,11 @@ export type SubmitPrivacyBridgeDepositInput = {
   privacyPoolAddress: string;
   bridgeAddress: string;
   tokenAddress: string;
+  feeTokenAddress: string;
+  connectedWalletFeeReserveAmount: bigint;
   discoveryUrl: string;
   provingUrl: string;
-  provingOhttpEnabled?: boolean;
+  provingOhttpPolicy?: OhttpPolicy;
   paymasterAddress?: string;
   paymasterUrl?: string;
   privacyProofSignerClassHash?: string;
@@ -134,7 +139,7 @@ export type SubmitPrivacyOpenNoteWithdrawalInput = {
   tokenAddress: string;
   discoveryUrl: string;
   provingUrl: string;
-  provingOhttpEnabled?: boolean;
+  provingOhttpPolicy?: OhttpPolicy;
   paymasterAddress?: string;
   paymasterUrl?: string;
   privacyProofSignerClassHash?: string;
@@ -149,6 +154,128 @@ export type SubmitPrivacyOpenNoteWithdrawalResult = {
   openNoteId: string;
   sdkRegistry: PrivateRegistry;
 };
+
+export type SubmitResidualRecoveryInput = {
+  provider?: StarknetProviderLike;
+  sponsorAddress?: string;
+  seedHex: string;
+  chainId: string;
+  rpcUrl: string;
+  provingUrl: string;
+  provingOhttpPolicy?: OhttpPolicy;
+  paymasterAddress: string;
+  paymasterUrl: string;
+  privacyProofSignerClassHash: string;
+  minProvingDelayBlocks: number;
+  proofProgramCall: Call;
+  settlementCall: Call;
+};
+
+export async function submitResidualRecovery(
+  input: SubmitResidualRecoveryInput
+): Promise<{ transactionHash: string }> {
+  const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
+  const account = await createEmbeddedPrivacyProofAccount({
+    provider: input.provider,
+    sponsorAddress: input.sponsorAddress,
+    seedHex: input.seedHex,
+    chainId: input.chainId,
+    rpcProvider,
+    paymasterUrl: input.paymasterUrl,
+    paymasterAddress: input.paymasterAddress,
+    privacyProofSignerClassHash: input.privacyProofSignerClassHash,
+    minProvingDelayBlocks: input.minProvingDelayBlocks,
+  });
+  const provingBlockId = await provingBlock(
+    rpcProvider,
+    Math.max(input.minProvingDelayBlocks, STARKNET_PRIVACY_MIN_TX_DELAY_BLOCKS)
+  );
+  const proof = await runProvingTransportAttempts({
+    flow: "recovery",
+    provingOhttpPolicy: input.provingOhttpPolicy,
+    setStage: setFundingStage,
+    run: async (useOhttp) => {
+      const provider = createProvingProvider({
+        chainId: input.chainId,
+        rpcUrl: input.rpcUrl,
+        proofAccountAddress: account.address,
+        provingUrl: input.provingUrl,
+        provingBlockId,
+        provingOhttpEnabled: useOhttp,
+      });
+      return provider.prove(
+        await proofInvocation(account, input.proofProgramCall, provider),
+        provingBlockId
+      );
+    },
+  });
+  const transactionHash = await submitProofBearingCall({
+    signerAddress: account.address,
+    chainId: input.chainId,
+    paymasterAddress: input.paymasterAddress,
+    paymasterUrl: input.paymasterUrl,
+    callAndProof: { call: input.settlementCall, proof },
+  });
+  return { transactionHash };
+}
+
+async function proofInvocation(
+  account: EmbeddedPrivacyProofAccount,
+  call: Call,
+  provider: ProvingServiceProofProvider
+): Promise<ProofInvocation> {
+  const details = await provider.getDefaultDetails();
+  const rawCalldata = call.calldata ?? [];
+  if (!Array.isArray(rawCalldata)) {
+    throw new Error("Proof-program calldata must already be Cairo encoded");
+  }
+  const calldata = rawCalldata.map((value) => feltHex(value as string));
+  const invokeCalldata = [
+    "0x1",
+    feltHex(call.contractAddress),
+    feltHex(hash.getSelectorFromName(call.entrypoint)),
+    feltHex(calldata.length),
+    ...calldata,
+  ];
+  const signature = await account.signer.signTransaction([call], {
+    walletAddress: account.address,
+    cairoVersion: "1",
+    ...details,
+  } as never);
+  const bounds = details.resourceBounds;
+  if (!bounds) throw new Error("Proof service did not provide resource bounds");
+  return {
+    type: "INVOKE",
+    sender_address: feltHex(account.address),
+    calldata: invokeCalldata,
+    signature: stark.formatSignature(signature),
+    nonce: feltHex(details.nonce ?? 0n),
+    resource_bounds: {
+      l1_gas: {
+        max_amount: feltHex(bounds.l1_gas.max_amount),
+        max_price_per_unit: feltHex(bounds.l1_gas.max_price_per_unit),
+      },
+      l2_gas: {
+        max_amount: feltHex(bounds.l2_gas.max_amount),
+        max_price_per_unit: feltHex(bounds.l2_gas.max_price_per_unit),
+      },
+      l1_data_gas: {
+        max_amount: feltHex(bounds.l1_data_gas?.max_amount ?? 0n),
+        max_price_per_unit: feltHex(bounds.l1_data_gas?.max_price_per_unit ?? 0n),
+      },
+    },
+    tip: feltHex(details.tip ?? 0n),
+    paymaster_data: (details.paymasterData ?? []).map(feltHex),
+    account_deployment_data: (details.accountDeploymentData ?? []).map(feltHex),
+    nonce_data_availability_mode: details.nonceDataAvailabilityMode ?? "L1",
+    fee_data_availability_mode: details.feeDataAvailabilityMode ?? "L1",
+    version: "0x3",
+  };
+}
+
+function feltHex(value: string | number | bigint): string {
+  return `0x${BigInt(value).toString(16)}`;
+}
 
 export function privacyBridgeDepositCalldata(plan: PrivacyBridgeDepositPlan) {
   return [
@@ -230,9 +357,6 @@ export const STARKNET_PRIVACY_PROOF_DELAY_SCHEDULE_BLOCKS = [
   10, 16, 24, 32, 48, 64, 96,
 ] as const;
 const STARKNET_PRIVACY_REPLAY_GUARD_ATOMS = 1n;
-const STARKNET_ETH_TOKEN_ADDRESS =
-  "0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
-export const CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS = 5_000_000_000_000n;
 const STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT = (1n << 128n) - 1n;
 const STARKNET_PRIVACY_SETUP_READY_TIMEOUT_MS = 10 * 60_000;
 const STARKNET_PRIVACY_SETUP_READY_POLL_MS = 3_000;
@@ -356,6 +480,8 @@ async function submitPrivacyBridgeDepositViaProver(
       account,
       chainId: input.chainId,
       tokenAddress: input.tokenAddress,
+      feeTokenAddress: input.feeTokenAddress,
+      connectedWalletFeeReserveAmount: input.connectedWalletFeeReserveAmount,
       privacyPoolAddress: input.privacyPoolAddress,
       amount: sdkDepositAmount,
       paymasterUrl: input.paymasterUrl,
@@ -401,7 +527,7 @@ async function submitPrivacyBridgeDepositViaProver(
             privacyPoolAddress: input.privacyPoolAddress,
             provingUrl: input.provingUrl,
             provingBlockId,
-            provingOhttpEnabled: input.provingOhttpEnabled,
+            provingOhttpPolicy: input.provingOhttpPolicy,
             execute: (provingProvider) => {
               const transfers = createPrivateTransfers({
                 account: account as never,
@@ -532,7 +658,7 @@ export async function submitPrivacyOpenNoteWithdrawal(
             privacyPoolAddress: input.privacyPoolAddress,
             provingUrl: input.provingUrl,
             provingBlockId,
-            provingOhttpEnabled: input.provingOhttpEnabled,
+            provingOhttpPolicy: input.provingOhttpPolicy,
             execute: (provingProvider) => {
               const transfers = createPrivateTransfers({
                 account: account as never,
@@ -688,12 +814,12 @@ async function executeWithProvingTransportFallback<T>(input: {
   privacyPoolAddress: string;
   provingUrl: string;
   provingBlockId: number;
-  provingOhttpEnabled?: boolean;
+  provingOhttpPolicy?: OhttpPolicy;
   execute: (provingProvider: ProvingServiceProofProvider) => Promise<T>;
 }): Promise<T> {
   return runProvingTransportAttempts({
     flow: input.flow,
-    provingOhttpEnabled: input.provingOhttpEnabled,
+    provingOhttpPolicy: input.provingOhttpPolicy,
     setStage: setFundingStage,
     run: (useOhttp) =>
       input.execute(
@@ -710,8 +836,8 @@ async function executeWithProvingTransportFallback<T>(input: {
 }
 
 export async function runProvingTransportAttempts<T>(input: {
-  flow: "deposit" | "withdrawal";
-  provingOhttpEnabled?: boolean;
+  flow: "deposit" | "withdrawal" | "recovery";
+  provingOhttpPolicy?: OhttpPolicy;
   setStage: (stage: string) => void;
   run: (useOhttp: boolean) => Promise<T>;
 }): Promise<T> {
@@ -722,7 +848,8 @@ export async function runProvingTransportAttempts<T>(input: {
       `Private ${input.flow} proof generation timed out before the proof service returned.`
     );
 
-  if (input.provingOhttpEnabled !== true) {
+  const policy = input.provingOhttpPolicy ?? "disabled";
+  if (policy === "disabled") {
     return runWithDeadline(false, STARKNET_PRIVACY_SDK_EXECUTE_TIMEOUT_MS);
   }
 
@@ -732,6 +859,7 @@ export async function runProvingTransportAttempts<T>(input: {
       STARKNET_PRIVACY_OHTTP_EXECUTE_TIMEOUT_MS
     );
   } catch (error) {
+    if (policy === "required") throw error;
     if (!shouldRetryDirectProvingTransport(error)) throw error;
     input.setStage(
       `Private ${input.flow} proof continuing over direct HTTPS because best-effort OHTTP is unavailable`
@@ -743,7 +871,8 @@ export async function runProvingTransportAttempts<T>(input: {
 function createProvingProvider(input: {
   chainId: string;
   rpcUrl: string;
-  privacyPoolAddress: string;
+  privacyPoolAddress?: string;
+  proofAccountAddress?: string;
   provingUrl: string;
   provingBlockId: number;
   provingOhttpEnabled: boolean;
@@ -755,7 +884,7 @@ function createProvingProvider(input: {
       blockIdentifier: input.provingBlockId,
       requestTimeoutMs: STARKNET_PRIVACY_PROOF_REQUEST_TIMEOUT_MS,
       nodeUrl: input.rpcUrl,
-      poolAddress: input.privacyPoolAddress,
+      poolAddress: input.proofAccountAddress ?? input.privacyPoolAddress,
       ohttp: input.provingOhttpEnabled,
     }
   );
@@ -775,11 +904,13 @@ export function shouldRetryDirectProvingTransport(error: unknown) {
 
 export function connectedWalletFundingShortfall(input: {
   tokenAddress: string;
+  feeTokenAddress: string;
+  connectedWalletFeeReserveAmount: bigint;
   sourceBalance: bigint;
   transferAmount: bigint;
 }): string | null {
-  const feeReserve = sameFelt(input.tokenAddress, STARKNET_ETH_TOKEN_ADDRESS)
-    ? CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS
+  const feeReserve = sameFelt(input.tokenAddress, input.feeTokenAddress)
+    ? input.connectedWalletFeeReserveAmount
     : 0n;
   if (input.sourceBalance < input.transferAmount) {
     return "Connected wallet balance is below the requested deposit plus one smallest token unit required for replay protection.";
@@ -788,7 +919,7 @@ export function connectedWalletFundingShortfall(input: {
     feeReserve > 0n &&
     input.sourceBalance < input.transferAmount + feeReserve
   ) {
-    return ETH_DEPOSIT_FEE_HEADROOM_ERROR;
+    return CONNECTED_WALLET_FEE_HEADROOM_ERROR;
   }
   return null;
 }
@@ -815,6 +946,8 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
   account: EmbeddedPrivacyProofAccount;
   chainId: string;
   tokenAddress: string;
+  feeTokenAddress: string;
+  connectedWalletFeeReserveAmount: bigint;
   privacyPoolAddress: string;
   amount: bigint;
   paymasterUrl?: string;
@@ -852,6 +985,8 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
     );
     const fundingShortfall = connectedWalletFundingShortfall({
       tokenAddress: input.tokenAddress,
+      feeTokenAddress: input.feeTokenAddress,
+      connectedWalletFeeReserveAmount: input.connectedWalletFeeReserveAmount,
       sourceBalance,
       transferAmount,
     });

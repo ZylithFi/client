@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertDeploymentManifest, assertPinnedExecutionKeys, enabledPairs, pinnedRegistryFingerprints } from "./deployment";
+import { assertDeploymentManifest, assertPinnedExecutionKeys, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
 import shipped from "../../public/deployment.example.json";
 
 const example = JSON.parse(JSON.stringify(shipped));
@@ -13,6 +13,13 @@ function finalized(manifest: typeof example) {
 }
 
 describe("deployment manifest", () => {
+  it("recomputes the same canonical registry hash as core", async () => {
+    await expect(verifyMarketRegistryHash(example)).resolves.toBeUndefined();
+    const changed = JSON.parse(JSON.stringify(example));
+    changed.market_registry.markets[0].taker_fee_bps += 1;
+    await expect(verifyMarketRegistryHash(changed)).rejects.toThrow(/hash mismatch/);
+  });
+
   it("accepts a deployed manifest in the shipped schema", () => {
     const deployed = finalized({
       ...example,
@@ -26,6 +33,36 @@ describe("deployment manifest", () => {
     expect(() => assertDeploymentManifest(example)).toThrow(/must be a nonzero address/);
     const { runtime: _, ...withoutRuntime } = { ...example, contracts: { ...example.contracts, commitment_registry: "0x1", privacy_deposit_bridge: "0x2", exchange: "0x4" } };
     expect(() => assertDeploymentManifest(withoutRuntime)).toThrow(/missing runtime/);
+  });
+
+  it("rejects runtime limits that cannot represent a usable deployment", () => {
+    const manifest = finalized(JSON.parse(JSON.stringify(example)));
+    for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange"]) manifest.contracts[name] = "0x1234";
+    manifest.runtime.max_admissions_per_transition = manifest.runtime.max_book_orders + 1;
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/runtime is malformed/);
+  });
+
+  it("rejects a pair whose registry key and canonical pair id disagree", () => {
+    const manifest = finalized(JSON.parse(JSON.stringify(example)));
+    for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange"]) manifest.contracts[name] = "0x1234";
+    manifest.market_registry.markets.find((market: { market_id: string }) => market.market_id === "STRK/USDC").market_id = "ETH/USDC";
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/sorted and unique|market ETH\/USDC is malformed/);
+  });
+
+  it("rejects reference sources outside the canonical production policy", () => {
+    const wrongPrimary = finalized(JSON.parse(JSON.stringify(example)));
+    for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange"]) wrongPrimary.contracts[name] = "0x1234";
+    wrongPrimary.market_registry.markets[0].reference_price.primary.adapter = "coinbase";
+    expect(() => assertDeploymentManifest(wrongPrimary)).toThrow(/invalid reference pricing/);
+
+    const wrongCorroboration = finalized(JSON.parse(JSON.stringify(example)));
+    for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange"]) wrongCorroboration.contracts[name] = "0x1234";
+    wrongCorroboration.market_registry.markets[0].reference_price.corroborating[0] = {
+      kind: "direct",
+      adapter: "coinbase",
+      symbol: "ETH-USDC",
+    };
+    expect(() => assertDeploymentManifest(wrongCorroboration)).toThrow(/invalid reference pricing/);
   });
 });
 
@@ -58,8 +95,10 @@ describe("external matching in the manifest", () => {
 
   it("needs a router and a window once a pair routes externally", () => {
     const manifest = deployed();
-    const pair = Object.values(manifest.product.pairs as Record<string, { enabled: boolean; external_match_enabled: boolean }>).find((candidate) => candidate.enabled)!;
-    pair.external_match_enabled = true;
+    const pair = manifest.market_registry.markets.find((candidate: { enabled: boolean }) => candidate.enabled)!;
+    pair.capabilities.external_matching = true;
+    pair.external_settlement_support_quote = "5000";
+    pair.external_min_profit_quote = "1";
     manifest.runtime.external_window_seconds = 0;
     expect(() => assertDeploymentManifest(manifest)).toThrow(/external window/);
     manifest.runtime.external_window_seconds = 30;

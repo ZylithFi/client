@@ -18,7 +18,7 @@ export function sessionSet(key: string, value: string): void {
   try {
     sessionStorage.setItem(key, value);
   } catch {
-    // Session memory is convenience-only; storage may be blocked.
+    // session memory is convenience-only; storage may be blocked.
   }
 }
 
@@ -26,7 +26,7 @@ export function sessionRemove(key: string): void {
   try {
     sessionStorage.removeItem(key);
   } catch {
-    // Session memory is convenience-only; storage may be blocked.
+    // session memory is convenience-only; storage may be blocked.
   }
 }
 
@@ -34,6 +34,6 @@ export function localRemove(key: string): void {
   try {
     localStorage.removeItem(key);
   } catch {
-    // Local storage cleanup is best-effort.
+    // local storage cleanup is best-effort.
   }
 }

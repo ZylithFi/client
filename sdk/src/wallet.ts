@@ -36,6 +36,54 @@ export type WalletOrder = {
   submitted_at_ms: number;
   updated_at_ms: number;
   last_error?: string;
+  /** true when the wallet holds the latest nullifiable residual-order authority. */
+  residual_recovery_available?: boolean;
+};
+
+/** a complete, deterministic residual-recovery statement ready for any compatible prover. */
+export type ResidualRecoveryPreparation = {
+  order_id: string;
+  residual_seq: number;
+  note_root: string;
+  nullifier: string;
+  statement_commitment: string;
+  input_asset_id: string;
+  input_amount: string;
+  output_asset_id: string;
+  output_amount: string;
+  fee_amount: string;
+  witness: string[];
+  recovery_calldata: string[];
+  proof_program_call: {
+    contract_address: string;
+    entrypoint: "compile_residual_recovery_proof";
+    calldata: string[];
+  };
+  settlement_call: {
+    contract_address: string;
+    entrypoint: "request_residual_recovery";
+    calldata: string[];
+  };
+  input_exit_commitment: string | null;
+  output_exit_commitment: string | null;
+};
+
+export type ResidualRecoverySubmission = {
+  nullifier: string;
+  transaction_hash: string | null;
+  already_requested: boolean;
+};
+
+export type ResidualRecoveryFinalization = {
+  nullifier: string;
+  transaction_hash: string | null;
+  already_final: boolean;
+  matures_at: number;
+};
+
+export type ResidualRecoveryClaim = {
+  input_transaction_hash: string | null;
+  output_transaction_hash: string | null;
 };
 
 /** what a trading program needs from a zylith wallet. */
@@ -47,4 +95,9 @@ export type TraderWalletRuntime = {
   refresh: () => Promise<void>;
   getWithdrawableNotes?: () => WithdrawableNote[];
   withdraw?: (noteCommitment: string) => Promise<unknown>;
+  prepareResidualRecovery?: (orderId: string) => Promise<ResidualRecoveryPreparation>;
+  submitResidualRecovery?: (orderId: string) => Promise<ResidualRecoverySubmission>;
+  freezeResidualRecoveryCapacity?: (orderId: string) => Promise<unknown>;
+  finalizeResidualRecovery?: (orderId: string) => Promise<ResidualRecoveryFinalization>;
+  claimResidualRecovery?: (orderId: string) => Promise<ResidualRecoveryClaim>;
 };

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { constants } from "starknet";
 import {
   assertConnectedWalletAccountActivatedForDeposit,
-  CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS,
   connectedWalletFundingShortfall,
   executeWalletCall,
   isDiscoveryHealthyWithFallback,
@@ -113,7 +112,7 @@ describe("runProvingTransportAttempts", () => {
     const attempts: boolean[] = [];
     const result = runProvingTransportAttempts({
       flow: "deposit",
-      provingOhttpEnabled: true,
+      provingOhttpPolicy: "best_effort",
       setStage: (stage) => stages.push(stage),
       run: async (useOhttp) => {
         attempts.push(useOhttp);
@@ -131,11 +130,43 @@ describe("runProvingTransportAttempts", () => {
     ]);
   });
 
+  it("uses direct HTTPS only when OHTTP is disabled", async () => {
+    const attempts: boolean[] = [];
+    await expect(
+      runProvingTransportAttempts({
+        flow: "deposit",
+        provingOhttpPolicy: "disabled",
+        setStage: () => undefined,
+        run: async (useOhttp) => {
+          attempts.push(useOhttp);
+          return "direct-ok";
+        },
+      })
+    ).resolves.toBe("direct-ok");
+    expect(attempts).toEqual([false]);
+  });
+
+  it("fails closed without direct fallback when OHTTP is required", async () => {
+    const attempts: boolean[] = [];
+    await expect(
+      runProvingTransportAttempts({
+        flow: "withdrawal",
+        provingOhttpPolicy: "required",
+        setStage: () => undefined,
+        run: async (useOhttp) => {
+          attempts.push(useOhttp);
+          throw new Error("OHTTP request failed: network timeout");
+        },
+      })
+    ).rejects.toThrow("network timeout");
+    expect(attempts).toEqual([true]);
+  });
+
   it("does not fall back when OHTTP returns a deterministic prover error", async () => {
     await expect(
       runProvingTransportAttempts({
         flow: "withdrawal",
-        provingOhttpEnabled: true,
+        provingOhttpPolicy: "best_effort",
         setStage: () => undefined,
         run: async () => {
           throw new Error("Execution reverted: SCREENING_REQUIRED");
@@ -160,18 +191,23 @@ describe("starknetPrivacySdkChainId", () => {
 });
 
 describe("connectedWalletFundingShortfall", () => {
-  it("requires ETH fee headroom before opening the wallet transfer", () => {
+  it("requires registry-selected fee-token headroom before opening the wallet transfer", () => {
     const transferAmount = 1_000_000_000_000_000_000n;
+    const feeReserve = 5_000_000_000_000n;
 
     expect(connectedWalletFundingShortfall({
       tokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
+      feeTokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
+      connectedWalletFeeReserveAmount: feeReserve,
       sourceBalance: transferAmount,
       transferAmount,
-    })).toBe("ETH deposit amount leaves no room for the wallet transaction fee. Try a slightly smaller amount.");
+    })).toMatch(/fee token/);
 
     expect(connectedWalletFundingShortfall({
       tokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
-      sourceBalance: transferAmount + CONNECTED_WALLET_ETH_FEE_RESERVE_ATOMS,
+      feeTokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
+      connectedWalletFeeReserveAmount: feeReserve,
+      sourceBalance: transferAmount + feeReserve,
       transferAmount,
     })).toBeNull();
   });
@@ -181,6 +217,8 @@ describe("connectedWalletFundingShortfall", () => {
 
     expect(connectedWalletFundingShortfall({
       tokenAddress: "0x1234",
+      feeTokenAddress: STARKNET_ETH_TOKEN_ADDRESS,
+      connectedWalletFeeReserveAmount: 5_000_000_000_000n,
       sourceBalance: transferAmount,
       transferAmount,
     })).toBeNull();

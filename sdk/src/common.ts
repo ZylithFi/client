@@ -71,30 +71,28 @@ export type MarketDataEngineOptions = {
   now?: () => number;
 };
 
-export const DEFAULT_ASSET_DECIMALS: Record<string, number> = {
-  STRK: 18,
-  ETH: 18,
-  USDC: 6,
-};
-
-let configuredAssetDecimals: Record<string, number> = { ...DEFAULT_ASSET_DECIMALS };
+let configuredAssetDecimals: Record<string, number> = {};
 
 export function configureAssetDecimals(assets: Record<string, { decimals?: number }> | null | undefined): void {
-  configuredAssetDecimals = { ...DEFAULT_ASSET_DECIMALS };
+  const configured: Record<string, number> = {};
   for (const [assetId, metadata] of Object.entries(assets ?? {})) {
     if (
-      typeof metadata.decimals === "number" &&
-      Number.isInteger(metadata.decimals) &&
-      metadata.decimals >= 0 &&
-      metadata.decimals <= 255
+      typeof metadata.decimals !== "number" ||
+      !Number.isInteger(metadata.decimals) ||
+      metadata.decimals < 0 ||
+      metadata.decimals > 255
     ) {
-      configuredAssetDecimals[assetId] = metadata.decimals;
+      throw new Error(`Asset ${assetId} has invalid decimals`);
     }
+    configured[assetId] = metadata.decimals;
   }
+  configuredAssetDecimals = configured;
 }
 
 export function assetDecimals(assetId: string): number {
-  return configuredAssetDecimals[assetId] ?? DEFAULT_ASSET_DECIMALS[assetId] ?? 18;
+  const decimals = configuredAssetDecimals[assetId];
+  if (decimals === undefined) throw new Error(`Asset ${assetId} decimals are not defined by the market registry`);
+  return decimals;
 }
 
 export function toAtomicStr(human: string, assetId: string): string {

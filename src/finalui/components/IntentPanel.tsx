@@ -49,12 +49,12 @@ export function IntentPanel({
   const [side, setSide] = useState<IntentSide>("buy");
   const [externalMatching, setExternalMatching] = useState(false);
   const [amount, setAmount] = useState(() =>
-    defaultTradeAmount(pair?.quote_asset_id ?? "USDC")
+    defaultTradeAmount(pair?.quote_asset_id ?? "")
   );
   const signedMidpoint = positiveNumber(referencePrice?.displayPrice);
   const midpoint = marketMidpoint || signedMidpoint;
-  const baseAsset = pair?.base_asset_id ?? "STRK";
-  const quoteAsset = pair?.quote_asset_id ?? "USDC";
+  const baseAsset = pair?.base_asset_id ?? "-";
+  const quoteAsset = pair?.quote_asset_id ?? "-";
   const payAsset = side === "buy" ? quoteAsset : baseAsset;
   const receiveAsset = side === "buy" ? baseAsset : quoteAsset;
   const numericAmount = positiveNumber(amount);
@@ -298,7 +298,7 @@ export function IntentPanel({
         </div>
         <div>
           <span>Fee</span>
-          <strong>{pair?.taker_fee_bps ?? 4} bps</strong>
+          <strong>{pair ? `${pair.taker_fee_bps} bps` : "-"}</strong>
         </div>
         <div>
           <span>Residual route</span>

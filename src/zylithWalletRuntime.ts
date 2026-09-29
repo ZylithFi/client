@@ -9,6 +9,10 @@ import type {
   OrderDraft,
   OrderEvent,
   OutputRecord,
+  ResidualRecoveryClaim,
+  ResidualRecoveryFinalization,
+  ResidualRecoveryPreparation,
+  ResidualRecoverySubmission,
   SealedRequest,
   StatusAnswer,
   TraderWalletRuntime,
@@ -17,13 +21,14 @@ import type {
   WithdrawableNote,
 } from "@zylith/sdk";
 import type { PrivateRegistry } from "@starkware-libs/starknet-privacy-sdk";
-import { ExchangeHttpError, ExchangeRejectedError } from "@zylith/sdk";
+import { ExchangeHttpError, ExchangeRejectedError, transitionWindows } from "@zylith/sdk";
 import { notifyWalletRuntimeChanged, selectedStarknetProvider, setWalletRuntime } from "./domain/browserWallet";
 import {
   BACKUP_URL,
   type DeploymentConfig,
   type PairConfig,
   assertPinnedExecutionKeys,
+  enabledPairs,
   exchange,
   loadDeployment,
 } from "./domain/deployment";
@@ -65,6 +70,7 @@ import {
   buildZylithWalletAuthTypedData,
   connectedProviderAddress,
   ensureWalletChain,
+  executeStarknetWalletCall,
   fetchTransactionReceiptStatus,
   requestStarknetWalletTypedSignature,
   selectInjectedStarknetProvider,
@@ -78,6 +84,7 @@ type WalletWasmModule = {
   default?: () => Promise<void>;
   zylith_wallet_generate_seed_hex: () => string;
   zylith_wallet_derive_public_config: (seedHex: string) => string;
+  zylith_wallet_market_ids: (inputJson: string) => string;
   zylith_wallet_recovery_auth_tag: (seedHex: string) => string;
   zylith_wallet_build_deposit_submission_plan: (inputJson: string) => string;
   zylith_wallet_build_order_request: (inputJson: string) => string;
@@ -86,6 +93,10 @@ type WalletWasmModule = {
   zylith_wallet_build_status_requests: (inputJson: string) => string;
   zylith_wallet_registry_fingerprint: (registryJson: string) => string;
   zylith_wallet_recover_order_outputs: (inputJson: string) => string;
+  zylith_wallet_recover_order_residuals: (inputJson: string) => string;
+  zylith_wallet_quote_residual_recovery: (inputJson: string) => string;
+  zylith_wallet_build_residual_recovery: (inputJson: string) => string;
+  zylith_wallet_build_note_membership: (inputJson: string) => string;
   zylith_wallet_note_summary: (noteJson: string) => string;
   zylith_wallet_create_recovery_snapshot: (inputJson: string) => string;
   zylith_wallet_decrypt_recovery_artifact: (seedHex: string, artifactJson: string) => string;
@@ -113,6 +124,68 @@ type NoteFields = {
   nonce: number;
   metadata_commitment: string;
 };
+
+type ResidualNote = {
+  chain_context: string;
+  input_asset_id: string;
+  pair_id: string;
+  sell: boolean;
+  external: boolean;
+  remaining: string;
+  limit: string;
+  funding: string;
+  reserved: string;
+  reserved_offset: string;
+  reserved_seq: number;
+  expiry_ms: number;
+  order_id: string;
+  generation: number;
+  owner: {
+    owner_public_key: string;
+    spend_authority: string;
+    withdraw_authority: string;
+    cancel_authority: string;
+    nonce: string;
+  };
+  blinding: string;
+};
+
+type StoredResidual = {
+  seq: number;
+  index: number;
+  note: ResidualNote;
+  note_root?: string;
+  membership?: unknown;
+};
+
+type RecoveryCapacityView = {
+  generation: number;
+  status: number;
+  total: string;
+  consumed_base: string;
+  pool_quote: string;
+  scale: string;
+  opened_at: bigint;
+};
+
+export type PendingResidualExitView = {
+  input_asset_id: string;
+  input_amount: string;
+  input_exit_commitment: string;
+  output_asset_id: string;
+  output_amount: string;
+  output_exit_commitment: string;
+  fee_amount: string;
+  requested_at_ms: number;
+  matures_at: number;
+};
+
+export class ResidualCapacityFreezeRequiredError extends Error {
+  constructor() {
+    super("External capacity must fill or be permissionlessly frozen after expiry before recovery.");
+    this.name = "ResidualCapacityFreezeRequiredError";
+  }
+}
 
 type ExitStage = NonNullable<WithdrawableNote["exit_stage"]>;
 
@@ -162,6 +235,36 @@ export type StoredOrder = WalletOrder & {
   cancel_requested?: boolean;
   /** input still held by the book: funding less what fills consumed. */
   locked_input: string;
+  /** the latest chain-authenticated residual authority; unchanged epochs do not replace it. */
+  residual?: StoredResidual;
+  /** durable retry identity for freezing an expired external reservation before recovery. */
+  residual_capacity_freeze?: {
+    residual_seq: number;
+    transaction_hash: string;
+    submitted_at_ms: number;
+  };
+  /** durable one-time exits for the latest prepared permissionless recovery. */
+  residual_recovery?: {
+    residual_seq: number;
+    nullifier: string;
+    statement_commitment: string;
+    input_asset_id: string;
+    input_amount: string;
+    output_asset_id: string;
+    output_amount: string;
+    fee_amount: string;
+    input_exit_commitment: string | null;
+    output_exit_commitment: string | null;
+    request_transaction_hash?: string;
+    request_submitted_at_ms?: number;
+    matures_at?: number;
+    finalization_transaction_hash?: string;
+    finalization_submitted_at_ms?: number;
+    input_claim_transaction_hash?: string;
+    input_claim_submitted_at_ms?: number;
+    output_claim_transaction_hash?: string;
+    output_claim_submitted_at_ms?: number;
+  };
 };
 
 type WalletState = {
@@ -196,6 +299,11 @@ export type WalletRuntime = TraderWalletRuntime & {
   withdrawalAvailable: () => boolean;
   submitDepositViaWallet: (asset: string, amountAtoms: string) => Promise<{ transaction_hash: string; note_commitment: string }>;
   withdraw: (noteCommitment: string) => Promise<{ nullifier: string }>;
+  prepareResidualRecovery: (orderId: string) => Promise<ResidualRecoveryPreparation>;
+  submitResidualRecovery: (orderId: string) => Promise<ResidualRecoverySubmission>;
+  freezeResidualRecoveryCapacity: (orderId: string) => Promise<{ transaction_hash: string | null; already_final: boolean }>;
+  finalizeResidualRecovery: (orderId: string) => Promise<ResidualRecoveryFinalization>;
+  claimResidualRecovery: (orderId: string) => Promise<ResidualRecoveryClaim>;
 };
 
 const WALLET_WASM_MODULE_URL = "/wallet/zylith_wallet_wasm.js";
@@ -203,8 +311,7 @@ const VAULT_KEY = "zylith.wallet.vault.v1";
 const STATE_PREFIX = "zylith.wallet.state.v2:";
 const PRIVACY_REGISTRY_PREFIX = "zylith.wallet.starknet-privacy-registry.v1:";
 const WALLET_VAULT_REQUEST_TIMEOUT_MS = 10_000;
-/** state-independent private heartbeat cadence. jitter avoids synchronized wallet bursts without
- * revealing whether this wallet currently follows an order or withdrawal. */
+/** active-work refresh cadence; idle wallets emit no synthetic private traffic. */
 const REFRESH_CADENCE_MS = 10_000;
 const REFRESH_JITTER_MS = 1_000;
 const RECOVERY_SNAPSHOT_MIN_INTERVAL_MS = 60_000;
@@ -212,14 +319,104 @@ const DEFAULT_ORDER_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUNDING_NOTES = 4;
 const PENDING_DEPOSIT_FAILURE_GRACE_MS = 10 * 60 * 1000;
 const CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS = 10 * 60 * 1000;
+const RECOVERY_TRANSACTION_MISSING_GRACE_MS = 10 * 60 * 1000;
 const DEPOSIT_CONFIRMATION_STALE_MS = 2 * 60 * 1000;
 const DEFAULT_MIN_PROVING_DELAY_BLOCKS = 10;
 /** an unknown order older than this is resolved from its funding nullifiers. */
 const UNKNOWN_ORDER_GRACE_MS = 2 * 60 * 1000;
+
+export function recoveryTransactionDisposition(
+  status: TransactionReceiptStatus | null,
+  submittedAtMs: number,
+  nowMs: number,
+  missingGraceMs: number,
+): "confirmed" | "pending" | "retry" {
+  if (status?.failed) return "retry";
+  if (status?.confirmed) return "confirmed";
+  if (status?.notFound && nowMs - submittedAtMs >= missingGraceMs) return "retry";
+  return "pending";
+}
 const NULLIFIER_UNUSED = 0n;
+const NULLIFIER_EXIT_PENDING = 2n;
 const NULLIFIER_EXITED = 3n;
 const OUTPUT_KIND_PROCEEDS = 1;
+const CAPACITY_OPEN = 1;
+const CAPACITY_FILLED = 2;
+const CAPACITY_FROZEN = 4;
 const OPEN_STATES = new Set<WalletOrder["state"]>(["submitting", "pending", "live", "cancelling"]);
+
+function isResidualNote(value: unknown): value is ResidualNote {
+  if (!value || typeof value !== "object") return false;
+  const note = value as Record<string, unknown>;
+  const owner = note.owner as Record<string, unknown> | undefined;
+  const felt = (field: unknown) => typeof field === "string" && /^0x[0-9a-f]+$/i.test(field);
+  const amount = (field: unknown) => typeof field === "string" && /^\d+$/.test(field);
+  const integer = (field: unknown) => typeof field === "number" && Number.isSafeInteger(field) && field >= 0;
+  return felt(note.chain_context)
+    && felt(note.input_asset_id)
+    && felt(note.pair_id)
+    && typeof note.sell === "boolean"
+    && typeof note.external === "boolean"
+    && amount(note.remaining)
+    && amount(note.limit)
+    && amount(note.funding)
+    && amount(note.reserved)
+    && amount(note.reserved_offset)
+    && integer(note.reserved_seq)
+    && integer(note.expiry_ms)
+    && felt(note.order_id)
+    && integer(note.generation)
+    && felt(note.blinding)
+    && Boolean(owner)
+    && felt(owner?.owner_public_key)
+    && felt(owner?.spend_authority)
+    && felt(owner?.withdraw_authority)
+    && felt(owner?.cancel_authority)
+    && felt(owner?.nonce);
+}
+
+function requireStoredResidual(value: unknown): StoredResidual {
+  if (!value || typeof value !== "object") throw new Error("The stored residual authority is malformed.");
+  const residual = value as Record<string, unknown>;
+  if (
+    typeof residual.seq !== "number"
+    || !Number.isSafeInteger(residual.seq)
+    || residual.seq < 0
+    || typeof residual.index !== "number"
+    || !Number.isSafeInteger(residual.index)
+    || residual.index < 0
+    || !isResidualNote(residual.note)
+    || ((residual.note_root === undefined) !== (residual.membership === undefined))
+    || (residual.note_root !== undefined
+      && (typeof residual.note_root !== "string" || !/^0x[0-9a-f]+$/i.test(residual.note_root)))
+  ) {
+    throw new Error("The stored residual authority is malformed.");
+  }
+  return residual as StoredResidual;
+}
+
+/** decodes the cairo storage view and rejects truncation before recovery state is trusted. */
+export function parsePendingResidualExit(fields: string[]): PendingResidualExitView {
+  if (fields.length !== 13) {
+    throw new Error("The deployed residual exit has an unexpected layout.");
+  }
+  const requestedAtMs = Number(BigInt(fields[11]));
+  const maturesAt = Number(BigInt(fields[12]));
+  if (!Number.isSafeInteger(requestedAtMs) || !Number.isSafeInteger(maturesAt)) {
+    throw new Error("The deployed residual exit timestamp is out of range.");
+  }
+  return {
+    input_asset_id: fields[0],
+    input_amount: BigInt(fields[1]).toString(),
+    input_exit_commitment: fields[2],
+    output_asset_id: fields[4],
+    output_amount: BigInt(fields[5]).toString(),
+    output_exit_commitment: fields[6],
+    fee_amount: BigInt(fields[8]).toString(),
+    requested_at_ms: requestedAtMs,
+    matures_at: maturesAt,
+  };
+}
 
 export async function installConfiguredZylithWalletRuntime() {
   if (typeof window === "undefined") return;
@@ -371,7 +568,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   function startWorker() {
     workerRunning = true;
-    kick();
+    if (hasPendingWork()) kick();
   }
 
   /** refreshes now and schedules the next refresh by what is in motion. */
@@ -383,7 +580,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     void refresh()
       .catch(() => undefined)
       .finally(() => {
-        if (!workerRunning || sessionGeneration !== generation || timer !== null) return;
+        if (!workerRunning || sessionGeneration !== generation || timer !== null || !hasPendingWork()) return;
         timer = window.setTimeout(() => {
           timer = null;
           kick();
@@ -394,6 +591,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   function refreshDelay() {
     const jitter = crypto.getRandomValues(new Uint32Array(1))[0] % (2 * REFRESH_JITTER_MS + 1);
     return REFRESH_CADENCE_MS - REFRESH_JITTER_MS + jitter;
+  }
+
+  function hasPendingWork() {
+    return followedOrders().length > 0
+      || followedExits().length > 0
+      || state.notes.some((note) => note.deposit && !note.deposit.failed && !note.deposit.confirmed)
+      || state.notes.some((note) => note.exit?.stage === "claiming");
   }
 
   // wallet-signature vault
@@ -636,6 +840,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
     const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
     const tokenAddress = fundingRailTokenAddress(manifest, asset);
+    const feeTokenAddress = fundingRailTokenAddress(
+      manifest,
+      manifest.market_registry.gas_fee_asset_id,
+    );
     setPrivacyFundingStage("Connecting Starknet wallet and checking network");
     const provider = await selectInjectedStarknetProvider();
     const plan = call<{
@@ -664,9 +872,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         privacyPoolAddress,
         bridgeAddress,
         tokenAddress,
+        feeTokenAddress,
+        connectedWalletFeeReserveAmount: BigInt(
+          manifest.market_registry.connected_wallet_fee_reserve_amount,
+        ),
         discoveryUrl: serviceUrl(rail.discoveryUrl, "/starknet-privacy-discovery"),
         provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
-        provingOhttpEnabled: rail.provingOhttpEnabled,
+        provingOhttpPolicy: rail.provingOhttpPolicy,
         paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
         paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
         privacyProofSignerClassHash: rail.privacyProofSignerClassHash,
@@ -742,11 +954,20 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return fetchTransactionReceiptStatus(transactionHash, unlocked().deployment).catch(() => null);
   }
 
+  async function recoveryTransactionState(transactionHash: string, submittedAtMs: number) {
+    return recoveryTransactionDisposition(
+      await receipt(transactionHash),
+      submittedAtMs,
+      Date.now(),
+      RECOVERY_TRANSACTION_MISSING_GRACE_MS,
+    );
+  }
+
   // orders
 
   function pairConfig(pair: string): PairConfig {
-    const config = unlocked().deployment.product.pairs[pair];
-    if (!config?.enabled) throw new Error(`${pair} is not traded`);
+    const config = enabledPairs(unlocked().deployment).find((market) => market.pair_id === pair);
+    if (!config) throw new Error(`${pair} is not traded`);
     return config;
   }
 
@@ -898,7 +1119,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   function closeOrder(order: StoredOrder, removal: NonNullable<OrderEvent["report"]["removal"]>, closedSeq: number | undefined) {
     order.closed_seq = closedSeq;
     order.locked_input = "0";
-    order.state = removal === "Cancelled" ? "cancelled" : removal === "Expired" ? "expired" : "filled";
+    order.state = removal === "Cancelled" || removal === "Recovered" ? "cancelled" : removal === "Expired" ? "expired" : "filled";
     order.updated_at_ms = Date.now();
   }
 
@@ -936,11 +1157,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return state.notes.filter((note) => note.exit && !note.spent && note.exit.stage !== "failed" && note.exit.stage !== "finalized" && note.exit.stage !== "claiming");
   }
 
-  /** one fixed-size sealed status request per heartbeat. multiple chunks rotate across heartbeats,
-   * so neither traffic cadence nor request count reveals how much state this wallet follows. */
+  /** one fixed-size sealed status request while private work is active. multiple chunks rotate
+   * across refreshes; an idle wallet does not send an empty synthetic request. */
   async function fetchStatus(): Promise<StatusAnswer | null> {
     const orders = followedOrders();
     const exits = followedExits();
+    if (orders.length === 0 && exits.length === 0) return null;
     const built = call<SealedBuild[]>(core.zylith_wallet_build_status_requests, {
       registry: await executionKeys(),
       orders: orders.map((order) => ({ order_id: order.order_id, after_seq: order.seen_seqs.length > 0 ? Math.max(...order.seen_seqs) : 0 })),
@@ -1012,6 +1234,517 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return BigInt(value ?? "0");
   }
 
+  async function readRecoveryCapacity(note: ResidualNote): Promise<RecoveryCapacityView> {
+    const { deployment: manifest } = unlocked();
+    const fields = await starknetCall(manifest.rpc_url, manifest.contracts.exchange, "capacity", [
+      String(note.reserved_seq),
+      note.pair_id,
+      note.sell ? "0x1" : "0x0",
+    ]);
+    if (fields.length !== 9) throw new Error("The deployed recovery capacity has an unexpected layout.");
+    const generation = Number(BigInt(fields[8]));
+    const status = Number(BigInt(fields[7]));
+    if (!Number.isSafeInteger(generation) || !Number.isSafeInteger(status)) {
+      throw new Error("The deployed recovery capacity is out of range.");
+    }
+    return {
+      generation,
+      status,
+      total: BigInt(fields[1]).toString(),
+      scale: BigInt(fields[2]).toString(),
+      opened_at: BigInt(fields[3]),
+      consumed_base: BigInt(fields[4]).toString(),
+      pool_quote: BigInt(fields[5]).toString(),
+    };
+  }
+
+  /** builds the exact public recovery statement from chain-indexed data only. */
+  async function prepareResidualRecovery(orderId: string): Promise<ResidualRecoveryPreparation> {
+    const { seedHex: seed, deployment: manifest } = unlocked();
+    const order = orderById(orderId);
+    if (!order?.residual) throw new Error("This order has no recoverable residual state.");
+
+    const residual = requireStoredResidual(order.residual);
+    const pairFields = await starknetCall(
+      manifest.rpc_url,
+      manifest.contracts.exchange,
+      "pair_config",
+      [residual.note.pair_id],
+    );
+    const configuredPair = pairConfig(order.pair);
+    const [baseAsset, quoteAsset, feeBpsValue] = pairFields;
+    const marketIds = call<{ pair_id: string; base_asset_id: string; quote_asset_id: string }>(core.zylith_wallet_market_ids, {
+      pair: configuredPair.pair_id,
+      base_asset: configuredPair.base_asset_id,
+      quote_asset: configuredPair.quote_asset_id,
+    });
+    if (
+      normalizeFeltForComparison(baseAsset ?? "0") !== normalizeFeltForComparison(marketIds.base_asset_id)
+      || normalizeFeltForComparison(quoteAsset ?? "0") !== normalizeFeltForComparison(marketIds.quote_asset_id)
+      || normalizeFeltForComparison(residual.note.pair_id) !== normalizeFeltForComparison(marketIds.pair_id)
+      || normalizeFeltForComparison(residual.note.input_asset_id) !== normalizeFeltForComparison(
+        residual.note.sell ? marketIds.base_asset_id : marketIds.quote_asset_id,
+      )
+    ) {
+      throw new Error("The deployed pair configuration does not match this wallet's manifest.");
+    }
+    const feeBps = BigInt(feeBpsValue ?? "0");
+    if (feeBps < 0n || feeBps > 100n || feeBps !== BigInt(configuredPair.taker_fee_bps)) {
+      throw new Error("The deployed recovery fee does not match this wallet's manifest.");
+    }
+
+    let membership: { note_root: string; membership: unknown };
+    if (residual.note_root && residual.membership !== undefined) {
+      membership = { note_root: residual.note_root, membership: residual.membership };
+    } else {
+      // legacy local state can reconstruct the same public material from any chain indexer.
+      const [windowStart, windowEnd] = transitionWindows(residual.seq, residual.seq)[0];
+      const [transitionList, batchRoots] = await Promise.all([
+        exchange().transitions(windowStart, windowEnd),
+        exchange().allNoteBatchRoots(),
+      ]);
+      const transition = transitionList.transitions.find((entry) => entry.seq === residual.seq);
+      if (!transition) throw new Error("The public chain index is missing the residual transition.");
+      if (transition.note_batch_index >= batchRoots.length) {
+        throw new Error("The public chain index is missing the residual note batch.");
+      }
+      membership = call(core.zylith_wallet_build_note_membership, {
+        batch_roots: batchRoots,
+        batch_index: transition.note_batch_index,
+        batch_leaves: transition.outputs.map((record) => record.leaf),
+        leaf_index: residual.index,
+      });
+      residual.note_root = membership.note_root;
+      residual.membership = membership.membership;
+      await saveState();
+      await pushRecoverySnapshot(true).catch(() => false);
+    }
+    let capacity = { generation: 0, status: 0, total: "0", consumed_base: "0", pool_quote: "0", scale: "0" };
+    if (BigInt(residual.note.reserved) !== 0n) {
+      const view = await readRecoveryCapacity(residual.note);
+      if (view.status !== CAPACITY_FILLED && view.status !== CAPACITY_FROZEN) {
+        throw new ResidualCapacityFreezeRequiredError();
+      }
+      capacity = {
+        generation: view.generation,
+        status: view.status,
+        total: view.total,
+        scale: view.scale,
+        consumed_base: view.consumed_base,
+        pool_quote: view.pool_quote,
+      };
+    }
+    const outputAssetId = residual.note.sell ? quoteAsset : baseAsset;
+    const prepared = order.residual_recovery?.residual_seq === residual.seq
+      ? order.residual_recovery
+      : undefined;
+    const built = call<{
+      public: {
+        nullifier: string;
+        commitment: string;
+        input_asset_id: string;
+        input_amount: string;
+        output_asset_id: string;
+        output_amount: string;
+        fee_amount: string;
+      };
+      witness: string[];
+      calldata: string[];
+      input_exit_commitment?: string | null;
+      output_exit_commitment?: string | null;
+    }>(core.zylith_wallet_build_residual_recovery, {
+      seed_hex: seed,
+      note_root: membership.note_root,
+      note: residual.note,
+      membership: membership.membership,
+      output_asset_id: outputAssetId,
+      fee_bps: feeBps.toString(),
+      capacity,
+      input_exit_commitment: prepared?.input_exit_commitment ?? undefined,
+      output_exit_commitment: prepared?.output_exit_commitment ?? undefined,
+    });
+    order.residual_recovery = {
+      ...(prepared ?? {}),
+      residual_seq: residual.seq,
+      nullifier: built.public.nullifier,
+      statement_commitment: built.public.commitment,
+      input_asset_id: built.public.input_asset_id,
+      input_amount: built.public.input_amount,
+      output_asset_id: built.public.output_asset_id,
+      output_amount: built.public.output_amount,
+      fee_amount: built.public.fee_amount,
+      input_exit_commitment: built.input_exit_commitment ?? null,
+      output_exit_commitment: built.output_exit_commitment ?? null,
+    };
+    order.residual_capacity_freeze = undefined;
+    order.updated_at_ms = Date.now();
+    await saveState();
+    await pushRecoverySnapshot(true).catch(() => false);
+    return {
+      order_id: order.order_id,
+      residual_seq: residual.seq,
+      note_root: membership.note_root,
+      nullifier: built.public.nullifier,
+      statement_commitment: built.public.commitment,
+      input_asset_id: built.public.input_asset_id,
+      input_amount: built.public.input_amount,
+      output_asset_id: built.public.output_asset_id,
+      output_amount: built.public.output_amount,
+      fee_amount: built.public.fee_amount,
+      witness: built.witness,
+      recovery_calldata: built.calldata,
+      proof_program_call: {
+        contract_address: manifest.proof.proof_program_address,
+        entrypoint: "compile_residual_recovery_proof",
+        calldata: [manifest.contracts.exchange, String(built.witness.length), ...built.witness],
+      },
+      settlement_call: {
+        contract_address: manifest.contracts.exchange,
+        entrypoint: "request_residual_recovery",
+        calldata: built.calldata,
+      },
+      input_exit_commitment: built.input_exit_commitment ?? null,
+      output_exit_commitment: built.output_exit_commitment ?? null,
+    };
+  }
+
+  async function pendingResidualExit(nullifier: string) {
+    const { deployment: manifest } = unlocked();
+    return parsePendingResidualExit(
+      await starknetCall(
+        manifest.rpc_url,
+        manifest.contracts.exchange,
+        "pending_residual_exit",
+        [nullifier],
+      ),
+    );
+  }
+
+  function assertPendingResidualMatches(
+    prepared: NonNullable<StoredOrder["residual_recovery"]>,
+    pending: PendingResidualExitView,
+  ) {
+    const feltMatches = (actual: string, expected: string | null) =>
+      normalizeFeltForComparison(actual) === normalizeFeltForComparison(expected ?? "0x0");
+    if (
+      !feltMatches(pending.input_asset_id, prepared.input_asset_id)
+      || !feltMatches(pending.output_asset_id, prepared.output_asset_id)
+      || !feltMatches(pending.input_exit_commitment, prepared.input_exit_commitment)
+      || !feltMatches(pending.output_exit_commitment, prepared.output_exit_commitment)
+      || pending.input_amount !== prepared.input_amount
+      || pending.output_amount !== prepared.output_amount
+      || pending.fee_amount !== prepared.fee_amount
+    ) {
+      throw new Error("The on-chain residual exit does not match the prepared recovery.");
+    }
+  }
+
+  /** proves and requests the exact prepared residual exit without operator cooperation. */
+  async function submitResidualRecovery(orderId: string): Promise<ResidualRecoverySubmission> {
+    const { seedHex: seed, deployment: manifest } = unlocked();
+    const prepared = await prepareResidualRecovery(orderId);
+    const order = orderById(orderId);
+    if (!order?.residual_recovery) throw new Error("The residual recovery was not persisted.");
+    const persisted = order.residual_recovery;
+    const current = await nullifierState(prepared.nullifier);
+    if (current === NULLIFIER_EXIT_PENDING || current === NULLIFIER_EXITED) {
+      const pending = await pendingResidualExit(prepared.nullifier);
+      assertPendingResidualMatches(persisted, pending);
+      persisted.matures_at = pending.matures_at;
+      await saveState();
+      return {
+        nullifier: prepared.nullifier,
+        transaction_hash: persisted.request_transaction_hash ?? null,
+        already_requested: true,
+      };
+    }
+    if (current !== NULLIFIER_UNUSED) {
+      throw new Error("This residual authority was already consumed by a fill or cancellation.");
+    }
+    if (persisted.request_transaction_hash) {
+      const disposition = await recoveryTransactionState(
+        persisted.request_transaction_hash,
+        persisted.request_submitted_at_ms ?? order.updated_at_ms,
+      );
+      if (disposition !== "retry") {
+        return {
+          nullifier: prepared.nullifier,
+          transaction_hash: persisted.request_transaction_hash,
+          already_requested: false,
+        };
+      }
+      persisted.request_transaction_hash = undefined;
+      persisted.request_submitted_at_ms = undefined;
+      await saveState();
+    }
+    const rail = selectedDepositFundingRail(manifest);
+    const provider = await selectInjectedStarknetProvider();
+    const { submitResidualRecovery: submit } = await import("./integrations/starknetPrivacyFunding");
+    const result = await submit({
+      provider: provider as never,
+      sponsorAddress: connectedProviderAddress(provider) ?? undefined,
+      seedHex: seed,
+      chainId: requiredNonZeroFelt(manifest.chain_id, "chain_id"),
+      rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
+      provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
+      provingOhttpPolicy: rail.provingOhttpPolicy,
+      paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
+      paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
+      privacyProofSignerClassHash: requiredNonZeroFelt(
+        rail.privacyProofSignerClassHash,
+        "privacy_proof_signer_class_hash",
+      ),
+      minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
+      proofProgramCall: {
+        contractAddress: prepared.proof_program_call.contract_address,
+        entrypoint: prepared.proof_program_call.entrypoint,
+        calldata: prepared.proof_program_call.calldata,
+      },
+      settlementCall: {
+        contractAddress: prepared.settlement_call.contract_address,
+        entrypoint: prepared.settlement_call.entrypoint,
+        calldata: prepared.settlement_call.calldata,
+      },
+    });
+    persisted.request_transaction_hash = result.transactionHash;
+    persisted.request_submitted_at_ms = Date.now();
+    order.updated_at_ms = persisted.request_submitted_at_ms;
+    await saveState();
+    await pushRecoverySnapshot(true).catch(() => false);
+    return {
+      nullifier: prepared.nullifier,
+      transaction_hash: result.transactionHash,
+      already_requested: false,
+    };
+  }
+
+  /** finalizes a mature residual exit; any caller may submit this ordinary transaction. */
+  async function finalizeResidualRecovery(orderId: string): Promise<ResidualRecoveryFinalization> {
+    const { deployment: manifest } = unlocked();
+    const order = orderById(orderId);
+    const prepared = order?.residual_recovery;
+    if (!order || !prepared) throw new Error("Prepare and request this residual recovery first.");
+    const current = await nullifierState(prepared.nullifier);
+    const pending = await pendingResidualExit(prepared.nullifier);
+    assertPendingResidualMatches(prepared, pending);
+    prepared.matures_at = pending.matures_at;
+    if (current === NULLIFIER_EXITED) {
+      await saveState();
+      return {
+        nullifier: prepared.nullifier,
+        transaction_hash: prepared.finalization_transaction_hash ?? null,
+        already_final: true,
+        matures_at: pending.matures_at,
+      };
+    }
+    if (current !== NULLIFIER_EXIT_PENDING) {
+      throw new Error("The residual recovery is not pending or it lost a race to settlement.");
+    }
+    if (Math.floor(Date.now() / 1000) < pending.matures_at) {
+      throw new Error(`The residual recovery matures at Unix time ${pending.matures_at}.`);
+    }
+    if (prepared.finalization_transaction_hash) {
+      const disposition = await recoveryTransactionState(
+        prepared.finalization_transaction_hash,
+        prepared.finalization_submitted_at_ms ?? order.updated_at_ms,
+      );
+      if (disposition !== "retry") {
+        return {
+          nullifier: prepared.nullifier,
+          transaction_hash: prepared.finalization_transaction_hash,
+          already_final: disposition === "confirmed",
+          matures_at: pending.matures_at,
+        };
+      }
+      prepared.finalization_transaction_hash = undefined;
+      prepared.finalization_submitted_at_ms = undefined;
+      await saveState();
+    }
+    const provider = await selectInjectedStarknetProvider();
+    const result = await executeStarknetWalletCall(provider, {
+      contractAddress: manifest.contracts.exchange,
+      entrypoint: "finalize_residual_recovery",
+      calldata: [prepared.nullifier],
+    });
+    prepared.finalization_transaction_hash = transactionHash(result) ?? undefined;
+    prepared.finalization_submitted_at_ms = Date.now();
+    order.updated_at_ms = prepared.finalization_submitted_at_ms;
+    await saveState();
+    await pushRecoverySnapshot(true).catch(() => false);
+    return {
+      nullifier: prepared.nullifier,
+      transaction_hash: prepared.finalization_transaction_hash ?? null,
+      already_final: false,
+      matures_at: pending.matures_at,
+    };
+  }
+
+  /** claims the user-owned legs staged by a finalized residual recovery. */
+  async function claimResidualRecovery(orderId: string): Promise<ResidualRecoveryClaim> {
+    const { seedHex: seed, deployment: manifest } = unlocked();
+    const order = orderById(orderId);
+    const prepared = order?.residual_recovery;
+    if (!order || !prepared) throw new Error("This order has no prepared residual recovery.");
+    if ((await nullifierState(prepared.nullifier)) !== NULLIFIER_EXITED) {
+      throw new Error("Finalize the residual recovery before claiming its assets.");
+    }
+    const pending = await pendingResidualExit(prepared.nullifier);
+    assertPendingResidualMatches(prepared, pending);
+    const rail = selectedDepositFundingRail(manifest);
+    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
+    const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
+    const chainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
+    const outputAsset = order.side === "Sell" ? order.quote_asset : order.base_asset;
+    const { submitPrivacyOpenNoteWithdrawal } = await import("./integrations/starknetPrivacyFunding");
+
+    const claim = async (
+      asset: string,
+      assetId: string,
+      amount: string,
+      exitCommitment: string | null,
+    ) => {
+      if (BigInt(amount) === 0n) return null;
+      if (!exitCommitment) throw new Error("A nonzero residual leg is missing its exit authority.");
+      const tokenAddress = fundingRailTokenAddress(manifest, asset);
+      const result = await submitPrivacyOpenNoteWithdrawal({
+        seedHex: seed,
+        chainId,
+        rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
+        privacyPoolAddress,
+        bridgeAddress,
+        tokenAddress,
+        discoveryUrl: serviceUrl(rail.discoveryUrl, "/starknet-privacy-discovery"),
+        provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
+        provingOhttpPolicy: rail.provingOhttpPolicy,
+        paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
+        paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
+        privacyProofSignerClassHash: rail.privacyProofSignerClassHash,
+        minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
+        sdkRegistry: await loadPrivacyRegistry(),
+        exitCommitment,
+        signExitClaim: (openNoteId) =>
+          call(core.zylith_wallet_sign_strk20_exit_claim, {
+            seed_hex: seed,
+            chain_id: chainId,
+            bridge_address: bridgeAddress,
+            privacy_pool_address: privacyPoolAddress,
+            exchange_address: chainContext(),
+            asset_id: assetId,
+            token_address: tokenAddress,
+            amount,
+            exit_commitment: exitCommitment,
+            open_note_id: openNoteId,
+          }),
+      });
+      await savePrivacyRegistry(result.sdkRegistry);
+      return result.transactionHash;
+    };
+
+    if (prepared.input_claim_transaction_hash) {
+      const disposition = await recoveryTransactionState(
+        prepared.input_claim_transaction_hash,
+        prepared.input_claim_submitted_at_ms ?? order.updated_at_ms,
+      );
+      if (disposition === "retry") {
+        prepared.input_claim_transaction_hash = undefined;
+        prepared.input_claim_submitted_at_ms = undefined;
+      }
+    }
+    if (!prepared.input_claim_transaction_hash) {
+      prepared.input_claim_transaction_hash =
+        (await claim(order.funding_asset, prepared.input_asset_id, prepared.input_amount, prepared.input_exit_commitment))
+        ?? undefined;
+      prepared.input_claim_submitted_at_ms = prepared.input_claim_transaction_hash ? Date.now() : undefined;
+      order.updated_at_ms = prepared.input_claim_submitted_at_ms ?? Date.now();
+      await saveState();
+    }
+    if (prepared.output_claim_transaction_hash) {
+      const disposition = await recoveryTransactionState(
+        prepared.output_claim_transaction_hash,
+        prepared.output_claim_submitted_at_ms ?? order.updated_at_ms,
+      );
+      if (disposition === "retry") {
+        prepared.output_claim_transaction_hash = undefined;
+        prepared.output_claim_submitted_at_ms = undefined;
+      }
+    }
+    if (!prepared.output_claim_transaction_hash) {
+      prepared.output_claim_transaction_hash =
+        (await claim(outputAsset, prepared.output_asset_id, prepared.output_amount, prepared.output_exit_commitment))
+        ?? undefined;
+      prepared.output_claim_submitted_at_ms = prepared.output_claim_transaction_hash ? Date.now() : undefined;
+      order.updated_at_ms = prepared.output_claim_submitted_at_ms ?? Date.now();
+      await saveState();
+    }
+    order.updated_at_ms = Date.now();
+    await pushRecoverySnapshot(true).catch(() => false);
+    return {
+      input_transaction_hash: prepared.input_claim_transaction_hash ?? null,
+      output_transaction_hash: prepared.output_claim_transaction_hash ?? null,
+    };
+  }
+
+  /** establishes the permissionless on-chain cutoff for an expired external reservation. */
+  async function freezeResidualRecoveryCapacity(orderId: string) {
+    const { deployment: manifest } = unlocked();
+    const order = orderById(orderId);
+    const residual = order?.residual ? requireStoredResidual(order.residual) : undefined;
+    if (!order || !residual || BigInt(residual.note.reserved) === 0n) {
+      throw new Error("This order has no external capacity to freeze.");
+    }
+    const capacity = await readRecoveryCapacity(residual.note);
+    if (capacity.status === CAPACITY_FILLED || capacity.status === CAPACITY_FROZEN) {
+      return { transaction_hash: null, already_final: true };
+    }
+    if (capacity.status !== CAPACITY_OPEN) throw new Error("The external capacity is no longer open.");
+    const expiresAt = capacity.opened_at + BigInt(manifest.runtime.external_window_seconds);
+    if (BigInt(Math.floor(Date.now() / 1000)) < expiresAt) {
+      throw new Error("The external capacity has not expired yet.");
+    }
+    const pendingFreeze = order.residual_capacity_freeze?.residual_seq === residual.seq
+      ? order.residual_capacity_freeze
+      : undefined;
+    if (pendingFreeze) {
+      const disposition = await recoveryTransactionState(
+        pendingFreeze.transaction_hash,
+        pendingFreeze.submitted_at_ms,
+      );
+      if (disposition !== "retry") {
+        return {
+          transaction_hash: pendingFreeze.transaction_hash,
+          already_final: false,
+        };
+      }
+      order.residual_capacity_freeze = undefined;
+      await saveState();
+    }
+    const provider = await selectInjectedStarknetProvider();
+    const result = await executeStarknetWalletCall(provider, {
+      contractAddress: manifest.contracts.exchange,
+      entrypoint: "freeze_expired_capacity",
+      calldata: [
+        String(residual.note.reserved_seq),
+        residual.note.pair_id,
+        residual.note.sell ? "0x1" : "0x0",
+        String(capacity.generation),
+      ],
+    });
+    const hash = transactionHash(result);
+    if (!hash) throw new Error("The wallet did not return a capacity-freeze transaction hash.");
+    order.residual_capacity_freeze = {
+      residual_seq: residual.seq,
+      transaction_hash: hash,
+      submitted_at_ms: Date.now(),
+    };
+    order.updated_at_ms = order.residual_capacity_freeze.submitted_at_ms;
+    await saveState();
+    await pushRecoverySnapshot(true).catch(() => false);
+    return {
+      transaction_hash: hash,
+      already_final: false,
+    };
+  }
+
   /** recovers every open order's outputs from the transitions settled since the last scan. */
   async function scanTransitions() {
     // only orders that can still have unrecovered outputs are scanned, from the earliest seq
@@ -1025,16 +1758,25 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (status.latest_seq <= from) return false;
     const { latestSeq, transitions } = await exchange().transitionsAfter(from);
     let changed = false;
+    let batchRoots: Promise<string[]> | undefined;
+    const recoveryBatchRoots = () => {
+      batchRoots ??= exchange().allNoteBatchRoots();
+      return batchRoots;
+    };
     for (const order of scanning) {
       const relevant = transitions.filter((transition) => transition.seq > Math.max(order.scan_after_seq, state.scanned_seq) && transition.seq <= (order.closed_seq ?? Infinity));
       if (relevant.length === 0) continue;
-      changed = recoverOutputs(order, relevant) || changed;
+      changed = (await recoverOutputs(order, relevant, recoveryBatchRoots)) || changed;
     }
     state.scanned_seq = Math.max(state.scanned_seq, latestSeq);
     return changed || transitions.length > 0;
   }
 
-  function recoverOutputs(order: StoredOrder, transitions: TransitionOutputs[]) {
+  async function recoverOutputs(
+    order: StoredOrder,
+    transitions: TransitionOutputs[],
+    recoveryBatchRoots: () => Promise<string[]>,
+  ) {
     const recovered = call<Array<{ seq: number; kind: number; index: number; note: NoteFields }>>(core.zylith_wallet_recover_order_outputs, {
       terms: order.terms,
       base_asset: order.base_asset,
@@ -1046,6 +1788,50 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const proceeds = output.kind === OUTPUT_KIND_PROCEEDS;
       const asset = proceeds === (order.side === "Sell") ? order.quote_asset : order.base_asset;
       changed = addNote(output.note, asset, "output", { output: { order_id: order.order_id, seq: output.seq, kind: output.kind } }) || changed;
+    }
+    const recoveredResiduals = call<unknown>(core.zylith_wallet_recover_order_residuals, {
+      chain_context: chainContext(),
+      terms: order.terms,
+      base_asset: order.base_asset,
+      quote_asset: order.quote_asset,
+      transitions: transitions.map((transition) => ({ seq: transition.seq, outputs: transition.outputs as OutputRecord[] })),
+    });
+    if (!Array.isArray(recoveredResiduals)) throw new Error("The wallet returned malformed residual authorities.");
+    const residuals = recoveredResiduals.map(requireStoredResidual);
+    const latestResidual = residuals.at(-1);
+    if (latestResidual && (!order.residual || latestResidual.seq > order.residual.seq)) {
+      const transition = transitions.find((entry) => entry.seq === latestResidual.seq);
+      if (!transition) throw new Error("The public chain index omitted the residual transition.");
+      const batchRoots = await recoveryBatchRoots();
+      if (transition.note_batch_index >= batchRoots.length) {
+        throw new Error("The public chain index omitted the residual note batch.");
+      }
+      const membership = call<{ note_root: string; membership: unknown }>(
+        core.zylith_wallet_build_note_membership,
+        {
+          batch_roots: batchRoots,
+          batch_index: transition.note_batch_index,
+          batch_leaves: transition.outputs.map((record) => record.leaf),
+          leaf_index: latestResidual.index,
+        },
+      );
+      order.residual = {
+        ...latestResidual,
+        note_root: membership.note_root,
+        membership: membership.membership,
+      };
+      if (order.residual_recovery?.residual_seq !== latestResidual.seq) {
+        order.residual_recovery = undefined;
+      }
+      if (order.residual_capacity_freeze?.residual_seq !== latestResidual.seq) {
+        order.residual_capacity_freeze = undefined;
+      }
+      order.updated_at_ms = Date.now();
+      changed = true;
+    }
+    if (order.closed_seq !== undefined && order.residual) {
+      order.residual = undefined;
+      changed = true;
     }
     if (recovered.length > 0) spendFunding(order);
     return changed;
@@ -1149,7 +1935,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       tokenAddress,
       discoveryUrl: serviceUrl(rail.discoveryUrl, "/starknet-privacy-discovery"),
       provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
-      provingOhttpEnabled: rail.provingOhttpEnabled,
+      provingOhttpPolicy: rail.provingOhttpPolicy,
       paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
       paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
       privacyProofSignerClassHash: rail.privacyProofSignerClassHash,
@@ -1228,11 +2014,19 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     getBalances,
     getPendingDeposits,
     getWithdrawableNotes,
-    getOrders: () => state.orders.map((order) => ({ ...order })),
+    getOrders: () => state.orders.map((order) => ({
+      ...order,
+      residual_recovery_available: Boolean(order.residual),
+    })),
     withdrawalAvailable,
     submitDepositViaWallet,
     submitOrder,
     cancelOrder,
+    prepareResidualRecovery,
+    submitResidualRecovery,
+    freezeResidualRecoveryCapacity,
+    finalizeResidualRecovery,
+    claimResidualRecovery,
     withdraw,
     refresh,
   };
@@ -1253,10 +2047,16 @@ export function mergeState(local: WalletState, remote: WalletState) {
     }
   }
   for (const order of remote.orders ?? []) {
-    const index = local.orders.findIndex((candidate) => candidate.order_id === order.order_id);
+    const orderId = normalizeFeltForComparison(order.order_id);
+    const index = local.orders.findIndex(
+      (candidate) => normalizeFeltForComparison(candidate.order_id) === orderId,
+    );
     if (index === -1) local.orders.push(order);
-    else if (order.updated_at_ms > local.orders[index].updated_at_ms) local.orders[index] = order;
-    else continue;
+    else {
+      const merged = mergeOrderState(local.orders[index], order);
+      if (merged === local.orders[index]) continue;
+      local.orders[index] = merged;
+    }
     changed = true;
   }
   // rescanning is idempotent, so the earlier cursor wins.
@@ -1266,6 +2066,123 @@ export function mergeState(local: WalletState, remote: WalletState) {
   }
   local.orders.sort((left, right) => right.submitted_at_ms - left.submitted_at_ms);
   return changed;
+}
+
+function mergeOrderState(local: StoredOrder, remote: StoredOrder): StoredOrder {
+  const progress = (order: StoredOrder) => Math.max(
+    order.scan_after_seq,
+    order.closed_seq ?? 0,
+    order.residual?.seq ?? 0,
+    ...order.seen_seqs,
+  );
+  const stateRank: Record<StoredOrder["state"], number> = {
+    submitting: 0,
+    pending: 1,
+    live: 2,
+    cancelling: 3,
+    failed: 4,
+    cancelled: 4,
+    expired: 4,
+    filled: 4,
+  };
+  const localProgress = progress(local);
+  const remoteProgress = progress(remote);
+  const remoteIsAhead = remoteProgress > localProgress
+    || (remoteProgress === localProgress && stateRank[remote.state] > stateRank[local.state])
+    || (remoteProgress === localProgress
+      && stateRank[remote.state] === stateRank[local.state]
+      && remote.updated_at_ms > local.updated_at_ms);
+  const primary = remoteIsAhead ? remote : local;
+  const secondary = remoteIsAhead ? local : remote;
+  const seenSeqs = [...new Set([...local.seen_seqs, ...remote.seen_seqs])].sort((left, right) => left - right);
+  const decimalMax = (left: string, right: string) => (BigInt(left) >= BigInt(right) ? left : right);
+  const decimalMin = (left: string, right: string) => (BigInt(left) <= BigInt(right) ? left : right);
+  const residual = !primary.closed_seq
+    ? [local.residual, remote.residual]
+      .filter((value): value is StoredResidual => Boolean(value))
+      .sort((left, right) => right.seq - left.seq)[0]
+    : undefined;
+  const residualRecovery = mergeResidualRecovery(
+    local.residual_recovery,
+    remote.residual_recovery,
+    residual?.seq,
+  );
+  const residualCapacityFreeze = mergeResidualCapacityFreeze(
+    local.residual_capacity_freeze,
+    remote.residual_capacity_freeze,
+    residual?.seq,
+  );
+  const merged: StoredOrder = {
+    ...primary,
+    seen_seqs: seenSeqs,
+    scan_after_seq: Math.min(local.scan_after_seq, remote.scan_after_seq),
+    filled_base: decimalMax(local.filled_base, remote.filled_base),
+    filled_quote: decimalMax(local.filled_quote, remote.filled_quote),
+    fees: decimalMax(local.fees, remote.fees),
+    locked_input: decimalMin(local.locked_input, remote.locked_input),
+    cancel_requested: local.cancel_requested || remote.cancel_requested || undefined,
+    closed_seq: Math.max(local.closed_seq ?? 0, remote.closed_seq ?? 0) || undefined,
+    residual,
+    residual_capacity_freeze: residualCapacityFreeze,
+    residual_recovery: residualRecovery,
+    updated_at_ms: Math.max(local.updated_at_ms, remote.updated_at_ms),
+  };
+  if (merged.closed_seq !== undefined) {
+    merged.residual = undefined;
+    merged.residual_capacity_freeze = undefined;
+    merged.residual_recovery = undefined;
+    merged.locked_input = "0";
+  } else if (!remoteIsAhead && secondary.last_error && !merged.last_error) {
+    merged.last_error = secondary.last_error;
+  }
+  const unchanged = JSON.stringify(merged) === JSON.stringify(local);
+  return unchanged ? local : merged;
+}
+
+function mergeResidualCapacityFreeze(
+  local: StoredOrder["residual_capacity_freeze"],
+  remote: StoredOrder["residual_capacity_freeze"],
+  residualSeq: number | undefined,
+) {
+  if (residualSeq === undefined) return undefined;
+  const candidates = [local, remote].filter(
+    (value): value is NonNullable<StoredOrder["residual_capacity_freeze"]> =>
+      value?.residual_seq === residualSeq,
+  );
+  return candidates.sort((left, right) => right.submitted_at_ms - left.submitted_at_ms)[0];
+}
+
+function mergeResidualRecovery(
+  local: StoredOrder["residual_recovery"],
+  remote: StoredOrder["residual_recovery"],
+  residualSeq: number | undefined,
+) {
+  const eligible = [local, remote].filter(
+    (value): value is NonNullable<StoredOrder["residual_recovery"]> =>
+      Boolean(value && value.residual_seq === residualSeq),
+  );
+  if (eligible.length < 2) return eligible[0];
+  const [left, right] = eligible;
+  if (
+    normalizeFeltForComparison(left.nullifier) !== normalizeFeltForComparison(right.nullifier)
+    || left.input_exit_commitment !== right.input_exit_commitment
+    || left.output_exit_commitment !== right.output_exit_commitment
+  ) {
+    const evidence = (value: NonNullable<StoredOrder["residual_recovery"]>) => [
+      value.request_transaction_hash,
+      value.finalization_transaction_hash,
+      value.input_claim_transaction_hash,
+      value.output_claim_transaction_hash,
+    ].filter(Boolean).length + (value.matures_at === undefined ? 0 : 1);
+    return evidence(right) > evidence(left) ? right : left;
+  }
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    if (value !== undefined && merged[key as keyof typeof merged] === undefined) {
+      Object.assign(merged, { [key]: value });
+    }
+  }
+  return merged;
 }
 
 function emptyState(): WalletState {
@@ -1309,4 +2226,14 @@ function randomFeltHex() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   bytes[0] &= 0x07;
   return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function transactionHash(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ["transaction_hash", "transactionHash", "hash"]) {
+    if (typeof record[key] === "string" && record[key].trim()) return record[key];
+  }
+  return null;
 }

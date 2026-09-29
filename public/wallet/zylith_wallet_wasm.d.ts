@@ -7,7 +7,14 @@ export function zylith_wallet_build_cancel_request(input_json: string): string;
 
 export function zylith_wallet_build_deposit_submission_plan(input_json: string): string;
 
+/**
+ * rebuilds one membership from the public, globally ordered note-batch history.
+ */
+export function zylith_wallet_build_note_membership(input_json: string): string;
+
 export function zylith_wallet_build_order_request(input_json: string): string;
+
+export function zylith_wallet_build_residual_recovery(input_json: string): string;
 
 /**
  * the sealed lookups for every order and withdrawal the wallet follows, chunked within the
@@ -25,13 +32,25 @@ export function zylith_wallet_derive_public_config(seed_hex: string): string;
 
 export function zylith_wallet_generate_seed_hex(): string;
 
+/**
+ * the canonical protocol ids for a manifest market.
+ */
+export function zylith_wallet_market_ids(input_json: string): string;
+
 export function zylith_wallet_note_summary(note_json: string): string;
+
+export function zylith_wallet_quote_residual_recovery(input_json: string): string;
 
 /**
  * the order's outputs in the chain's transition records: the operator's report is never
  * trusted for a note, only for where to look.
  */
 export function zylith_wallet_recover_order_outputs(input_json: string): string;
+
+/**
+ * the order's residual generations recoverable from public transition records.
+ */
+export function zylith_wallet_recover_order_residuals(input_json: string): string;
 
 export function zylith_wallet_recovery_auth_tag(seed_hex: string): string;
 
@@ -51,15 +70,20 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly zylith_wallet_build_cancel_request: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_deposit_submission_plan: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_build_note_membership: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_order_request: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_build_residual_recovery: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_status_requests: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_build_withdraw_request: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_create_recovery_snapshot: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_decrypt_recovery_artifact: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly zylith_wallet_derive_public_config: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_generate_seed_hex: () => [number, number];
+    readonly zylith_wallet_market_ids: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_note_summary: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_quote_residual_recovery: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_recover_order_outputs: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_recover_order_residuals: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_recovery_auth_tag: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_registry_fingerprint: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_sign_strk20_exit_claim: (a: number, b: number) => [number, number, number, number];

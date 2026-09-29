@@ -26,11 +26,40 @@ const CHAIN_ID_ALIASES: Record<string, string> = {
   SN_MAIN: "0x534e5f4d41494e",
 };
 
-type StarknetWalletCall = {
+export type StarknetWalletCall = {
   contractAddress: string;
   entrypoint: string;
   calldata: string[];
 };
+
+/** submits one ordinary call through the connected wallet. */
+export async function executeStarknetWalletCall(
+  provider: StarknetInjectedProvider,
+  call: StarknetWalletCall
+) {
+  if (typeof provider.account?.execute === "function") {
+    return withStarknetWalletRequestTimeout(
+      provider.account.execute([call]),
+      WALLET_SIGNATURE_REQUEST_TIMEOUT_MS
+    );
+  }
+  if (typeof provider.request !== "function") {
+    throw new Error("Selected Starknet wallet cannot submit this transaction");
+  }
+  return withStarknetWalletRequestTimeout(
+    provider.request.call(provider, {
+      type: "wallet_addInvokeTransaction",
+      params: {
+        calls: [{
+          contract_address: call.contractAddress,
+          entry_point: call.entrypoint,
+          calldata: call.calldata,
+        }],
+      },
+    }),
+    WALLET_SIGNATURE_REQUEST_TIMEOUT_MS
+  );
+}
 
 type WalletRequestInvokeCall = {
   contract_address: string;

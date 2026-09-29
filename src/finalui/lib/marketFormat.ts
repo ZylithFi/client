@@ -1,5 +1,3 @@
-const usdQuoteAssets = new Set(["USDC", "USD"]);
-
 export function marketPricePrecision(value: number) {
   if (!Number.isFinite(value) || value <= 0) return 8;
   if (value >= 1_000) return 2;
@@ -18,13 +16,9 @@ export function formatQuotedPrice(
     minimumFractionDigits: numeric >= 1_000 ? 2 : 0,
     maximumFractionDigits: marketPricePrecision(numeric),
   });
-  return usdQuoteAssets.has(quoteAsset)
-    ? `$${formatted}`
-    : `${formatted} ${quoteAsset}`;
+  return `${formatted} ${quoteAsset}`;
 }
 
-export function defaultTradeAmount(asset: string) {
-  if (asset === "USDC" || asset === "USD") return "5000";
-  if (asset === "ETH") return "2";
-  return "10000";
+export function defaultTradeAmount(_asset: string) {
+  return "1";
 }

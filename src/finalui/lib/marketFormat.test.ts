@@ -7,7 +7,7 @@ import {
 
 describe("market formatting", () => {
   it("uses the quote asset instead of labeling every market as dollars", () => {
-    expect(formatQuotedPrice(0.04423549, "USDC")).toBe("$0.04423549");
+    expect(formatQuotedPrice(0.04423549, "USDC")).toBe("0.04423549 USDC");
     expect(formatQuotedPrice(31.1948597941, "ETH")).toBe("31.1949 ETH");
     expect(formatQuotedPrice(0.0000152224681812, "ETH")).toBe("0.000015222 ETH");
   });
@@ -19,8 +19,8 @@ describe("market formatting", () => {
   });
 
   it("chooses indicative amounts in the asset being paid", () => {
-    expect(defaultTradeAmount("USDC")).toBe("5000");
-    expect(defaultTradeAmount("ETH")).toBe("2");
-    expect(defaultTradeAmount("STRK")).toBe("10000");
+    expect(defaultTradeAmount("USDC")).toBe("1");
+    expect(defaultTradeAmount("ETH")).toBe("1");
+    expect(defaultTradeAmount("STRK")).toBe("1");
   });
 });

@@ -12,12 +12,16 @@ function submittedAt(value: number) {
 export function OrdersPage({
   orders,
   walletReady,
+  error,
   onCancel,
+  onRecover,
   onConnectWallet,
 }: {
   orders: OrderRow[];
   walletReady: boolean;
+  error?: string | null;
   onCancel: (order: OrderRow) => void;
+  onRecover: (order: OrderRow) => void;
   onConnectWallet: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<Tab>("Open");
@@ -59,6 +63,7 @@ export function OrdersPage({
       </section>
 
       <section className="orders-workspace" aria-label="Order activity">
+        {error && <div className="slide-inline-notice" role="alert">{error}</div>}
         <div className="orders-page-toolbar">
           <div className="page-tabs" role="tablist" aria-label="Order lifecycle">
             {tabs.map((tab) => {
@@ -73,7 +78,7 @@ export function OrdersPage({
 
         <div className="table-scroll orders-page-table-wrap">
           {activeTab === "Open" && (
-            <table className="orders-page-table"><thead><tr><th>Status</th><th>Side</th><th>Pair</th><th>Funding</th><th>Size</th><th>Filled</th><th>Limit</th><th>Submitted</th><th/></tr></thead><tbody>{visible.length > 0 ? visible.map((row) => <tr key={row.id}><td><span className={`status-chip ${orderStatusTone(row.state)}`}><i/>{orderStatusLabel(row)}</span></td><td><span className={row.side === "Buy" ? "positive" : "negative"}>{row.side}</span></td><td><strong>{row.pair}</strong></td><td>{row.funding}</td><td>{row.amount}</td><td>{row.filled}</td><td>{row.limitPrice}</td><td className="muted">{submittedAt(row.submittedAt)}</td><td>{row.state !== "cancelling" && row.state !== "submitting" && <button className="cancel-row" type="button" onClick={() => onCancel(row)}>Cancel</button>}</td></tr>) : <tr><td colSpan={9}><div className="table-empty">{walletReady ? openOrders.length === 0 ? "No open orders." : "No open orders match this filter." : "Connect wallet to view your orders."}</div></td></tr>}</tbody></table>
+            <table className="orders-page-table"><thead><tr><th>Status</th><th>Side</th><th>Pair</th><th>Funding</th><th>Size</th><th>Filled</th><th>Limit</th><th>Submitted</th><th/></tr></thead><tbody>{visible.length > 0 ? visible.map((row) => <tr key={row.id}><td><span className={`status-chip ${orderStatusTone(row.state)}`}><i/>{orderStatusLabel(row)}</span></td><td><span className={row.side === "Buy" ? "positive" : "negative"}>{row.side}</span></td><td><strong>{row.pair}</strong></td><td>{row.funding}</td><td>{row.amount}</td><td>{row.filled}</td><td>{row.limitPrice}</td><td className="muted">{submittedAt(row.submittedAt)}</td><td><div className="row-actions">{row.recoveryAvailable && <button type="button" onClick={() => onRecover(row)}>Recover funds</button>}{row.state !== "cancelling" && row.state !== "submitting" && <button className="cancel-row" type="button" onClick={() => onCancel(row)}>Cancel</button>}</div></td></tr>) : <tr><td colSpan={9}><div className="table-empty">{walletReady ? openOrders.length === 0 ? "No open orders." : "No open orders match this filter." : "Connect wallet to view your orders."}</div></td></tr>}</tbody></table>
           )}
 
           {activeTab === "Fills" && (

@@ -11,6 +11,7 @@ const pair: PairConfig = {
   price_base_scale: "1000000000000000000",
   taker_fee_bps: 4,
   external_match_enabled: true,
+  external_settlement_support_quote: "1",
   enabled: true,
 };
 
@@ -30,12 +31,13 @@ const order: WalletOrder = {
   fees: "80",
   submitted_at_ms: 1,
   updated_at_ms: 1,
+  residual_recovery_available: true,
 };
 
 describe("order rows", () => {
   it("shows sizes, prices and fees in human units", () => {
     const [row] = orderRows([order], [pair]);
-    expect(row).toMatchObject({ amount: "10", filled: "4", limitPrice: "0.05", averagePrice: "0.05", fees: "0.00008 USDC", funding: "10 STRK" });
+    expect(row).toMatchObject({ amount: "10", filled: "4", limitPrice: "0.05", averagePrice: "0.05", fees: "0.00008 USDC", funding: "10 STRK", recoveryAvailable: true });
     expect(orderStatusLabel(row)).toBe("Partially filled");
     expect(isOpenOrder(row)).toBe(true);
     expect(isOpenOrder({ state: "expired" })).toBe(false);

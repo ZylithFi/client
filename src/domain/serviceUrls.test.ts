@@ -104,8 +104,8 @@ describe("serviceUrls", () => {
     expect(
       defaultServiceUrlForHost("app.zylith.fi", "/starknet-privacy-prover"),
     ).toBe("https://api.zylith.fi/starknet-privacy-prover");
-    expect(defaultServiceUrlForHost("preview.zylith.fi", "/prover/")).toBe(
-      "https://api.zylith.fi/prover",
+    expect(defaultServiceUrlForHost("preview.zylith.fi", "/operator/")).toBe(
+      "https://api.zylith.fi/operator",
     );
     expect(defaultServiceUrlForHost("example.com", "indexer")).toBe("");
   });
@@ -125,11 +125,8 @@ describe("serviceUrls", () => {
     expect(localServiceUrl(3300, "indexer")).toBe(
       "https://api.zylith.fi/indexer",
     );
-    expect(localServiceUrl(3200, "prover")).toBe(
-      "https://api.zylith.fi/prover",
-    );
-    expect(localServiceUrl(3400, "relay")).toBe(
-      "https://api.zylith.fi/relay",
+    expect(localServiceUrl(3200, "operator")).toBe(
+      "https://api.zylith.fi/operator",
     );
   });
 

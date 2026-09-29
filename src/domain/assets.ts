@@ -1,12 +1,6 @@
 import type { DeploymentConfig } from "./deployment";
 
-export const DEFAULT_ASSET_DECIMALS: Record<string, number> = {
-  STRK: 18,
-  ETH: 18,
-  USDC: 6,
-};
-
-let configuredAssetDecimals: Record<string, number> = { ...DEFAULT_ASSET_DECIMALS };
+let configuredAssetDecimals: Record<string, number> | null = null;
 
 export type PricePair = {
   base_asset_id: string;
@@ -15,17 +9,22 @@ export type PricePair = {
 };
 
 export function configureAssetDecimals(deployment: DeploymentConfig | null): void {
-  configuredAssetDecimals = { ...DEFAULT_ASSET_DECIMALS };
-  const assets = deployment?.product.assets ?? {};
-  for (const [assetId, metadata] of Object.entries(assets)) {
+  configuredAssetDecimals = deployment ? {} : null;
+  const assets = deployment?.market_registry.assets ?? [];
+  for (const metadata of assets) {
+    const assetId = metadata.asset_id;
     if (typeof metadata.decimals === "number" && Number.isInteger(metadata.decimals) && metadata.decimals >= 0) {
-      configuredAssetDecimals[assetId] = metadata.decimals;
+      configuredAssetDecimals![assetId] = metadata.decimals;
     }
   }
 }
 
 export function assetDecimals(assetId: string): number {
-  return configuredAssetDecimals[assetId] ?? DEFAULT_ASSET_DECIMALS[assetId] ?? 18;
+  const decimals = configuredAssetDecimals?.[assetId];
+  if (decimals === undefined) {
+    throw new Error(`Asset ${assetId} is not defined by the loaded market registry`);
+  }
+  return decimals;
 }
 
 export function toAtomicStr(human: string, assetId: string): string {

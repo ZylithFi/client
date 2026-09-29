@@ -1,5 +1,4 @@
 export {
-  DEFAULT_ASSET_DECIMALS,
   DEFAULT_SDK_ERROR_RESPONSE_MAX_BYTES,
   DEFAULT_SDK_REQUEST_TIMEOUT_MS,
   DEFAULT_SDK_RESPONSE_MAX_BYTES,
@@ -51,6 +50,7 @@ export type {
   ExchangeStatus,
   ExecutionKeyRegistry,
   IndexerStatus,
+  NoteBatchRootList,
   OrderEvent,
   OrderReport,
   OrderStatus,
@@ -65,4 +65,14 @@ export type {
   WithdrawalStage,
   WithdrawalStatus,
 } from "./exchange.js";
-export type { OrderDraft, OrderSide, OrderState, TraderWalletRuntime, WalletOrder } from "./wallet.js";
+export type {
+  OrderDraft,
+  OrderSide,
+  OrderState,
+  ResidualRecoveryClaim,
+  ResidualRecoveryFinalization,
+  ResidualRecoveryPreparation,
+  ResidualRecoverySubmission,
+  TraderWalletRuntime,
+  WalletOrder,
+} from "./wallet.js";

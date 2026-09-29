@@ -129,8 +129,8 @@ export function TradePage({
           activeInterval={interval}
           onIntervalChange={setInterval}
           bboMidpoint={marketMidpoint}
-          baseAsset={pair?.base_asset_id ?? "STRK"}
-          quoteAsset={pair?.quote_asset_id ?? "USDC"}
+          baseAsset={pair?.base_asset_id ?? "-"}
+          quoteAsset={pair?.quote_asset_id ?? "-"}
           loading={candlesLoading}
         />
         <IntentPanel

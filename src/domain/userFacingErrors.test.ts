@@ -126,15 +126,15 @@ describe("userFacingErrorMessage", () => {
     ).toBe("Transaction relay is unavailable. Please retry later.");
   });
 
-  it("explains ETH deposit fee headroom before opening the wallet transfer", () => {
+  it("explains fee-token headroom before opening the wallet transfer", () => {
     const message = userFacingErrorMessage(
       new Error(
-        "Private deposit funding setup failed: ETH deposit amount leaves no room for the wallet transaction fee. Try a slightly smaller amount."
+        "Private deposit funding setup failed: Depositing the fee token would leave no room for the wallet transaction fee. Try a slightly smaller amount."
       )
     );
 
     expect(message).toBe(
-      "ETH deposit amount leaves no room for the wallet fee. Try a slightly smaller amount."
+      "This deposit would leave no fee-token balance for the wallet fee. Try a slightly smaller amount."
     );
   });
 

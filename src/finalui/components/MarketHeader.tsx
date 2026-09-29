@@ -15,17 +15,8 @@ function displayVolume(value: number | undefined) {
   }).format(value);
 }
 
-const preferredMarketOrder = new Map([
-  ["STRK/USDC", 0],
-  ["ETH/USDC", 1],
-]);
-
 function menuMarkets(pairs: PairConfig[]) {
-  return [...pairs].sort((left, right) => {
-    const leftRank = preferredMarketOrder.get(left.pair_id) ?? Number.MAX_SAFE_INTEGER;
-    const rightRank = preferredMarketOrder.get(right.pair_id) ?? Number.MAX_SAFE_INTEGER;
-    return leftRank - rightRank || left.pair_id.localeCompare(right.pair_id);
-  });
+  return pairs;
 }
 
 export function MarketHeader({
@@ -43,8 +34,8 @@ export function MarketHeader({
 }) {
   const [open, setOpen] = useState(false);
   const selectorRef = useRef<HTMLDivElement | null>(null);
-  const base = pair?.base_asset_id ?? "STRK";
-  const quote = pair?.quote_asset_id ?? "USDC";
+  const base = pair?.base_asset_id ?? "-";
+  const quote = pair?.quote_asset_id ?? "-";
   const markPrice = marketMidpoint || marketStats?.last;
   const markets = menuMarkets(pairs);
 

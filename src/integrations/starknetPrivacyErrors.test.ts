@@ -30,7 +30,7 @@ describe("starknet privacy error summaries", () => {
     expect(summarizeFundingError("u256_sub overflow")).toBe(
       "Connected wallet does not have enough token balance for this deposit."
     );
-    expect(summarizeFundingError("ETH deposit amount leaves no room for the wallet transaction fee.")).toContain(
+    expect(summarizeFundingError("Depositing the fee token would leave no room for the wallet transaction fee. Try a slightly smaller amount.")).toContain(
       "slightly smaller amount"
     );
   });

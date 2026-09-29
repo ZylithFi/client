@@ -33,6 +33,8 @@ export type ExchangeStatus = {
   epoch_ms: number;
   in_flight: number;
   pairs: string[];
+  registry_version: number;
+  registry_hash: string;
 };
 
 export type ReferencePrice = {
@@ -56,7 +58,7 @@ export type OrderReport = {
   refund: string;
   /** base reserved for the external leg this transition opened. */
   reserved: string;
-  removal: "Completed" | "Cancelled" | "Expired" | null;
+  removal: "Completed" | "Cancelled" | "Expired" | "Recovered" | null;
 };
 
 export type OrderEvent = {
@@ -95,7 +97,13 @@ export type WithdrawalStatus = {
 /** the answer to a sealed status request: one entry per queried order and nullifier. */
 export type StatusAnswer = { orders: OrderStatus[]; withdrawals: WithdrawalStatus[] };
 
-export type OutputRecord = { leaf: string; enc: string };
+export type OutputRecord = {
+  leaf: string;
+  enc: string;
+  enc_remaining: string;
+  enc_reserved: string;
+  enc_reserved_offset: string;
+};
 
 export type TransitionOutputs = {
   seq: number;
@@ -104,7 +112,15 @@ export type TransitionOutputs = {
   new_book_root: string;
   note_root: string;
   output_root: string;
+  note_batch_index: number;
   outputs: OutputRecord[];
+};
+
+export type NoteBatchRootList = {
+  start: number;
+  end: number;
+  total: number;
+  roots: string[];
 };
 
 export type TransitionOutputsList = {
@@ -169,12 +185,19 @@ export class ZylithExchangeClient {
     return this.get<ExchangeStatus>(this.operatorUrl, "/api/public/exchange", options);
   }
 
-  /** the pair's current attested midpoint, the price an order crosses at. */
+  /** one complete attested price view, independent of the market the user is viewing. */
+  async referencePrices(options?: RequestOptions) {
+    const response = await this.get<{ prices: ReferencePrice[] }>(this.operatorUrl, "/api/public/reference-prices", options);
+    if (!Array.isArray(response.prices) || new Set(response.prices.map((price) => price.pair)).size !== response.prices.length) {
+      throw new Error("Operator returned an invalid reference-price batch");
+    }
+    return response.prices;
+  }
+
+  /** the pair's current attested midpoint, read from the complete price view. */
   async referencePrice(pair: string, options?: RequestOptions) {
-    const [base, quote] = pair.split("/");
-    if (!base || !quote) throw new Error(`Invalid pair ${pair}`);
-    const price = await this.get<ReferencePrice>(this.operatorUrl, `/api/public/reference-prices/${encodeURIComponent(base)}/${encodeURIComponent(quote)}`, options);
-    if (price.pair !== pair) throw new Error("Operator returned a reference price for another pair");
+    const price = (await this.referencePrices(options)).find((candidate) => candidate.pair === pair);
+    if (!price) throw new Error(`Operator returned no reference price for ${pair}`);
     return price;
   }
 
@@ -209,6 +232,26 @@ export class ZylithExchangeClient {
 
   recentDeposits(options?: RequestOptions) {
     return this.get<DepositConfirmationList>(this.indexerUrl, "/api/deposits/recent", options);
+  }
+
+  noteBatches(start: number, end: number, options?: RequestOptions) {
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end - start >= MAX_TRANSITION_RANGE) {
+      throw new Error("note batch range is invalid");
+    }
+    return this.get<NoteBatchRootList>(this.indexerUrl, `/api/note-batches/range/${start}/${end}`, options);
+  }
+
+  async allNoteBatchRoots(options?: RequestOptions) {
+    const roots: string[] = [];
+    for (let start = 0; ; start += MAX_TRANSITION_RANGE) {
+      const list = await this.noteBatches(start, start + MAX_TRANSITION_RANGE - 1, options);
+      if (list.start !== start || list.roots.length > MAX_TRANSITION_RANGE || list.total < roots.length + list.roots.length) {
+        throw new Error("Indexer returned an invalid note batch range");
+      }
+      roots.push(...list.roots);
+      if (roots.length >= list.total) return roots;
+      if (list.roots.length !== MAX_TRANSITION_RANGE) throw new Error("Indexer is missing note batch roots");
+    }
   }
 
   async transitions(start: number, end: number, options?: RequestOptions) {

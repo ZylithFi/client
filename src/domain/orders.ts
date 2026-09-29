@@ -16,6 +16,7 @@ export type OrderRow = {
   averagePrice: string;
   fees: string;
   submittedAt: number;
+  recoveryAvailable: boolean;
   error?: string;
 };
 
@@ -69,6 +70,7 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[]): OrderRow[
         averagePrice: average,
         fees: order.fees === "0" ? "-" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
         submittedAt: order.submitted_at_ms,
+        recoveryAvailable: order.residual_recovery_available === true,
         error: order.last_error,
       },
     ];

@@ -39,7 +39,7 @@ export function AssetsPage({
   const [assetFilter, setAssetFilter] = useState<AssetFilter>("All");
   const [typeFilter, setTypeFilter] = useState<TransferFilter>("All");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
-  const assets = allAssets.length > 0 ? allAssets : ["STRK", "USDC"];
+  const assets = allAssets;
   const balanceRows = assets.map((asset) => {
     const balance = balances.find((entry) => entry.asset === asset);
     const availableAtomic = BigInt(balance?.available ?? "0");
@@ -87,7 +87,8 @@ export function AssetsPage({
   function cycleStatus() {
     setStatusFilter(statusFilter === "All" ? "Completed" : statusFilter === "Completed" ? "Pending" : statusFilter === "Pending" ? "Failed" : "All");
   }
-  function openTransfer(mode: "deposit" | "withdraw", asset = "USDC") {
+  function openTransfer(mode: "deposit" | "withdraw", asset = assets[0]) {
+    if (!asset) return;
     if (!walletReady) {
       onConnectWallet();
       return;
@@ -104,7 +105,7 @@ export function AssetsPage({
         </section>
         <section className="data-section asset-balance-section" aria-label="Private balances">
           <div className="section-meta-row"><div><span>Private balance</span><strong>-</strong></div><span className="privacy-copy">Connect to load private balances and in-flight amounts.</span></div>
-          <div className="account-empty-state"><strong>Connect wallet to view your private balances.</strong><span>Your STRK and USDC balances will appear here after connection.</span><button className="wallet-button" type="button" onClick={onConnectWallet}>Connect wallet</button></div>
+          <div className="account-empty-state"><strong>Connect wallet to view your private balances.</strong><span>Your enabled-asset balances will appear here after connection.</span><button className="wallet-button" type="button" onClick={onConnectWallet}>Connect wallet</button></div>
         </section>
         <section className="data-section transfer-section" aria-labelledby="transfer-history-title">
           <div className="section-title-row"><div><span className="page-kicker">MONEY MOVEMENT</span><h2 id="transfer-history-title">Transfer history</h2></div></div>

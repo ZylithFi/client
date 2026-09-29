@@ -1,8 +1,8 @@
-export const ETH_DEPOSIT_FEE_HEADROOM_ERROR =
-  "ETH deposit amount leaves no room for the wallet transaction fee. Try a slightly smaller amount.";
+export const CONNECTED_WALLET_FEE_HEADROOM_ERROR =
+  "Depositing the fee token would leave no room for the wallet transaction fee. Try a slightly smaller amount.";
 
-export const ETH_DEPOSIT_FEE_HEADROOM_USER_MESSAGE =
-  "ETH deposit amount leaves no room for the wallet fee. Try a slightly smaller amount.";
+export const CONNECTED_WALLET_FEE_HEADROOM_USER_MESSAGE =
+  "This deposit would leave no fee-token balance for the wallet fee. Try a slightly smaller amount.";
 
 export const CONNECTED_WALLET_FUNDING_TRANSFER_FAILED_MESSAGE =
   "The connected wallet could not execute the funding transfer. Open the wallet, review the failed transaction, and retry.";
@@ -17,8 +17,8 @@ export function privateDepositFundingFailureMessage(message: string): string | n
   if (/Connected Starknet wallet is not activated yet/i.test(message)) {
     return CONNECTED_WALLET_NOT_ACTIVATED_ERROR;
   }
-  if (/ETH deposit amount leaves no room for the wallet transaction fee/i.test(message)) {
-    return ETH_DEPOSIT_FEE_HEADROOM_USER_MESSAGE;
+  if (/deposit(?:ing)?.*fee token.*wallet transaction fee/i.test(message)) {
+    return CONNECTED_WALLET_FEE_HEADROOM_USER_MESSAGE;
   }
   if (/PaymasterV2Error|Paymaster error\s*\d+|TRANSACTION_EXECUTION_ERROR/i.test(message)) {
     return CONNECTED_WALLET_FUNDING_TRANSFER_FAILED_MESSAGE;
