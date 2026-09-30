@@ -36,11 +36,19 @@ const order: WalletOrder = {
 
 describe("order rows", () => {
   it("shows sizes, prices and fees in human units", () => {
-    const [row] = orderRows([order], [pair]);
-    expect(row).toMatchObject({ amount: "10", filled: "4", limitPrice: "0.05", averagePrice: "0.05", fees: "0.00008 USDC", funding: "10 STRK", recoveryAvailable: true });
+    const [row] = orderRows([order], [pair], { STRK: 0.04 });
+    expect(row).toMatchObject({ amount: "10", filled: "4", averagePrice: "0.05", fees: "0.00008 USDC", orderValue: "10 STRK", orderValueNumeric: 0.4, recoveryAvailable: true });
     expect(orderStatusLabel(row)).toBe("Partially filled");
     expect(isOpenOrder(row)).toBe(true);
     expect(isOpenOrder({ state: "expired" })).toBe(false);
     expect(orderRows([{ ...order, pair: "ETH/USDC" }], [pair])).toEqual([]);
+  });
+
+  it("collapses internal admission states into user-facing statuses", () => {
+    const [row] = orderRows([order], [pair]);
+    expect(orderStatusLabel({ ...row, state: "submitting", filled: "0" })).toBe("Submitting");
+    expect(orderStatusLabel({ ...row, state: "pending", filled: "0" })).toBe("Submitting");
+    expect(orderStatusLabel({ ...row, state: "live", filled: "0" })).toBe("Open");
+    expect(orderStatusLabel({ ...row, state: "live", filled: "1" })).toBe("Partially filled");
   });
 });

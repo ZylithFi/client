@@ -6,7 +6,7 @@ import type {
 } from "../../domain/tradeIntent";
 import { safeFromAtomicStr } from "../../domain/assets";
 import type { WalletBalance } from "../../domain/shieldedBalances";
-import { ArrowUpRightIcon, ShieldIcon, SwapIcon } from "./Icons";
+import { ShieldIcon, SwapIcon } from "./Icons";
 import { TokenIcon } from "./TokenIcon";
 import { defaultTradeAmount, formatQuotedPrice } from "../lib/marketFormat";
 
@@ -163,8 +163,10 @@ export function IntentPanel({
         <div className="asset-card-head">
           <span>{side === "buy" ? "You pay" : "You sell"}</span>
           <small>
-            {walletReady
+            {walletReady && pair
               ? `Available ${formatAmount(available, 6)} ${payAsset}`
+              : walletReady
+              ? "Market unavailable"
               : "Connect to view balance"}
           </small>
         </div>
@@ -233,12 +235,14 @@ export function IntentPanel({
 
       <div className="asset-card receive-card">
         <div className="asset-card-head">
-          <span>You receive ~</span>
-          <small>Indicative at current BBO</small>
+          <span>You receive</span>
+          <small>Estimated at current midpoint</small>
         </div>
         <div className="asset-input-row">
           <div className="receive-value">
-            {formatAmount(output, receiveAsset === quoteAsset ? 2 : 8)}
+            {pair
+              ? `≈ ${formatAmount(output, receiveAsset === quoteAsset ? 2 : 8)}`
+              : "-"}
           </div>
           <button className="token-select" type="button">
             <TokenIcon token={receiveAsset} />
@@ -255,19 +259,15 @@ export function IntentPanel({
                 )}`
               : "-"}
           </span>
-          <span className="muted">Matched amount reprices each cross</span>
+          <span className="muted">Final amount is determined at execution</span>
         </div>
       </div>
 
       <div className="privacy-note">
         <ShieldIcon className="icon-18" />
         <p>
-          <strong>Private first.</strong>
-          <span>
-            {externalMatching
-              ? "Your order crosses privately first. Searchers may fill only the remaining amount, inside your limit."
-              : "Your order crosses privately at the attested midpoint. Any unfilled amount rests privately until it fills, you cancel or it expires."}
-          </span>
+          <strong>Private execution</strong>
+          <span>Your order stays private and executes at the midpoint when matched.</span>
         </p>
       </div>
 
@@ -282,7 +282,7 @@ export function IntentPanel({
           />
           <span>
             <strong>External matching</strong>
-            <small>Allow midpoint searchers after private crossing</small>
+            <small>Allow unfilled size to use external liquidity</small>
           </span>
         </label>
       </div>
@@ -290,31 +290,19 @@ export function IntentPanel({
       <div className="quote-details">
         <div>
           <span>Execution</span>
-          <strong>Midpoint cross</strong>
+          <strong>Midpoint</strong>
         </div>
         <div>
-          <span>Indicative BBO midpoint</span>
+          <span>Estimated price</span>
           <strong>{formatQuotedPrice(midpoint, quoteAsset)}</strong>
         </div>
         <div>
           <span>Fee</span>
           <strong>{pair ? `${pair.taker_fee_bps} bps` : "-"}</strong>
         </div>
-        <div>
-          <span>Residual route</span>
-          <strong>
-            {pair?.external_match_enabled && externalMatching
-              ? "Midpoint matcher"
-              : "Private only"}
-          </strong>
-        </div>
-        <div>
-          <span>Unfilled amount</span>
-          <strong>Rests in the private book</strong>
-        </div>
       </div>
 
-      {numericAmount > available && walletReady && (
+      {pair && numericAmount > available && walletReady && (
         <p className="field-error">
           Amount exceeds your available {payAsset} balance.
         </p>
@@ -334,11 +322,7 @@ export function IntentPanel({
         onClick={() => void submit()}
       >
         <span>{actionLabel}</span>
-        <ArrowUpRightIcon className="icon-17" />
       </button>
-      <p className="intent-footnote">
-        The displayed BBO is indicative; fills clear at the attested midpoint within your limit.
-      </p>
     </aside>
   );
 }

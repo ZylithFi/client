@@ -112,8 +112,7 @@ export function WalletSlide({
   const walletScannerActiveRef = useRef(false);
   const autoPrivateSetupAttemptRef = useRef<string | null>(null);
   const w = walletRuntime();
-  const connectedVaultAuthMode =
-    w?.vaultAuthMode?.(starknetAddress) ??
+  const connectedVaultAuthMode = w?.vaultAuthMode?.(starknetAddress) ??
     (starknetAddress && hasVault ? "wallet-signature" : "none");
   const connectedHasVault = connectedVaultAuthMode === "wallet-signature";
 
@@ -302,7 +301,7 @@ export function WalletSlide({
         {!w && (
           <div
             style={{
-              fontSize: 11,
+              fontSize: 13,
               color: "var(--z-status-warn)",
               marginBottom: 12,
               lineHeight: 1.5,
@@ -417,7 +416,7 @@ export function WalletSlide({
         {error && (
           <div
             style={{
-              fontSize: 11,
+              fontSize: 13,
               color: "var(--z-status-danger)",
               marginTop: 10,
               lineHeight: 1.5,
@@ -595,7 +594,7 @@ export function DepositSlide({
         {error && (
           <div
             style={{
-              fontSize: 11,
+              fontSize: 13,
               color: "var(--z-status-danger)",
               marginBottom: 8,
             }}
@@ -777,7 +776,7 @@ export function WithdrawSlide({
             ))}
           </div>
         )}
-        {error && <div style={{ fontSize: 11, color: "var(--z-status-danger)", marginBottom: 8 }}>{error}</div>}
+        {error && <div style={{ fontSize: 13, color: "var(--z-status-danger)", marginBottom: 8 }}>{error}</div>}
         <button className="slide-submit" disabled={!withdrawEnabled} onClick={() => void handleWithdraw()}>
           {working ? (privateSessionReady ? "Submitting…" : "Authorizing…") : !starknetAddress ? "Connect wallet to withdraw" : privateSessionReady ? "Withdraw" : "Authorize withdrawals"}
         </button>

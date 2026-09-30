@@ -11,8 +11,8 @@ export type OrderRow = {
   external: boolean;
   amount: string;
   filled: string;
-  funding: string;
-  limitPrice: string;
+  orderValue: string;
+  orderValueNumeric: number | null;
   averagePrice: string;
   fees: string;
   submittedAt: number;
@@ -30,8 +30,8 @@ export function orderStatusLabel(row: OrderRow) {
   if (row.state === "live" && row.filled !== "0") return "Partially filled";
   const labels: Record<OrderState, string> = {
     submitting: "Submitting",
-    pending: "Awaiting admission",
-    live: "Resting",
+    pending: "Submitting",
+    live: "Open",
     cancelling: "Cancelling",
     filled: "Filled",
     cancelled: "Cancelled",
@@ -48,7 +48,7 @@ export function orderStatusTone(state: OrderState) {
   return "blue";
 }
 
-export function orderRows(orders: WalletOrder[], pairs: PairConfig[]): OrderRow[] {
+export function orderRows(orders: WalletOrder[], pairs: PairConfig[], assetUnitPrices: Record<string, number> = {}): OrderRow[] {
   return orders.flatMap((order) => {
     const pair = pairs.find((candidate) => candidate.pair_id === order.pair);
     if (!pair) return [];
@@ -56,6 +56,9 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[]): OrderRow[
     const average =
       filledBase > 0n ? formatPrice(((BigInt(order.filled_quote) * BigInt(pair.price_base_scale)) / filledBase).toString(), pair) : "-";
     const proceedsAsset = order.side === "Sell" ? pair.quote_asset_id : pair.base_asset_id;
+    const orderValueAmount = fromAtomicStr(order.funding_amount, order.funding_asset);
+    const unitPrice = assetUnitPrices[order.funding_asset];
+    const orderValueNumeric = unitPrice === undefined ? null : Number(orderValueAmount.replaceAll(",", "")) * unitPrice;
     return [
       {
         id: order.order_id,
@@ -65,8 +68,8 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[]): OrderRow[
         external: order.external,
         amount: fromAtomicStr(order.amount, pair.base_asset_id),
         filled: fromAtomicStr(order.filled_base, pair.base_asset_id),
-        funding: `${fromAtomicStr(order.funding_amount, order.funding_asset)} ${order.funding_asset}`,
-        limitPrice: formatPrice(order.limit_price, pair),
+        orderValue: `${orderValueAmount} ${order.funding_asset}`,
+        orderValueNumeric: orderValueNumeric !== null && Number.isFinite(orderValueNumeric) ? orderValueNumeric : null,
         averagePrice: average,
         fees: order.fees === "0" ? "-" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
         submittedAt: order.submitted_at_ms,

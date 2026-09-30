@@ -11,7 +11,7 @@ export function formatQuotedPrice(
   quoteAsset: string,
 ) {
   const numeric = value ?? 0;
-  if (!Number.isFinite(numeric) || numeric <= 0) return "-";
+  if (!quoteAsset || quoteAsset === "-" || !Number.isFinite(numeric) || numeric <= 0) return "-";
   const formatted = numeric.toLocaleString("en-US", {
     minimumFractionDigits: numeric >= 1_000 ? 2 : 0,
     maximumFractionDigits: marketPricePrecision(numeric),

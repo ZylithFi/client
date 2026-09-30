@@ -150,7 +150,7 @@ export function PriceChart({
         textColor: "#6f7886",
         attributionLogo: false,
         fontFamily: "Geist Variable, Geist, sans-serif",
-        fontSize: 10,
+        fontSize: 13,
       },
       grid: {
         vertLines: { color: "rgba(31, 40, 53, 0.58)" },

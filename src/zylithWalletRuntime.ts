@@ -827,6 +827,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         locked: Boolean(note.locked_by || (note.exit && note.exit.stage !== "failed")),
         spent: Boolean(note.spent),
         exit_stage: note.exit?.stage,
+        requested_at_unix_ms: note.exit?.requested_at_ms,
       }));
   }
 

@@ -12,7 +12,14 @@ export function ChevronDownIcon(props: SVGProps<SVGSVGElement>) {
   return <IconBase {...props}><path d="m7 10 5 5 5-5" /></IconBase>;
 }
 export function WalletIcon(props: SVGProps<SVGSVGElement>) {
-  return <IconBase {...props}><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5H19v14H6.5A2.5 2.5 0 0 1 4 16.5z"/><path d="M4 8h12.5A2.5 2.5 0 0 1 19 10.5V14h-4a2 2 0 1 1 0-4h4" /></IconBase>;
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M5 5.25h10.75A2.25 2.25 0 0 1 18 7.5v1H8A3 3 0 0 1 5 5.5v-.25Z" opacity=".72" />
+      <path d="M4.75 7h14.5A2.75 2.75 0 0 1 22 9.75v7.5A2.75 2.75 0 0 1 19.25 20H4.75A2.75 2.75 0 0 1 2 17.25v-7.5A2.75 2.75 0 0 1 4.75 7Z" />
+      <rect x="14" y="11" width="8" height="5" rx="2" fill="var(--wallet-fill)" />
+      <circle cx="16.25" cy="13.5" r=".8" />
+    </svg>
+  );
 }
 export function SwapIcon(props: SVGProps<SVGSVGElement>) {
   return <IconBase {...props}><path d="M8 4v14"/><path d="m5 7 3-3 3 3"/><path d="M16 20V6"/><path d="m13 17 3 3 3-3" /></IconBase>;

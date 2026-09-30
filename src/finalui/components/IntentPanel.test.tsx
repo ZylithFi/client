@@ -73,9 +73,11 @@ describe("IntentPanel", () => {
     fireEvent.change(screen.getByLabelText("Trade amount"), {
       target: { value: "100" },
     });
-    expect(screen.getByText("2,500")).toBeInTheDocument();
+    expect(screen.getByText("≈ 2,500")).toBeInTheDocument();
     expect(screen.getByLabelText("External matching")).not.toBeChecked();
-    expect(screen.getByText("Rests in the private book")).toBeInTheDocument();
+    expect(screen.queryByText("Residual route")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unfilled amount")).not.toBeInTheDocument();
+    expect(screen.getByText("Midpoint")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Submit order" }));
@@ -128,6 +130,6 @@ describe("IntentPanel", () => {
     );
 
     expect(screen.getByLabelText("External matching")).toBeDisabled();
-    expect(screen.getByText("Private only")).toBeInTheDocument();
+    expect(screen.queryByText("Residual route")).not.toBeInTheDocument();
   });
 });

@@ -28,6 +28,7 @@ export type WithdrawableNote = {
   locked: boolean;
   spent: boolean;
   exit_stage?: "requested" | "proving" | "maturing" | "finalized" | "claiming" | "failed";
+  requested_at_unix_ms?: number;
 };
 
 export type MarketObservation = {

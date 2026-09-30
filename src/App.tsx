@@ -17,7 +17,6 @@ import { DepositSlide, WalletSlide, WithdrawSlide } from "./components/WalletSli
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import { sessionSet } from "./domain/safeSessionStorage";
 import { useWalletState } from "./hooks/useWalletState";
-import { ResidualCapacityFreezeRequiredError } from "./zylithWalletRuntime";
 
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const REFERENCE_PRICE_POLL_MS = 5_000;
@@ -95,6 +94,7 @@ export default function App() {
     if (activePair) setActivePairId(activePair.pair_id);
   }, [activePair?.pair_id]);
   const [reference, setReference] = useState<{ pairId: string; price: ReferencePriceSnapshot } | null>(null);
+  const [assetUnitPrices, setAssetUnitPrices] = useState<Record<string, number>>({});
   const [online, setOnline] = useState(true);
   useEffect(() => {
     if (!activePair) return;
@@ -105,6 +105,14 @@ export default function App() {
         const expectedPairs = new Set(pairs.map((pair) => pair.pair_id));
         if (prices.length !== expectedPairs.size || prices.some((candidate) => !expectedPairs.has(candidate.pair))) {
           throw new Error("The reference-price batch does not match the deployment registry.");
+        }
+        const numeraire = deployment?.market_registry.objective_numeraire_asset_id;
+        const nextAssetUnitPrices: Record<string, number> = numeraire ? { [numeraire]: 1 } : {};
+        for (const candidate of prices) {
+          const configuredPair = pairs.find((pair) => pair.pair_id === candidate.pair);
+          if (!configuredPair || configuredPair.quote_asset_id !== numeraire) continue;
+          const unitPrice = Number(formatPrice(candidate.midpoint, { ...configuredPair, price_base_scale: candidate.scale }));
+          if (Number.isFinite(unitPrice) && unitPrice > 0) nextAssetUnitPrices[configuredPair.base_asset_id] = unitPrice;
         }
         const price = prices.find((candidate) => candidate.pair === activePair!.pair_id);
         if (!price) throw new Error("The reference-price batch is incomplete.");
@@ -118,9 +126,13 @@ export default function App() {
             observedAtUnixMs: price.observed_at_ms,
           },
         });
+        setAssetUnitPrices(nextAssetUnitPrices);
         setOnline(true);
       } catch {
-        if (!cancelled) setOnline(false);
+        if (!cancelled) {
+          setAssetUnitPrices({});
+          setOnline(false);
+        }
       }
     }
     void poll();
@@ -129,7 +141,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activePair]);
+  }, [activePair, deployment, pairs]);
   const referencePrice = reference && reference.pairId === activePair?.pair_id ? reference.price : null;
 
   // wallet
@@ -141,7 +153,7 @@ export default function App() {
   const [starknetAddress, setStarknetAddress] = useState<string | null>(() => connectedStarknetAddress());
   const { runtimeStatus, walletReady, hasVault } = useWalletState(starknetAddress);
   const view = useWalletView(walletReady);
-  const rows = useMemo<OrderRow[]>(() => orderRows(view.orders, pairs), [view.orders, pairs]);
+  const rows = useMemo<OrderRow[]>(() => orderRows(view.orders, pairs, assetUnitPrices), [assetUnitPrices, pairs, view.orders]);
 
   useEffect(() => {
     const reconcile = (next: string | null) =>
@@ -202,31 +214,6 @@ export default function App() {
     }
   }
 
-  async function handleRecover(row: OrderRow) {
-    const runtime = walletRuntime();
-    if (!runtime?.submitResidualRecovery || !runtime.finalizeResidualRecovery || !runtime.claimResidualRecovery) {
-      setSubmitError("Residual recovery is unavailable in this wallet build.");
-      return;
-    }
-    setSubmitError(null);
-    try {
-      let submission;
-      try {
-        submission = await runtime.submitResidualRecovery(row.id);
-      } catch (error) {
-        if (!(error instanceof ResidualCapacityFreezeRequiredError)) throw error;
-        if (!runtime.freezeResidualRecoveryCapacity) throw error;
-        await runtime.freezeResidualRecoveryCapacity(row.id);
-        return;
-      }
-      if (!submission.already_requested) return;
-      const finalized = await runtime.finalizeResidualRecovery(row.id);
-      if (finalized.already_final) await runtime.claimResidualRecovery(row.id);
-    } catch (error) {
-      setSubmitError(userFacingErrorMessage(error, "Residual recovery failed. Retry."));
-    }
-  }
-
   return (
     <div className="app-shell">
       <AppHeader activePage={tab} starknetAddress={starknetAddress} walletReady={walletReady} onNavigate={changeTab} onWallet={() => setOpenSlide("wallet")} />
@@ -259,7 +246,7 @@ export default function App() {
             onViewOrders={() => changeTab("orders")}
           />
         )}
-        {tab === "orders" && <OrdersPage orders={rows} error={submitError} onCancel={(row) => void handleCancel(row)} onRecover={(row) => void handleRecover(row)} walletReady={walletReady} onConnectWallet={() => setOpenSlide("wallet")} />}
+        {tab === "orders" && <OrdersPage orders={rows} error={submitError} onCancel={(row) => void handleCancel(row)} walletReady={walletReady} onConnectWallet={() => setOpenSlide("wallet")} />}
         {tab === "assets" && (
           <AssetsPage
             allAssets={allAssets}
@@ -267,6 +254,7 @@ export default function App() {
             pendingDeposits={view.pendingDeposits}
             withdrawals={view.withdrawables}
             walletReady={walletReady}
+            assetUnitPrices={assetUnitPrices}
             onDeposit={(asset) => {
               if (asset) setSlideAsset(asset);
               setOpenSlide("deposit");
