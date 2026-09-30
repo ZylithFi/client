@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,4 +16,17 @@ test("bundle budget reports only oversized javascript assets", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("production csp permits wallet wasm without enabling javascript eval", () => {
+  const config = JSON.parse(
+    readFileSync(new URL("../vercel.json", import.meta.url), "utf8"),
+  );
+  const headers = config.headers.flatMap((entry) => entry.headers);
+  const csp = headers.find(
+    (header) => header.key.toLowerCase() === "content-security-policy",
+  )?.value;
+
+  assert.match(csp, /script-src[^;]*'wasm-unsafe-eval'/);
+  assert.doesNotMatch(csp, /script-src[^;]*\s'unsafe-eval'(?:\s|;|$)/);
 });
