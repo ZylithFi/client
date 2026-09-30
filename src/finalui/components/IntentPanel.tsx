@@ -17,6 +17,15 @@ function positiveNumber(value: string | undefined) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function decimalInput(value: string) {
+  const sanitized = value.replace(/[^0-9.]/g, "");
+  const separator = sanitized.indexOf(".");
+  if (separator < 0) return sanitized;
+  return `${sanitized.slice(0, separator + 1)}${sanitized
+    .slice(separator + 1)
+    .replaceAll(".", "")}`;
+}
+
 function formatAmount(value: number, maximumFractionDigits = 8) {
   return value.toLocaleString("en-US", { maximumFractionDigits });
 }
@@ -186,7 +195,7 @@ export function IntentPanel({
             placeholder="0"
             value={amount}
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              setAmount(event.target.value.replace(/[^0-9.]/g, ""))
+              setAmount(decimalInput(event.target.value))
             }
           />
           <button className="token-select" type="button">

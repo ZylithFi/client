@@ -151,4 +151,15 @@ describe("IntentPanel", () => {
 
     expect(screen.getByText("≈ 0.000015637")).toBeInTheDocument();
   });
+
+  it("normalizes pasted amounts to one decimal separator", () => {
+    render(<IntentPanel {...commonProps} walletReady={false} />);
+
+    fireEvent.change(screen.getByLabelText("Trade amount"), {
+      target: { value: "1abc.2.3" },
+    });
+
+    expect(screen.getByLabelText("Trade amount")).toHaveValue("1.23");
+    expect(screen.getByText("≈ 30.75")).toBeInTheDocument();
+  });
 });
