@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertDeploymentManifest, assertPinnedExecutionKeys, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
+import { assertDeploymentManifest, assertPinnedExecutionKeys, defaultPair, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
 import shipped from "../../public/deployment.example.json";
 
 const example = JSON.parse(JSON.stringify(shipped));
@@ -27,6 +27,24 @@ describe("deployment manifest", () => {
     });
     expect(() => assertDeploymentManifest(deployed)).not.toThrow();
     expect(enabledPairs(deployed).map((pair) => pair.pair_id)).toContain("STRK/USDC");
+  });
+
+  it("selects STRK/USDC as the product default regardless of registry ordering", () => {
+    const deployed = finalized(JSON.parse(JSON.stringify(example)));
+    for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange"]) deployed.contracts[name] = "0x1234";
+    expect(defaultPair(deployed)?.pair_id).toBe("STRK/USDC");
+    expect(enabledPairs(deployed)[0]?.pair_id).toBe("STRK/USDC");
+    deployed.market_registry.markets.reverse();
+    expect(defaultPair(deployed)?.pair_id).toBe("STRK/USDC");
+    expect(enabledPairs(deployed)[0]?.pair_id).toBe("STRK/USDC");
+  });
+
+  it("keeps synthetic residuals eligible for external multihop execution", () => {
+    const deployed = finalized(JSON.parse(JSON.stringify(example)));
+    for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange", "ekubo_external_match_router"]) deployed.contracts[name] = "0x1234";
+    const pair = enabledPairs(deployed).find((candidate) => candidate.pair_id === "STRK/ETH");
+    expect(pair?.external_match_enabled).toBe(true);
+    expect(() => assertDeploymentManifest(deployed)).not.toThrow();
   });
 
   it("rejects a manifest whose exchange is not deployed or whose runtime is missing", () => {

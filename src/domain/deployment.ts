@@ -40,6 +40,14 @@ export type RegistryMarketConfig = {
     max_cross_source_deviation_bps: number;
     envelope_bps: number;
     attestation_ttl_ms: number;
+  } | {
+    methodology: "synthetic_cross_bbo_midpoint";
+    base_market_id: string;
+    quote_market_id: string;
+    max_leg_skew_ms: number;
+    max_age_ms: number;
+    envelope_bps: number;
+    attestation_ttl_ms: number;
   };
 };
 
@@ -294,7 +302,7 @@ function assertMarketRegistry(registry: DeploymentConfig["market_registry"], net
     if (!base || !quote || !validRegistryIdentifier(market.market_id) || market.market_id !== `${market.base_asset_id}/${market.quote_asset_id}` || !/^[1-9]\d*$/.test(market.price_base_scale ?? "") || !/^[1-9]\d*$/.test(market.min_order_amount ?? "") || BigInt(market.min_order_amount) < BigInt(base.min_trade_amount) || !Number.isSafeInteger(market.taker_fee_bps) || market.taker_fee_bps < 1 || market.taker_fee_bps > 100 || (market.enabled && (!base.enabled || !quote.enabled || market.capabilities.market_data !== true))) {
       throw new Error(`Deployment manifest market ${market.market_id || "?"} is malformed`);
     }
-    assertReferencePrice(market);
+    assertReferencePrice(market, registry);
   }
   for (const asset of registry.assets.filter((candidate) => candidate.enabled)) {
     if (!registry.markets.some((market) => market.enabled && (market.base_asset_id === asset.asset_id || market.quote_asset_id === asset.asset_id))) {
@@ -307,19 +315,30 @@ function assertMarketRegistry(registry: DeploymentConfig["market_registry"], net
   }
 }
 
-function assertReferencePrice(market: RegistryMarketConfig): void {
+function assertReferencePrice(market: RegistryMarketConfig, registry: DeploymentConfig["market_registry"]): void {
   const reference = market.reference_price;
-  const sources = [reference?.primary, ...(reference?.corroborating ?? [])];
+  if (!reference || !Number.isSafeInteger(reference.max_age_ms) || reference.max_age_ms < 1 || reference.max_age_ms > 15_000 || !Number.isSafeInteger(reference.attestation_ttl_ms) || reference.attestation_ttl_ms < 1 || reference.attestation_ttl_ms > 15_000 || !validBps(reference.envelope_bps)) {
+    throw new Error(`Deployment manifest market ${market.market_id} has invalid reference pricing`);
+  }
+  if (reference.methodology === "synthetic_cross_bbo_midpoint") {
+    const base = registry.markets.find((candidate) => candidate.market_id === reference.base_market_id);
+    const quote = registry.markets.find((candidate) => candidate.market_id === reference.quote_market_id);
+    if (!base?.enabled || !quote?.enabled || base.reference_price.methodology !== "direct_bbo_midpoint" || quote.reference_price.methodology !== "direct_bbo_midpoint" || base.base_asset_id !== market.base_asset_id || quote.base_asset_id !== market.quote_asset_id || base.quote_asset_id !== registry.objective_numeraire_asset_id || quote.quote_asset_id !== registry.objective_numeraire_asset_id || base.price_base_scale !== market.price_base_scale || quote.price_base_scale !== market.price_base_scale || reference.base_market_id === reference.quote_market_id || !Number.isSafeInteger(reference.max_leg_skew_ms) || reference.max_leg_skew_ms < 1 || reference.max_leg_skew_ms > reference.max_age_ms) {
+      throw new Error(`Deployment manifest market ${market.market_id} has invalid synthetic reference pricing`);
+    }
+    return;
+  }
+  const sources = [reference.primary, ...reference.corroborating];
   const adapters = sources.map((source) => source?.adapter);
   const validSymbol = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(value);
-  const corroboratingValid = (reference?.corroborating ?? []).every((source) =>
+  const corroboratingValid = reference.corroborating.every((source) =>
     source.kind === "same_venue_ratio"
     && ["coinbase", "kraken", "okx"].includes(source.adapter)
     && validSymbol(source.base_symbol)
     && validSymbol(source.quote_symbol)
   );
-  const corroboratingAdapters = new Set((reference?.corroborating ?? []).map((source) => source.adapter));
-  if (!reference || reference.methodology !== "direct_bbo_midpoint" || reference.primary?.kind !== "direct" || reference.primary.adapter !== "binance" || !validSymbol(reference.primary.symbol) || !corroboratingValid || !corroboratingAdapters.has("coinbase") || !corroboratingAdapters.has("kraken") || sources.length < 3 || new Set(adapters).size !== adapters.length || !Number.isSafeInteger(reference.min_sources) || reference.min_sources < 3 || reference.min_sources > sources.length || !Number.isSafeInteger(reference.max_age_ms) || reference.max_age_ms < 1 || reference.max_age_ms > 15_000 || !Number.isSafeInteger(reference.attestation_ttl_ms) || reference.attestation_ttl_ms < 1 || reference.attestation_ttl_ms > 15_000 || !validBps(reference.max_source_spread_bps) || !validBps(reference.max_cross_source_deviation_bps) || !validBps(reference.envelope_bps)) {
+  const corroboratingAdapters = new Set(reference.corroborating.map((source) => source.adapter));
+  if (market.quote_asset_id !== registry.objective_numeraire_asset_id || reference.primary.kind !== "direct" || reference.primary.adapter !== "binance" || !validSymbol(reference.primary.symbol) || !corroboratingValid || !corroboratingAdapters.has("coinbase") || !corroboratingAdapters.has("kraken") || sources.length < 3 || new Set(adapters).size !== adapters.length || !Number.isSafeInteger(reference.min_sources) || reference.min_sources < 3 || reference.min_sources > sources.length || !validBps(reference.max_source_spread_bps) || !validBps(reference.max_cross_source_deviation_bps)) {
     throw new Error(`Deployment manifest market ${market.market_id} has invalid reference pricing`);
   }
 }
@@ -408,7 +427,7 @@ async function requestDeployment(): Promise<DeploymentConfig> {
 }
 
 export function enabledPairs(deployment: DeploymentConfig | null): PairConfig[] {
-  return deployment
+  const pairs = deployment
     ? deployment.market_registry.markets
         .filter((market) => market.enabled)
         .map((market) => ({
@@ -423,6 +442,16 @@ export function enabledPairs(deployment: DeploymentConfig | null): PairConfig[] 
           enabled: market.enabled,
         }))
     : [];
+  return pairs.sort((left, right) => {
+    if (left.pair_id === "STRK/USDC") return -1;
+    if (right.pair_id === "STRK/USDC") return 1;
+    return left.pair_id.localeCompare(right.pair_id);
+  });
+}
+
+export function defaultPair(deployment: DeploymentConfig | null): PairConfig | null {
+  const pairs = enabledPairs(deployment);
+  return pairs.find((pair) => pair.pair_id === "STRK/USDC") ?? pairs[0] ?? null;
 }
 
 export function useDeploymentState(): { deployment: DeploymentConfig | null; error: string | null } {

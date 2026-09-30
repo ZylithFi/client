@@ -4,7 +4,7 @@ import "./finalui/styles.css";
 import type { WalletOrder, WithdrawableNote } from "@zylith/sdk";
 import { configureAssetDecimals, formatPrice, toAtomicStr, toPriceAtoms } from "./domain/assets";
 import { connectedStarknetAddress, restoreConnectedStarknetWallet, subscribeWalletRuntime, walletRuntime } from "./domain/browserWallet";
-import { enabledPairs, exchange, useDeploymentState } from "./domain/deployment";
+import { defaultPair, enabledPairs, exchange, useDeploymentState } from "./domain/deployment";
 import { type OrderRow, orderRows } from "./domain/orders";
 import type { PendingDeposit, WalletBalance } from "./domain/shieldedBalances";
 import type { ReferencePriceSnapshot, TicketSubmitIntent } from "./domain/tradeIntent";
@@ -62,6 +62,7 @@ function useWalletView(walletReady: boolean) {
 export default function App() {
   const { deployment, error: deploymentError } = useDeploymentState();
   const pairs = useMemo(() => enabledPairs(deployment), [deployment]);
+  const initialPair = useMemo(() => defaultPair(deployment), [deployment]);
   const allAssets = useMemo(() => [...new Set(pairs.flatMap((pair) => [pair.base_asset_id, pair.quote_asset_id]))], [pairs]);
   const depositableAssets = useMemo(() => {
     const fundable = new Set(deployment?.market_registry.assets.filter((asset) => asset.enabled && asset.funding_enabled).map((asset) => asset.asset_id));
@@ -89,7 +90,7 @@ export default function App() {
 
   // market
   const [activePairId, setActivePairId] = useState("");
-  const activePair = pairs.find((pair) => pair.pair_id === activePairId) ?? pairs[0] ?? null;
+  const activePair = pairs.find((pair) => pair.pair_id === activePairId) ?? initialPair;
   useEffect(() => {
     if (activePair) setActivePairId(activePair.pair_id);
   }, [activePair?.pair_id]);
