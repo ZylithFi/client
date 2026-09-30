@@ -21,6 +21,15 @@ function formatAmount(value: number, maximumFractionDigits = 8) {
   return value.toLocaleString("en-US", { maximumFractionDigits });
 }
 
+function formatEstimatedAmount(value: number, preferTwoDigits: boolean) {
+  const rounded = formatAmount(value, preferTwoDigits ? 2 : 8);
+  if (value <= 0 || Number(rounded.replaceAll(",", "")) > 0) return rounded;
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: 18,
+    maximumSignificantDigits: 8,
+  });
+}
+
 export function IntentPanel({
   pair,
   balances,
@@ -241,7 +250,10 @@ export function IntentPanel({
         <div className="asset-input-row">
           <div className="receive-value">
             {pair
-              ? `≈ ${formatAmount(output, receiveAsset === quoteAsset ? 2 : 8)}`
+              ? `≈ ${formatEstimatedAmount(
+                  output,
+                  receiveAsset === quoteAsset,
+                )}`
               : "-"}
           </div>
           <button className="token-select" type="button">

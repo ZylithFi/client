@@ -132,4 +132,23 @@ describe("IntentPanel", () => {
     expect(screen.getByLabelText("External matching")).toBeDisabled();
     expect(screen.queryByText("Residual route")).not.toBeInTheDocument();
   });
+
+  it("does not display a nonzero small receive amount as zero", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        pair={{
+          ...pair,
+          pair_id: "STRK/ETH",
+          quote_asset_id: "ETH",
+        }}
+        marketMidpoint={0.000015637}
+        walletReady={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Sell" }));
+
+    expect(screen.getByText("≈ 0.000015637")).toBeInTheDocument();
+  });
 });
