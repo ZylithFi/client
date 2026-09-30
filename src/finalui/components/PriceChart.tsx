@@ -375,8 +375,12 @@ export function PriceChart({
 
   async function toggleFullscreen() {
     if (!panelRef.current) return;
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else await panelRef.current.requestFullscreen();
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await panelRef.current.requestFullscreen();
+    } catch {
+      setFullscreen(false);
+    }
   }
 
   return (
