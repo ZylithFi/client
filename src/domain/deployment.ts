@@ -115,7 +115,9 @@ export type DeploymentConfig = {
     };
   };
   proof: {
-    proof_program_address: string;
+    transition_proof_program_address: string;
+    withdrawal_proof_program_address: string;
+    residual_recovery_proof_program_address: string;
     virtual_program_hash: string;
     starknet_os_config_hash: string;
     proof_account_address: string;
@@ -194,7 +196,7 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
   if (proof.config_locked_after_deploy !== true) {
     throw new Error("Deployment manifest proof configuration is not locked");
   }
-  for (const field of ["proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) {
+  for (const field of ["transition_proof_program_address", "withdrawal_proof_program_address", "residual_recovery_proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) {
     if (!normalizeConfiguredFelt(proof[field])) {
       throw new Error(`Deployment manifest proof ${field} must be a nonzero felt`);
     }

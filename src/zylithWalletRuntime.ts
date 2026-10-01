@@ -1395,7 +1395,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       witness: built.witness,
       recovery_calldata: built.calldata,
       proof_program_call: {
-        contract_address: manifest.proof.proof_program_address,
+        contract_address: manifest.proof.residual_recovery_proof_program_address,
         entrypoint: "compile_residual_recovery_proof",
         calldata: [manifest.contracts.exchange, String(built.witness.length), ...built.witness],
       },

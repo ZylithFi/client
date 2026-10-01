@@ -6,7 +6,7 @@ const example = JSON.parse(JSON.stringify(shipped));
 
 function finalized(manifest: typeof example) {
   manifest.deployment = { finalized: true, release_commit: "a".repeat(40) };
-  for (const field of ["proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) manifest.proof[field] = "0x1234";
+  for (const field of ["transition_proof_program_address", "withdrawal_proof_program_address", "residual_recovery_proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) manifest.proof[field] = "0x1234";
   manifest.proof.config_locked_after_deploy = true;
   manifest.roles = { protocol_fee_recipient: "0x1234", pause_guardian_address: "0x1234", reference_price_signer: "0x1234" };
   return manifest;
