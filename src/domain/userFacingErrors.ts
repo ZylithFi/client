@@ -226,6 +226,9 @@ export function userFacingErrorMessage(
   ) {
     return "Private trading authorization failed. Lock and reconnect your wallet, then retry.";
   }
+  if (/starknet wallet request timed out/i.test(message)) {
+    return "Wallet connection timed out. Open or unlock your Starknet wallet and retry.";
+  }
   if (/wallet signature request timed out/i.test(message)) {
     return "Wallet signature timed out. Open your Starknet wallet and retry.";
   }

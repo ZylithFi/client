@@ -35,7 +35,7 @@ describe("DepositSlide", () => {
   it("defaults to STRK for deposits", () => {
     render(<DepositHarness />);
 
-    expect(screen.getByRole("combobox")).toHaveValue("STRK");
+    expect(screen.getByRole("combobox", { name: "Asset" })).toHaveValue("STRK");
     expect(
       screen.getByRole("button", { name: "Deposit STRK" })
     ).toBeInTheDocument();
@@ -46,14 +46,26 @@ describe("DepositSlide", () => {
 
     const amount = screen.getByPlaceholderText("0");
     fireEvent.change(amount, { target: { value: "2" } });
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "USDC" },
-    });
+    fireEvent.click(screen.getByRole("combobox", { name: "Asset" }));
+    fireEvent.click(screen.getByRole("option", { name: "USDC" }));
 
     expect(amount).toHaveValue("2");
     expect(
       screen.getByRole("button", { name: "Deposit USDC" })
     ).toBeInTheDocument();
+  });
+
+  it("closes the asset menu when the amount field receives focus", () => {
+    render(<DepositHarness />);
+
+    fireEvent.click(screen.getByRole("combobox", { name: "Asset" }));
+    expect(screen.getByRole("listbox", { name: "Assets" })).toBeInTheDocument();
+
+    fireEvent.focus(screen.getByPlaceholderText("0"));
+
+    expect(
+      screen.queryByRole("listbox", { name: "Assets" })
+    ).not.toBeInTheDocument();
   });
 
   it("submits the deposit when pressing Enter in the amount field", async () => {

@@ -54,7 +54,7 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[], assetUnitP
     if (!pair) return [];
     const filledBase = BigInt(order.filled_base);
     const average =
-      filledBase > 0n ? formatPrice(((BigInt(order.filled_quote) * BigInt(pair.price_base_scale)) / filledBase).toString(), pair) : "-";
+      filledBase > 0n ? formatPrice(((BigInt(order.filled_quote) * BigInt(pair.price_base_scale)) / filledBase).toString(), pair) : "Not filled";
     const proceedsAsset = order.side === "Sell" ? pair.quote_asset_id : pair.base_asset_id;
     const orderValueAmount = fromAtomicStr(order.funding_amount, order.funding_asset);
     const unitPrice = assetUnitPrices[order.funding_asset];
@@ -71,7 +71,7 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[], assetUnitP
         orderValue: `${orderValueAmount} ${order.funding_asset}`,
         orderValueNumeric: orderValueNumeric !== null && Number.isFinite(orderValueNumeric) ? orderValueNumeric : null,
         averagePrice: average,
-        fees: order.fees === "0" ? "-" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
+        fees: order.fees === "0" ? "None" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
         submittedAt: order.submitted_at_ms,
         recoveryAvailable: order.residual_recovery_available === true,
         error: order.last_error,

@@ -1,4 +1,13 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type KeyboardEvent,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { safeFromAtomicStr, toAtomicStr } from "../domain/assets";
 import {
   type RuntimeStatus,
@@ -19,6 +28,8 @@ import {
 import { getPrivacyFundingStage } from "../domain/privacyFundingStage";
 import type { WithdrawableNote } from "@zylith/sdk";
 import { userFacingErrorMessage } from "../domain/userFacingErrors";
+import { ChevronDownIcon } from "../finalui/components/Icons";
+import { TokenIcon } from "../finalui/components/TokenIcon";
 
 export function privacyFundingStageLabel(stage: string) {
   const cleaned = stage
@@ -67,15 +78,188 @@ async function ensureTradingAuthorized(
 function selectableWithdrawNotes(notes: WithdrawableNote[], asset: string) {
   return notes
     .filter((note) => note.asset === asset && !note.spent && (!note.locked || note.exit_stage === "failed"))
-    .sort((left, right) => (BigInt(right.amount) > BigInt(left.amount) ? 1 : -1));
+    .sort((left, right) => {
+      const leftAmount = BigInt(left.amount);
+      const rightAmount = BigInt(right.amount);
+      if (leftAmount !== rightAmount) return leftAmount > rightAmount ? -1 : 1;
+      return left.note_commitment.localeCompare(right.note_commitment);
+    });
+}
+
+function TransferRoute({
+  from,
+  to,
+}: {
+  from: string;
+  to: string;
+}) {
+  return (
+    <div className="funding-route" aria-label={`${from} to ${to}`}>
+      <div>
+        <span>From</span>
+        <strong>{from}</strong>
+      </div>
+      <i aria-hidden="true">→</i>
+      <div>
+        <span>To</span>
+        <strong>{to}</strong>
+      </div>
+    </div>
+  );
+}
+
+function AssetPicker({
+  value,
+  options,
+  onChange,
+  compact = false,
+  active = true,
+}: {
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+  compact?: boolean;
+  active?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const listboxId = useId();
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+
+  function positionMenu() {
+    const trigger = rootRef.current?.getBoundingClientRect();
+    if (!trigger) return;
+    const menuWidth = compact ? 174 : trigger.width;
+    const left = Math.min(
+      Math.max(12, trigger.right - menuWidth),
+      window.innerWidth - menuWidth - 12
+    );
+    setMenuStyle({
+      left,
+      top: trigger.bottom + 7,
+      width: menuWidth,
+    });
+  }
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    positionMenu();
+    const trigger = rootRef.current?.getBoundingClientRect();
+    const menu = menuRef.current?.getBoundingClientRect();
+    if (!trigger || !menu) return;
+    if (trigger.bottom + 7 + menu.height > window.innerHeight - 12) {
+      setMenuStyle((current) => ({
+        ...current,
+        top: Math.max(12, trigger.top - menu.height - 7),
+      }));
+    }
+  }, [compact, open, options.length]);
+
+  useEffect(() => {
+    if (!active) setOpen(false);
+  }, [active]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        !rootRef.current?.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    const closeOnOutsideFocus = (event: FocusEvent) => {
+      const target = event.target as Node;
+      if (
+        !rootRef.current?.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    const closeOnViewportChange = () => setOpen(false);
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("focusin", closeOnOutsideFocus);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnViewportChange, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("focusin", closeOnOutsideFocus);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnViewportChange, true);
+    };
+  }, [open]);
+
+  return (
+    <div
+      className={`funding-asset-picker ${compact ? "compact" : ""}`}
+      ref={rootRef}
+    >
+      <button
+        className="funding-asset-trigger"
+        type="button"
+        role="combobox"
+        aria-label="Asset"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listboxId : undefined}
+        value={value}
+        onClick={() => {
+          if (!open) positionMenu();
+          setOpen((current) => !current);
+        }}
+      >
+        <TokenIcon token={value} size={20} />
+        <strong>{value}</strong>
+        <ChevronDownIcon className="icon-14" />
+      </button>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          id={listboxId}
+          className="funding-asset-menu portal"
+          role="listbox"
+          aria-label="Assets"
+          style={menuStyle}
+        >
+          {options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="option"
+              aria-selected={option === value}
+              className={option === value ? "selected" : ""}
+              onClick={() => {
+                onChange(option);
+                setOpen(false);
+              }}
+            >
+              <TokenIcon token={option} size={20} />
+              <strong>{option}</strong>
+              <span aria-hidden="true">{option === value ? "✓" : ""}</span>
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
 }
 
 const EXIT_STAGE_LABELS: Record<NonNullable<WithdrawableNote["exit_stage"]>, string> = {
-  requested: "Requested",
-  proving: "Proving",
-  maturing: "Waiting for the exit delay",
-  finalized: "Released to the privacy pool",
-  claiming: "Claiming",
+  requested: "Submitted",
+  proving: "Preparing",
+  maturing: "Processing",
+  finalized: "Completing",
+  claiming: "Completing",
   failed: "Failed",
 };
 
@@ -533,10 +717,15 @@ export function DepositSlide({
   );
 
   return (
-    <div className={`slide-panel ${open ? "open" : ""}`}>
+    <div
+      className={`slide-panel ${open ? "open" : ""}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Deposit"
+    >
       <div className="slide-hd">
         <span className="slide-title">Deposit</span>
-        <button className="slide-close" onClick={onClose}>
+        <button className="slide-close" aria-label="Close deposit" onClick={onClose}>
           ×
         </button>
       </div>
@@ -567,10 +756,12 @@ export function DepositSlide({
             </button>
           </div>
         )}
+        <TransferRoute from="Starknet wallet" to="Zylith balance" />
         <div className="f-row">
-          <label className="f-label">Amount</label>
+          <label className="f-label" htmlFor="deposit-amount">Amount</label>
           <div className="f-input-box">
             <input
+              id="deposit-amount"
               className="f-input"
               type="text"
               inputMode="decimal"
@@ -578,18 +769,17 @@ export function DepositSlide({
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
             />
-            <select
-              className="amount-asset-select"
+            <AssetPicker
               value={asset}
-              onChange={(e) => changeAsset(e.target.value)}
-            >
-              {allAssets.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
+              options={allAssets}
+              onChange={changeAsset}
+              compact
+              active={open}
+            />
           </div>
+        </div>
+        <div className="funding-helper">
+          Deposits stay private and are available after confirmation.
         </div>
         {error && (
           <div
@@ -701,10 +891,15 @@ export function WithdrawSlide({
   const withdrawEnabled = Boolean(!working && (!starknetAddress || !privateSessionReady || (withdrawalAvailable && selectedWithdrawNote)));
 
   return (
-    <div className={`slide-panel ${open ? "open" : ""}`}>
+    <div
+      className={`slide-panel ${open ? "open" : ""}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Withdraw"
+    >
       <div className="slide-hd">
         <span className="slide-title">Withdraw</span>
-        <button className="slide-close" onClick={onClose}>
+        <button className="slide-close" aria-label="Close withdrawal" onClick={onClose}>
           ×
         </button>
       </div>
@@ -729,57 +924,67 @@ export function WithdrawSlide({
             </button>
           </div>
         )}
-        <div className="f-row">
-          <label className="f-label">Asset</label>
-          <div className="f-input-box">
-            <select className="asset-select-input" value={asset} onChange={(e) => changeAsset(e.target.value)}>
-              {allAssets.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <div className="slide-note">
-          A withdrawal proves the note is yours, waits out a short exit delay, then returns it to the Starknet privacy pool as a private note.
-        </div>
+        <TransferRoute from="Zylith balance" to="Private Starknet balance" />
         {privateSessionReady && !withdrawalAvailable && <div className="slide-note warn">Withdrawals are not configured for this deployment.</div>}
-        {assetNotes.length > 0 && (
-          <div className="f-row">
-            <label className="f-label">Note</label>
+        <div className="f-row">
+          <div className="funding-field-head">
+            <label className="f-label">Choose amount</label>
+            <AssetPicker
+              value={asset}
+              options={allAssets}
+              onChange={changeAsset}
+              compact
+              active={open}
+            />
+          </div>
+          {assetNotes.length > 0 && (
             <div className="note-select-list">
               {assetNotes.map((note) => (
                 <button
                   key={note.note_commitment}
                   type="button"
                   className={`note-select-row ${selectedWithdrawNote?.note_commitment === note.note_commitment ? "on" : ""}`}
+                  aria-pressed={selectedWithdrawNote?.note_commitment === note.note_commitment}
                   onClick={() => setSelectedNote(note.note_commitment)}
                 >
-                  <span>
+                  <strong>
                     {safeFromAtomicStr(note.amount, asset)} {asset}
-                  </span>
-                  <span>{note.exit_stage === "failed" ? "Retry" : fmtAddr(note.note_commitment)}</span>
+                  </strong>
+                  <span>{note.exit_stage === "failed" ? "Retry" : "Ready"}</span>
                 </button>
               ))}
             </div>
-          </div>
-        )}
-        {privateSessionReady && assetNotes.length === 0 && <div className="slide-note">No {asset} notes available.</div>}
+          )}
+          {privateSessionReady && assetNotes.length === 0 && <div className="funding-empty">No {asset} available to withdraw.</div>}
+        </div>
+        <div className="funding-helper">
+          Withdrawals stay private and typically complete within a few minutes.
+        </div>
+        {error && <div style={{ fontSize: 13, color: "var(--z-status-danger)", marginBottom: 8 }}>{error}</div>}
+        <button className="slide-submit" disabled={!withdrawEnabled} onClick={() => void handleWithdraw()}>
+          {working
+            ? privateSessionReady
+              ? "Submitting…"
+              : "Authorizing…"
+            : !starknetAddress
+              ? "Connect wallet to withdraw"
+              : privateSessionReady && selectedWithdrawNote
+                ? `Withdraw ${safeFromAtomicStr(selectedWithdrawNote.amount, asset)} ${asset}`
+                : privateSessionReady
+                  ? "Withdraw"
+                  : "Authorize withdrawals"}
+        </button>
         {inProgress.length > 0 && (
-          <div className="f-row">
+          <div className="withdraw-progress-section">
             <label className="f-label">In progress</label>
             {inProgress.map((note) => (
-              <div key={note.note_commitment} className="slide-note">
-                {safeFromAtomicStr(note.amount, asset)} {asset}: {EXIT_STAGE_LABELS[note.exit_stage!]}
+              <div key={note.note_commitment} className="withdraw-progress-row">
+                <strong>{safeFromAtomicStr(note.amount, asset)} {asset}</strong>
+                <span>{EXIT_STAGE_LABELS[note.exit_stage!]}</span>
               </div>
             ))}
           </div>
         )}
-        {error && <div style={{ fontSize: 13, color: "var(--z-status-danger)", marginBottom: 8 }}>{error}</div>}
-        <button className="slide-submit" disabled={!withdrawEnabled} onClick={() => void handleWithdraw()}>
-          {working ? (privateSessionReady ? "Submitting…" : "Authorizing…") : !starknetAddress ? "Connect wallet to withdraw" : privateSessionReady ? "Withdraw" : "Authorize withdrawals"}
-        </button>
       </div>
     </div>
   );

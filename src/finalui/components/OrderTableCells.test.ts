@@ -13,8 +13,8 @@ function row(id: string, orderValueNumeric: number | null, submittedAt: number):
     filled: "0",
     orderValue: "1 USDC",
     orderValueNumeric,
-    averagePrice: "-",
-    fees: "-",
+    averagePrice: "Not filled",
+    fees: "None",
     submittedAt,
     recoveryAvailable: false,
   };

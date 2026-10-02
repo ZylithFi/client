@@ -1,7 +1,7 @@
 import type { VenueBbo } from "../lib/marketData";
 
 function formatPrice(value: number) {
-  return value > 0 ? value.toLocaleString("en-US", { maximumFractionDigits: 8 }) : "-";
+  return value > 0 ? value.toLocaleString("en-US", { maximumFractionDigits: 8 }) : "No quote";
 }
 
 export function BboFeedBar({

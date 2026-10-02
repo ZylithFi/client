@@ -71,8 +71,8 @@ export function IntentPanel({
   );
   const signedMidpoint = positiveNumber(referencePrice?.displayPrice);
   const midpoint = marketMidpoint || signedMidpoint;
-  const baseAsset = pair?.base_asset_id ?? "-";
-  const quoteAsset = pair?.quote_asset_id ?? "-";
+  const baseAsset = pair?.base_asset_id ?? "";
+  const quoteAsset = pair?.quote_asset_id ?? "";
   const payAsset = side === "buy" ? quoteAsset : baseAsset;
   const receiveAsset = side === "buy" ? baseAsset : quoteAsset;
   const numericAmount = positiveNumber(amount);
@@ -211,7 +211,7 @@ export function IntentPanel({
                   side === "buy" ? numericAmount : numericAmount * midpoint,
                   quoteAsset
                 )}`
-              : "-"}
+              : "Unavailable"}
           </span>
           <div className="quick-actions">
             <button
@@ -263,7 +263,7 @@ export function IntentPanel({
                   output,
                   receiveAsset === quoteAsset,
                 )}`
-              : "-"}
+              : "Unavailable"}
           </div>
           <button className="token-select" type="button">
             <TokenIcon token={receiveAsset} />
@@ -278,7 +278,7 @@ export function IntentPanel({
                   receiveAsset === quoteAsset ? output : output * midpoint,
                   quoteAsset
                 )}`
-              : "-"}
+              : "Unavailable"}
           </span>
           <span className="muted">Final amount is determined at execution</span>
         </div>
@@ -319,7 +319,7 @@ export function IntentPanel({
         </div>
         <div>
           <span>Fee</span>
-          <strong>{pair ? `${pair.taker_fee_bps} bps` : "-"}</strong>
+          <strong>{pair ? `${pair.taker_fee_bps} bps` : "Unavailable"}</strong>
         </div>
       </div>
 

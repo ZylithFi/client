@@ -6,7 +6,7 @@ import type { MarketStats } from "../lib/marketData";
 import { formatQuotedPrice } from "../lib/marketFormat";
 
 function displayVolume(value: number | undefined) {
-  if (!Number.isFinite(value) || !value || value < 0) return "-";
+  if (!Number.isFinite(value) || !value || value < 0) return "Unavailable";
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -34,8 +34,8 @@ export function MarketHeader({
 }) {
   const [open, setOpen] = useState(false);
   const selectorRef = useRef<HTMLDivElement | null>(null);
-  const base = pair?.base_asset_id ?? "-";
-  const quote = pair?.quote_asset_id ?? "-";
+  const base = pair?.base_asset_id ?? "";
+  const quote = pair?.quote_asset_id ?? "";
   const markPrice = marketMidpoint || marketStats?.last;
   const markets = menuMarkets(pairs);
 
@@ -99,7 +99,7 @@ export function MarketHeader({
         )}
       </div>
       <div className="market-stat market-price-stat"><span>Mark price</span><div><strong>{formatQuotedPrice(markPrice, quote)}</strong><em className="positive">Live</em></div></div>
-      <div className="market-stat"><span>24h change</span><strong className={(marketStats?.changePercent ?? 0) >= 0 ? "positive" : "negative"}>{marketStats ? `${marketStats.changePercent >= 0 ? "+" : ""}${marketStats.changePercent.toFixed(2)}%` : "-"}</strong></div>
+      <div className="market-stat"><span>24h change</span><strong className={(marketStats?.changePercent ?? 0) >= 0 ? "positive" : "negative"}>{marketStats ? `${marketStats.changePercent >= 0 ? "+" : ""}${marketStats.changePercent.toFixed(2)}%` : "Unavailable"}</strong></div>
       <div className="market-stat"><span>24h vol</span><strong>{displayVolume(marketStats?.quoteVolume)}</strong></div>
       <div className="market-stat"><span>24h high</span><strong>{formatQuotedPrice(marketStats?.high, quote)}</strong></div>
       <div className="market-stat"><span>24h low</span><strong>{formatQuotedPrice(marketStats?.low, quote)}</strong></div>

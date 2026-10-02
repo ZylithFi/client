@@ -534,7 +534,7 @@ th.filled-cell, td.filled-cell { padding-left: 22px; }
   left: 50%;
   width: min(430px, calc(100% - 36px));
   height: auto;
-  max-height: calc(100vh - 36px);
+  max-height: calc(100dvh - 36px);
   border: 1px solid var(--border-strong);
   border-radius: 5px;
   background: #08111c;
@@ -575,6 +575,7 @@ th.filled-cell, td.filled-cell { padding-left: 22px; }
   color: var(--muted);
 }
 .slide-panel .slide-body { padding: 18px; }
+.slide-panel .f-input { font-size: 16px; }
 .slide-panel .slide-submit {
   height: 43px;
   margin-top: 14px;
@@ -587,11 +588,200 @@ th.filled-cell, td.filled-cell { padding-left: 22px; }
   letter-spacing: 0;
   text-transform: none;
 }
+.slide-panel .slide-submit:disabled {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--muted-2);
+}
+.funding-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.funding-route > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.funding-route > div:last-child { text-align: right; }
+.funding-route span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.funding-route strong {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.funding-route i {
+  color: var(--accent-steel);
+  font-size: 14px;
+  font-style: normal;
+}
+.funding-helper {
+  margin: -2px 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.funding-field-head {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 6px;
+}
+.funding-field-head .f-label { margin: 0; }
+.funding-asset-picker {
+  position: relative;
+  width: 100%;
+}
+.funding-asset-picker.compact {
+  width: auto;
+  margin-left: auto;
+}
+.funding-asset-trigger {
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  color: var(--text-soft);
+  text-align: left;
+}
+.funding-asset-picker.compact .funding-asset-trigger {
+  width: auto;
+  min-width: 90px;
+  justify-content: flex-end;
+}
+.funding-asset-trigger strong {
+  flex: 1;
+  font-family: var(--z-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .03em;
+}
+.funding-asset-trigger svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+.funding-asset-trigger[aria-expanded="true"] > .icon-14 { transform: rotate(180deg); }
+.funding-asset-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 174px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .46);
+}
+.funding-asset-menu button {
+  width: 100%;
+  height: 38px;
+  display: grid;
+  grid-template-columns: 20px 1fr 16px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 9px;
+  border-radius: 3px;
+  color: var(--muted);
+  text-align: left;
+}
+.funding-asset-menu button:hover,
+.funding-asset-menu button.selected {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.funding-asset-menu strong {
+  font-family: var(--z-font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.funding-asset-menu span {
+  color: var(--logo-highlight);
+  font-size: 11px;
+  text-align: center;
+}
+.funding-empty {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.slide-panel .note-select-row {
+  min-height: 44px;
+  padding: 0 11px;
+  border-radius: 4px;
+}
+.slide-panel .note-select-row strong {
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 620;
+}
+.slide-panel .note-select-row span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.slide-panel .note-select-row.on span { color: var(--wallet-text); }
+.withdraw-progress-row {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.withdraw-progress-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.withdraw-progress-row strong {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+.withdraw-progress-row span {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
 
 @media (max-width: 590px) {
   .brand-art { width: 22px; }
   .brand-art img { height: 29px; max-width: 22px; }
   .transfer-modal { padding: 15px; }
+  .slide-panel {
+    top: 12px;
+    width: calc(100% - 24px);
+    max-height: calc(100dvh - 24px);
+    transform: translateX(-50%) scale(.985);
+  }
+  .slide-panel.open { transform: translateX(-50%) scale(1); }
+  .funding-route { gap: 8px; }
+  .funding-route strong {
+    overflow: visible;
+    line-height: 1.25;
+    text-overflow: clip;
+    white-space: normal;
+  }
 }
 
 /* disconnected wallet state */

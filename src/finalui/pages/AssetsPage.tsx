@@ -68,7 +68,7 @@ export function AssetsPage({
       locked: safeFromAtomicStr(lockedAtomic.toString(), asset, "0"),
       total,
       value: valueNumeric === null || !Number.isFinite(valueNumeric)
-        ? "-"
+        ? "Unavailable"
         : valueNumeric.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }),
       valueNumeric,
     };
@@ -82,11 +82,11 @@ export function AssetsPage({
   });
   const transferValue = (asset: string, amount: string) => {
     const unitPrice = assetUnitPrices[asset];
-    if (unitPrice === undefined) return { value: null, valueDisplay: "-" };
+    if (unitPrice === undefined) return { value: null, valueDisplay: "Unavailable" };
     const value = Number(amount.replaceAll(",", "")) * unitPrice;
     return Number.isFinite(value)
       ? { value, valueDisplay: value.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }) }
-      : { value: null, valueDisplay: "-" };
+      : { value: null, valueDisplay: "Unavailable" };
   };
   const transfers: TransferRow[] = pendingDeposits.map((deposit) => {
     const amount = safeFromAtomicStr(deposit.amount, deposit.asset, "0");
@@ -98,7 +98,7 @@ export function AssetsPage({
       amount,
       status: deposit.failed ? "Failed" as const : deposit.confirmed ? "Completed" as const : "Pending" as const,
       timestamp,
-      time: timestamp === null ? "-" : new Date(timestamp).toLocaleString(),
+      time: timestamp === null ? "Pending" : new Date(timestamp).toLocaleString(),
       ...transferValue(deposit.asset, amount),
     };
   });
@@ -112,7 +112,7 @@ export function AssetsPage({
       amount,
       status: note.spent ? "Completed" as const : note.exit_stage === "failed" ? "Failed" as const : "Pending" as const,
       timestamp,
-      time: timestamp === null ? "-" : new Date(timestamp).toLocaleString(),
+      time: timestamp === null ? "Pending" : new Date(timestamp).toLocaleString(),
       ...transferValue(note.asset, amount),
     };
   }));
@@ -192,7 +192,7 @@ export function AssetsPage({
         <div className="table-scroll">
           <table className="asset-table">
             <thead><tr><th>Asset</th><th className="numeric-cell">Available</th><th className="numeric-cell">In orders</th><th className="numeric-cell">Total</th><SortableTableHeader className="numeric-cell" label="Value" sortKey="value" activeKey={balanceValueSortDirection === null ? null : "value"} direction={balanceValueSortDirection ?? "descending"} onSort={handleBalanceValueSort}/></tr></thead>
-            <tbody>{sortedBalanceRows.map((row) => <tr key={row.asset}><td><div className="token-cell"><TokenIcon token={row.asset} size={25}/><strong>{row.asset}</strong></div></td><td className="numeric-cell">{walletReady ? row.available : "-"}</td><td className="numeric-cell">{walletReady ? row.locked : "-"}</td><td className="numeric-cell"><strong>{walletReady ? row.total : "-"}</strong></td><td className="numeric-cell">{row.value}</td></tr>)}</tbody>
+            <tbody>{sortedBalanceRows.map((row) => <tr key={row.asset}><td><div className="token-cell"><TokenIcon token={row.asset} size={25}/><strong>{row.asset}</strong></div></td><td className="numeric-cell">{row.available}</td><td className="numeric-cell">{row.locked}</td><td className="numeric-cell"><strong>{row.total}</strong></td><td className="numeric-cell">{row.value}</td></tr>)}</tbody>
           </table>
         </div>
       </section>

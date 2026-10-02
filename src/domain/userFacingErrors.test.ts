@@ -221,6 +221,18 @@ describe("userFacingErrorMessage", () => {
     ).toBe("Wallet signature timed out. Open your Starknet wallet and retry.");
   });
 
+  it("explains wallet connection timeouts as wallet actions", () => {
+    expect(
+      userFacingErrorMessage(
+        new Error(
+          "Starknet wallet request timed out. Unlock your wallet and retry."
+        )
+      )
+    ).toBe(
+      "Wallet connection timed out. Open or unlock your Starknet wallet and retry."
+    );
+  });
+
   it("explains wallet transaction timeouts as wallet actions", () => {
     expect(
       userFacingErrorMessage(
