@@ -128,6 +128,7 @@ export function PriceChart({
   const [chartStyle, setChartStyle] = useState<ChartStyle>("candles");
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const chartStyleLabel = chartStyles.find((style) => style.value === chartStyle)?.label ?? "Chart";
 
   const latestCandle = data.at(-1) ?? null;
   const activeCandle = hoveredCandle ?? latestCandle;
@@ -427,7 +428,7 @@ export function PriceChart({
           ref={containerRef}
           className="price-chart trading-chart"
           role="img"
-          aria-label={`Binance ${baseAsset} ${quoteAsset} candlesticks${latestCandle ? `, latest close ${formatQuotedPrice(latestCandle.close, quoteAsset)}` : ""}`}
+          aria-label={`Binance ${baseAsset} ${quoteAsset} ${chartStyleLabel.toLowerCase()} chart${latestCandle ? `, latest close ${formatQuotedPrice(latestCandle.close, quoteAsset)}` : ""}`}
         />
         {loading && data.length === 0 && <div className="chart-empty chart-loading">Loading market history</div>}
         {!loading && data.length === 0 && <div className="chart-empty">Price data unavailable</div>}
