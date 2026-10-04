@@ -54,32 +54,6 @@ input { font: inherit; color: inherit; background: transparent; border: 0; outli
 .f-input:focus-visible,
 .f-input-box :is(input, select, textarea):focus-visible { outline: 0; }
 
-.slide-panel {
-  position: fixed;
-  z-index: 90;
-  top: 48px;
-  right: 0;
-  bottom: 0;
-  width: min(380px, 100vw);
-  display: flex;
-  flex-direction: column;
-  pointer-events: none;
-  background: var(--z-app-surface-solid);
-  box-shadow: inset 1px 0 0 var(--z-border-md), inset 0 1px 0 var(--z-edge-top);
-  transform: translateX(100%);
-  transition: transform 220ms var(--z-ease-decel);
-}
-.slide-panel.open { transform: translateX(0); pointer-events: auto; }
-.slide-hd { flex: 0 0 44px; display: flex; align-items: center; gap: 10px; padding: 0 14px; box-shadow: inset 0 -1px 0 var(--z-border-md); }
-.slide-title { flex: 1; color: var(--z-text-strong); font-size: 14px; font-weight: 600; letter-spacing: .11em; text-transform: uppercase; }
-.slide-close { color: var(--z-text-body); font-size: 18px; line-height: 1; transition: color 120ms; }
-.slide-close:hover { color: var(--z-text-strong); }
-.slide-body { flex: 1; padding: 16px 14px; overflow-y: auto; scrollbar-width: none; }
-.slide-body::-webkit-scrollbar { display: none; }
-.slide-body textarea:focus-visible { outline: 0; box-shadow: inset 0 0 0 1px var(--z-border-lit) !important; }
-.slide-submit { display: flex; align-items: center; justify-content: center; width: 100%; height: 40px; margin-top: 14px; background: var(--z-accent); color: var(--z-text-strong); font-size: 14px; font-weight: 600; letter-spacing: .10em; text-transform: uppercase; transition: background 150ms; }
-.slide-submit:hover:not(:disabled) { background: var(--z-accent-mid); }
-.slide-submit:disabled { cursor: not-allowed; background: var(--z-app-elevated-solid); color: var(--z-text-muted); }
 .slide-note { margin-top: 10px; color: var(--z-text-body); font-size: 13px; line-height: 1.5; }
 .slide-note.warn { margin: 0 0 12px; color: var(--z-status-warn); }
 .slide-inline-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 38px; margin: 0 0 14px; padding: 0 0 12px; box-shadow: inset 0 -1px 0 var(--z-border); color: var(--z-text-body); font-size: 13px; line-height: 1.4; }

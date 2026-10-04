@@ -1,5 +1,5 @@
 import { Brand } from "./Brand";
-import { ChevronDownIcon, WalletIcon } from "./Icons";
+import { WalletIcon } from "./Icons";
 import { TokenIcon } from "./TokenIcon";
 import { fmtAddr } from "../../domain/browserWallet";
 
@@ -49,11 +49,10 @@ export function AppHeader({
         ))}
       </nav>
       <div className="header-actions">
-        <button className="network-button" type="button" aria-label="Network: Starknet Sepolia">
+        <div className="network-button" role="status" aria-label="Network: Starknet">
           <TokenIcon token="STRK" size={19} />
           <span className="network-name">Starknet</span>
-          <ChevronDownIcon className="icon-16" />
-        </button>
+        </div>
         <button className="wallet-button" type="button" aria-label={walletLabel} onClick={onWallet}>
           <WalletIcon className="icon-16" />
           <span>{walletLabel}</span>

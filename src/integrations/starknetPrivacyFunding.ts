@@ -44,17 +44,18 @@ import {
   isUserRejected,
   isWalletCallShapeError,
   isWalletRequestUnavailableError,
+  markProofSubmissionStarted,
+  markProofSubmissionRejected,
   summarizeFundingError,
 } from "./starknetPrivacyErrors";
 import {
   paymasterExecuteUrl,
-  paymasterPrivacySignerEnsureUrl,
   paymasterPrivacySignerRelayUrl,
   serviceBaseUrl,
   transactionHashFromResult,
 } from "./starknetPrivacyTransport";
 import { runProofDelayRetryLoop } from "./starknetPrivacyProofRetry";
-import { requestStarknetWalletTypedSignature } from "../wallet/starknetProvider";
+import { ensureWalletChain } from "../wallet/starknetProvider";
 
 type StarknetProviderLike = {
   account?: {
@@ -157,7 +158,6 @@ export type SubmitPrivacyOpenNoteWithdrawalResult = {
 
 export type SubmitResidualRecoveryInput = {
   provider?: StarknetProviderLike;
-  sponsorAddress?: string;
   seedHex: string;
   chainId: string;
   rpcUrl: string;
@@ -177,12 +177,8 @@ export async function submitResidualRecovery(
   const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
   const account = await createEmbeddedPrivacyProofAccount({
     provider: input.provider,
-    sponsorAddress: input.sponsorAddress,
     seedHex: input.seedHex,
-    chainId: input.chainId,
     rpcProvider,
-    paymasterUrl: input.paymasterUrl,
-    paymasterAddress: input.paymasterAddress,
     privacyProofSignerClassHash: input.privacyProofSignerClassHash,
     minProvingDelayBlocks: input.minProvingDelayBlocks,
   });
@@ -215,6 +211,8 @@ export async function submitResidualRecovery(
     paymasterAddress: input.paymasterAddress,
     paymasterUrl: input.paymasterUrl,
     callAndProof: { call: input.settlementCall, proof },
+  }).catch((error) => {
+    throw markProofSubmissionStarted(error);
   });
   return { transactionHash };
 }
@@ -383,10 +381,7 @@ export async function warmUpStarknetPrivacyFunding(
   const account = await createEmbeddedPrivacyProofAccount({
     provider: input.provider,
     seedHex: input.seedHex,
-    chainId: input.chainId,
     rpcProvider,
-    paymasterUrl: input.paymasterUrl,
-    paymasterAddress: input.paymasterAddress,
     privacyProofSignerClassHash: input.privacyProofSignerClassHash,
     minProvingDelayBlocks: delayBlocks,
   });
@@ -462,12 +457,8 @@ async function submitPrivacyBridgeDepositViaProver(
     () =>
       createEmbeddedPrivacyProofAccount({
         provider: input.provider,
-        sponsorAddress: depositorAddress,
         seedHex: input.seedHex,
-        chainId: input.chainId,
         rpcProvider,
-        paymasterUrl: input.paymasterUrl,
-        paymasterAddress: input.paymasterAddress,
         privacyProofSignerClassHash: input.privacyProofSignerClassHash,
         minProvingDelayBlocks: txDelayBlocks,
       })
@@ -586,6 +577,8 @@ async function submitPrivacyBridgeDepositViaProver(
             paymasterAddress: input.paymasterAddress,
             paymasterUrl: input.paymasterUrl,
             callAndProof: execution.callAndProof,
+          }).catch((error) => {
+            throw markProofSubmissionStarted(error);
           })
       );
       return {
@@ -610,10 +603,7 @@ export async function submitPrivacyOpenNoteWithdrawal(
     () =>
       createEmbeddedPrivacyProofAccount({
         seedHex: input.seedHex,
-        chainId: input.chainId,
         rpcProvider,
-        paymasterUrl: input.paymasterUrl,
-        paymasterAddress: input.paymasterAddress,
         privacyProofSignerClassHash: input.privacyProofSignerClassHash,
         minProvingDelayBlocks: txDelayBlocks,
       })
@@ -718,6 +708,8 @@ export async function submitPrivacyOpenNoteWithdrawal(
             paymasterAddress: input.paymasterAddress,
             paymasterUrl: input.paymasterUrl,
             callAndProof: execution.callAndProof,
+          }).catch((error) => {
+            throw markProofSubmissionStarted(error);
           })
       );
       return {
@@ -1004,6 +996,11 @@ async function ensureEmbeddedPrivacyAccountReady(input: {
       entrypoint: "transfer",
       calldata: [input.account.address, ...u256Calldata(transferAmount)],
     };
+    await ensureWalletChain(input.provider as never, {
+      chain_id: input.chainId,
+      network: "",
+      rpc_url: "",
+    });
     const result = await withFundingSetupStep(
       "funding deposit session from connected wallet",
       () =>
@@ -1136,8 +1133,8 @@ async function ensureReusablePrivacyPoolApproval(input: {
     },
     "Transaction relay approval request timed out before returning a transaction hash"
   );
-  const txHash = json.transaction_hash ?? json.transactionHash;
-  if (!txHash) {
+  const txHash = normalizeStrictFelt(json.transaction_hash ?? json.transactionHash);
+  if (!txHash || txHash === "0x0") {
     throw new Error(
       "Transaction relay did not return an approval transaction hash"
     );
@@ -1200,10 +1197,7 @@ async function postFundingRelayJson<T>(
       STARKNET_PRIVACY_RELAY_REQUEST_TIMEOUT_MS
     );
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === "Runtime request timed out"
-    ) {
+    if (errorMessage(error) === "Runtime request timed out") {
       throw new Error(timeoutMessage);
     }
     if (isFundingRelayNetworkError(error)) {
@@ -1220,9 +1214,9 @@ async function postFundingRelayJson<T>(
       label: "Private relay error response",
     }).catch(() => "");
     const detail = sanitizeFundingRelayErrorBody(text);
-    throw new Error(
+    throw markProofSubmissionRejected(new Error(
       detail || `Private relay request failed with HTTP ${response.status}`
-    );
+    ));
   }
   return (await readSdkJsonResponse(response, {
     timeoutMs: Math.max(1, deadline - Date.now()),
@@ -1254,17 +1248,11 @@ export function sanitizeFundingRelayErrorBody(text: string) {
 }
 
 function isFundingRelayNetworkError(error: unknown): boolean {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-      ? error
-      : "";
+  const message = errorMessage(error);
+  const name = safeWalletValue(error, "name");
   return (
-    (error instanceof DOMException &&
-      (error.name === "AbortError" || error.name === "TimeoutError")) ||
-    (error instanceof Error &&
-      (error.name === "AbortError" || error.name === "TimeoutError")) ||
+    name === "AbortError" ||
+    name === "TimeoutError" ||
     /signal is aborted|aborted without reason|aborterror|timeouterror|operation was aborted|failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
       message
     )
@@ -1279,7 +1267,7 @@ export async function executeWalletCall(
   provider: StarknetProviderLike,
   call: Call
 ) {
-  if (typeof provider.request !== "function") {
+  if (typeof safeWalletValue(provider, "request") !== "function") {
     throw new Error("Selected Starknet wallet cannot approve private deposits");
   }
   return requestWalletInvoke(provider, call);
@@ -1292,11 +1280,12 @@ async function requestWalletInvoke(provider: StarknetProviderLike, call: Call) {
     calldata: call.calldata ?? [],
   };
   try {
-    const request = provider.request?.call(provider, {
+    const providerRequest = safeWalletValue(provider, "request");
+    if (typeof providerRequest !== "function") return undefined;
+    const request = Promise.resolve().then(() => providerRequest.call(provider, {
       type: "wallet_addInvokeTransaction",
       params: { calls: [walletRequestCall] },
-    });
-    if (!request) return undefined;
+    }));
     return await withTimeout(
       request,
       STARKNET_PRIVACY_WALLET_EXECUTE_TIMEOUT_MS,
@@ -1310,11 +1299,11 @@ async function requestWalletInvoke(provider: StarknetProviderLike, call: Call) {
     ) {
       throw error;
     }
-    throw error instanceof Error
-      ? error
-      : new Error(
-          "Selected Starknet wallet rejected the deposit transaction shape"
-        );
+    const message = errorMessage(error);
+    throw new Error(
+      message || "Selected Starknet wallet rejected the deposit transaction shape",
+      { cause: error },
+    );
   }
 }
 
@@ -1401,9 +1390,10 @@ async function submitProofBearingCall(input: {
     "Transaction relay request timed out before returning a transaction hash"
   );
   const hash = json.transaction_hash ?? json.transactionHash;
-  if (!hash)
+  const normalizedHash = normalizeStrictFelt(hash);
+  if (!normalizedHash || normalizedHash === "0x0")
     throw new Error("Transaction relay did not return a transaction hash");
-  return hash;
+  return normalizedHash;
 }
 
 type EmbeddedPrivacyProofAccount = {
@@ -1414,34 +1404,23 @@ type EmbeddedPrivacyProofAccount = {
 
 async function createEmbeddedPrivacyProofAccount(input: {
   provider?: StarknetProviderLike;
-  sponsorAddress?: string;
   seedHex: string;
-  chainId: string;
   rpcProvider: RpcProvider;
-  paymasterUrl?: string;
-  paymasterAddress?: string;
   privacyProofSignerClassHash?: string;
   minProvingDelayBlocks: number;
 }): Promise<EmbeddedPrivacyProofAccount> {
   if (!input.privacyProofSignerClassHash) {
     throw new Error("Private deposit signer deployment is not configured");
   }
-  if (!input.paymasterUrl) {
-    throw new Error("Transaction relay is not configured for signer setup");
-  }
   const privateKey = await derivePrivacyProofSignerPrivateKey(input.seedHex);
   const signer = new Signer(privateKey);
   const publicKey = normalizeAddress(await signer.getPubKey());
   const salt = await derivePrivacyProofSignerSalt(input.seedHex);
   const existingAddress = await ensurePrivacyProofSignerContract({
-    paymasterUrl: input.paymasterUrl,
     signerPublicKey: publicKey,
     salt,
     classHash: input.privacyProofSignerClassHash,
-    chainId: input.chainId,
-    paymasterAddress: input.paymasterAddress,
     provider: input.provider,
-    sponsorAddress: input.sponsorAddress,
     rpcProvider: input.rpcProvider,
     minProvingDelayBlocks: input.minProvingDelayBlocks,
   });
@@ -1453,157 +1432,47 @@ async function createEmbeddedPrivacyProofAccount(input: {
 }
 
 async function ensurePrivacyProofSignerContract(input: {
-  paymasterUrl: string;
   signerPublicKey: string;
   salt: string;
   classHash: string;
-  chainId: string;
-  paymasterAddress?: string;
   provider?: StarknetProviderLike;
-  sponsorAddress?: string;
   rpcProvider: RpcProvider;
   minProvingDelayBlocks: number;
 }) {
-  type EnsureResponse = {
-    contract_address?: string;
-    deployed?: boolean;
-    transaction_hash?: string;
-  };
-  const url = paymasterPrivacySignerEnsureUrl(input.paymasterUrl);
-  const baseRequest = {
-    signer_public_key: input.signerPublicKey,
-    salt: input.salt,
-    class_hash: input.classHash,
-  };
-  let json: EnsureResponse;
-  try {
-    json = await postFundingRelayJson<EnsureResponse>(
-      url,
-      baseRequest,
-      "Transaction relay signer setup timed out before returning a signer address"
-    );
-  } catch (error) {
-    if (!/signer deployment authorization required/i.test(errorMessage(error))) {
-      throw error;
+  const expectedAddress = normalizeAddress(hash.calculateContractAddressFromHash(
+    input.salt,
+    input.classHash,
+    [input.signerPublicKey],
+    0,
+  ));
+  if (!expectedAddress) {
+    throw new Error("Private signer configuration produced an invalid address");
+  }
+  const existingClassHash = await input.rpcProvider
+    .getClassHashAt(expectedAddress, "pre_confirmed")
+    .catch(() => input.rpcProvider.getClassHashAt(expectedAddress, "latest"))
+    .catch(() => null);
+  if (existingClassHash) {
+    if (!sameFelt(existingClassHash, input.classHash)) {
+      throw new Error("Private signer address has an unexpected class");
     }
-    if (!input.provider || !input.sponsorAddress || !input.paymasterAddress) {
-      throw new Error(
-        "Connect a Starknet wallet to authorize private signer deployment"
-      );
-    }
-    const nonce = randomFelt();
-    const expiresAt = String(Math.floor(Date.now() / 1000) + 5 * 60);
-    const typedData = privacySignerDeploymentSponsorshipTypedData({
-      chainId: input.chainId,
-      paymasterAddress: input.paymasterAddress,
-      signerPublicKey: input.signerPublicKey,
-      salt: input.salt,
-      classHash: input.classHash,
-      nonce,
-      expiresAt,
-    });
-    const rawSignature = await requestStarknetWalletTypedSignature(
-      input.provider as never,
-      typedData
-    );
-    json = await postFundingRelayJson<EnsureResponse>(
-      url,
-      {
-        ...baseRequest,
-        sponsor_address: input.sponsorAddress,
-        sponsor_signature: normalizeWalletSignatureFelts(rawSignature),
-        sponsor_nonce: nonce,
-        sponsor_expires_at: expiresAt,
-      },
-      "Transaction relay signer setup timed out before returning a signer address"
-    );
+    return expectedAddress;
   }
-  const address = normalizeAddress(json.contract_address);
-  if (!address) {
-    throw new Error("Transaction relay did not return a proof signer address");
+  if (!input.provider) {
+    throw new Error("Connect a Starknet wallet to deploy the private signer");
   }
-  if (json.deployed) {
-    await waitForStateAndProvingDelay(
-      input.rpcProvider,
-      () => isClassDeployed(input.rpcProvider, address),
-      input.minProvingDelayBlocks,
-      "embedded proof signer deployment"
-    );
-  }
-  return address;
-}
-
-export function privacySignerDeploymentSponsorshipTypedData(input: {
-  chainId: string;
-  paymasterAddress: string;
-  signerPublicKey: string;
-  salt: string;
-  classHash: string;
-  nonce: string;
-  expiresAt: string;
-}) {
-  return {
-    types: {
-      StarknetDomain: [
-        { name: "name", type: "shortstring" },
-        { name: "version", type: "shortstring" },
-        { name: "chainId", type: "shortstring" },
-        { name: "revision", type: "shortstring" },
-      ],
-      ZylithSignerSponsorship: [
-        { name: "action", type: "shortstring" },
-        { name: "paymaster", type: "ContractAddress" },
-        { name: "signerPublicKey", type: "felt" },
-        { name: "salt", type: "felt" },
-        { name: "classHash", type: "felt" },
-        { name: "nonce", type: "felt" },
-        { name: "expiresAt", type: "u64" },
-      ],
-    },
-    primaryType: "ZylithSignerSponsorship",
-    domain: {
-      name: "Zylith",
-      version: "1",
-      chainId: input.chainId,
-      revision: "1",
-    },
-    message: {
-      action: "DeploySigner",
-      paymaster: input.paymasterAddress,
-      signerPublicKey: input.signerPublicKey,
-      salt: input.salt,
-      classHash: input.classHash,
-      nonce: input.nonce,
-      expiresAt: input.expiresAt,
-    },
-  };
-}
-
-function normalizeWalletSignatureFelts(value: unknown): string[] {
-  let entries: unknown[];
-  if (Array.isArray(value)) {
-    entries = value;
-  } else if (value && typeof value === "object") {
-    const signature = value as { r?: unknown; s?: unknown };
-    entries = signature.r !== undefined && signature.s !== undefined
-      ? [signature.r, signature.s]
-      : [];
-  } else {
-    entries = [];
-  }
-  const normalized = entries.map((entry) =>
-    normalizeStrictFelt(
-      typeof entry === "bigint" ? entry.toString() : String(entry ?? "")
-    )
+  await executeWalletCall(input.provider, {
+    contractAddress: constants.UDC.ADDRESS,
+    entrypoint: constants.UDC.ENTRYPOINT,
+    calldata: [input.classHash, input.salt, "0x0", "0x1", input.signerPublicKey],
+  });
+  await waitForStateAndProvingDelay(
+    input.rpcProvider,
+    () => isClassDeployed(input.rpcProvider, expectedAddress),
+    input.minProvingDelayBlocks,
+    "embedded proof signer deployment"
   );
-  if (
-    normalized.length === 0 ||
-    normalized.length > 8 ||
-    normalized.some((entry) => !entry)
-  ) {
-    throw new Error("Connected Starknet wallet returned an invalid signature");
-  }
-  return normalized;
+  return expectedAddress;
 }
 
 function proofDetailsForCall(callAndProof: CallAndProof) {
@@ -1618,8 +1487,19 @@ function proofDetailsForCall(callAndProof: CallAndProof) {
 }
 
 function decodeU256(values: unknown[]) {
-  const low = BigInt(String(values[0] ?? "0"));
-  const high = BigInt(String(values[1] ?? "0"));
+  if (!Array.isArray(values) || values.length !== 2) {
+    throw new Error("Token contract returned a malformed u256 value");
+  }
+  const normalizedLow = normalizeStrictFelt(values[0]);
+  const normalizedHigh = normalizeStrictFelt(values[1]);
+  if (!normalizedLow || !normalizedHigh) {
+    throw new Error("Token contract returned a malformed u256 value");
+  }
+  const low = BigInt(normalizedLow);
+  const high = BigInt(normalizedHigh);
+  if (low > STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT || high > STARKNET_PRIVACY_REUSABLE_APPROVAL_AMOUNT) {
+    throw new Error("Token contract returned an out-of-range u256 value");
+  }
   return low + (high << 128n);
 }
 
@@ -1698,12 +1578,13 @@ async function waitForBlock(
 }
 
 function randomFelt() {
-  const bytes = new Uint8Array(30);
-  crypto.getRandomValues(bytes);
-  const hex = Array.from(bytes, (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
-  return `0x${hex || "0"}`;
+  for (;;) {
+    const bytes = crypto.getRandomValues(new Uint8Array(30));
+    if (!bytes.some((byte) => byte !== 0)) continue;
+    return `0x${Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("")}`;
+  }
 }
 
 function privacyProofSignerRelayHash(
@@ -1778,30 +1659,58 @@ function normalizeAddress(value: unknown) {
   return normalizeStrictFelt(value);
 }
 
-function addressFromUnknown(value: unknown): string | null {
-  if (typeof value === "string" && value.trim()) return value;
-  if (Array.isArray(value)) {
+function safeWalletValue(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeIsArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+function addressFromUnknown(
+  value: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet<object>(),
+  budget: { remaining: number } = { remaining: 32 },
+): string | null {
+  if (depth > 8 || budget.remaining <= 0) return null;
+  if (typeof value === "string") return normalizeAddress(value) || null;
+  if (safeIsArray(value)) {
+    if (seen.has(value)) return null;
+    seen.add(value);
+    budget.remaining -= 1;
     for (const item of value) {
-      const address = addressFromUnknown(item);
+      const address = addressFromUnknown(item, depth + 1, seen, budget);
       if (address) return address;
     }
     return null;
   }
   if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  budget.remaining -= 1;
   return (
-    addressFromUnknown(record.address) ??
-    addressFromUnknown(record.selectedAddress) ??
-    addressFromUnknown(record.account) ??
-    addressFromUnknown(record.accounts)
+    addressFromUnknown(safeWalletValue(value, "address"), depth + 1, seen, budget) ??
+    addressFromUnknown(safeWalletValue(value, "selectedAddress"), depth + 1, seen, budget) ??
+    addressFromUnknown(safeWalletValue(value, "account"), depth + 1, seen, budget) ??
+    addressFromUnknown(safeWalletValue(value, "accounts"), depth + 1, seen, budget)
   );
 }
 
 function connectedStarknetAddress(provider: StarknetProviderLike) {
   return normalizeAddress(
-    provider.account?.address ??
-      provider.selectedAddress ??
-      addressFromUnknown(provider.accounts)
+    safeWalletValue(safeWalletValue(provider, "account"), "address") ??
+      safeWalletValue(provider, "selectedAddress") ??
+      addressFromUnknown(safeWalletValue(provider, "accounts"))
   );
 }
 
@@ -1820,13 +1729,14 @@ async function requestWalletAccounts(
   provider: StarknetProviderLike,
   silent: boolean
 ) {
-  if (!provider.request) return null;
+  const providerRequest = safeWalletValue(provider, "request");
+  if (typeof providerRequest !== "function") return null;
   const attempts = [
     { type: "wallet_requestAccounts", params: { silent_mode: silent } },
   ];
   for (const request of attempts) {
     const result = await withWalletAccountRequestTimeout(
-      provider.request.call(provider, request),
+      Promise.resolve().then(() => providerRequest.call(provider, request)),
       silent
         ? WALLET_ACCOUNT_SILENT_REQUEST_TIMEOUT_MS
         : WALLET_ACCOUNT_INTERACTIVE_REQUEST_TIMEOUT_MS
@@ -1866,10 +1776,7 @@ async function withWalletAccountRequestTimeout<T>(
 }
 
 function isWalletAccountRequestTimeout(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /Starknet wallet request timed out/i.test(error.message)
-  );
+  return /Starknet wallet request timed out/i.test(errorMessage(error));
 }
 
 async function derivePrivacyViewingKey(seedHex: string) {

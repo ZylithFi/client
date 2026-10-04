@@ -15,18 +15,12 @@ describe("e2eHooksEnabled", () => {
     ).toBe(true);
   });
 
-  it("allows explicit e2e hook builds", () => {
+  it("cannot expose hooks in a production build", () => {
     expect(
       e2eHooksEnabled({
         search: "?e2e",
-        env: { DEV: false, VITE_ZYLITH_ENABLE_E2E_HOOKS: "1" },
+        env: { DEV: false },
       }),
-    ).toBe(true);
-  });
-
-  it("keeps production builds closed by default", () => {
-    expect(
-      e2eHooksEnabled({ search: "?e2e", env: { DEV: false } }),
     ).toBe(false);
   });
 });

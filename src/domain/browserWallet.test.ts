@@ -64,7 +64,7 @@ describe("browser wallet selection", () => {
       xverse?: unknown;
     }).starknet = undefined;
     (window as typeof window & { starknetProviders?: unknown }).starknetProviders = undefined;
-    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = undefined;
+    delete (window as typeof window & { starknet_ready?: unknown }).starknet_ready;
     (window as typeof window & { starknet_argentX?: unknown }).starknet_argentX = undefined;
     (window as typeof window & { starknet_xverse?: unknown }).starknet_xverse = undefined;
     (window as typeof window & { argentX?: unknown }).argentX = undefined;
@@ -119,6 +119,80 @@ describe("browser wallet selection", () => {
     const wallet = provider("not-a-felt");
 
     await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBeNull();
+    expect(connectedStarknetAddress()).toBeNull();
+  });
+
+  it("rejects cyclic wallet account responses without overflowing", async () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.account = cyclic;
+    const wallet = {
+      id: "ready",
+      name: "Ready",
+      request: vi.fn(async () => cyclic),
+    };
+
+    await expect(
+      connectStarknetProvider(wallet as never, wallet.id),
+    ).resolves.toBeNull();
+    expect(connectedStarknetAddress()).toBeNull();
+  });
+
+  it("does not crash while classifying a revoked provider error", async () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const wallet = {
+      id: "ready",
+      name: "Ready",
+      request: vi.fn(async () => { throw proxy; }),
+    };
+
+    let rejectedOriginal = false;
+    try {
+      await connectStarknetProvider(wallet as never, wallet.id);
+    } catch (error) {
+      rejectedOriginal = error === proxy;
+    }
+    expect(rejectedOriginal).toBe(true);
+  });
+
+  it("isolates throwing provider fields during discovery and account parsing", async () => {
+    const broken = Object.defineProperties({}, {
+      id: { get: () => { throw new Error("broken id getter"); } },
+      name: { get: () => { throw new Error("broken name getter"); } },
+      request: { get: () => { throw new Error("broken request getter"); } },
+      account: { get: () => { throw new Error("broken account getter"); } },
+    });
+    const ready = provider("0x456");
+    ready.id = "ready";
+    ready.name = "Ready";
+    (window as typeof window & { starknetProviders?: unknown }).starknetProviders = {
+      broken,
+      ready,
+    };
+
+    expect(discoverStarknetWallets()).toEqual([
+      expect.objectContaining({ id: "ready", provider: ready }),
+    ]);
+    await expect(connectStarknetProvider(ready as never, ready.id)).resolves.toBe("0x456");
+  });
+
+  it("treats throwing account getters as unavailable instead of crashing", () => {
+    const wallet = {
+      id: "ready",
+      name: "Ready",
+      request: vi.fn(async () => null),
+      get account(): never {
+        throw new Error("broken account getter");
+      },
+      get selectedAddress(): never {
+        throw new Error("broken selected address getter");
+      },
+    };
+    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = wallet;
+
+    expect(discoverStarknetWallets()).toEqual([
+      expect.objectContaining({ id: "ready", provider: wallet }),
+    ]);
     expect(connectedStarknetAddress()).toBeNull();
   });
 
@@ -198,6 +272,54 @@ describe("browser wallet selection", () => {
       type: "wallet_requestAccounts",
       params: { silent_mode: true },
     });
+  });
+
+  it("does not let a stale silent restore replace a newly selected wallet", async () => {
+    let finishRestore: ((value: Array<{ address: string }> | null) => void) | undefined;
+    const oldWallet = provider("0x111") as Omit<ReturnType<typeof provider>, "account" | "request"> & {
+      account?: { address: string };
+      request: (request: { type?: string; params?: { silent_mode?: boolean } }) => Promise<unknown>;
+    };
+    oldWallet.id = "ready";
+    await connectStarknetProvider(oldWallet as never, oldWallet.id);
+    delete oldWallet.account;
+    oldWallet.request = vi.fn(({ type, params }: { type?: string; params?: { silent_mode?: boolean } }) => {
+      if (type === "wallet_requestAccounts" && params?.silent_mode) {
+        return new Promise((resolve) => { finishRestore = resolve; });
+      }
+      return Promise.resolve(null);
+    });
+
+    const staleRestore = restoreConnectedStarknetWallet();
+    const newWallet = provider("0x222");
+    newWallet.id = "xverse";
+    await expect(connectStarknetProvider(newWallet as never, newWallet.id)).resolves.toBe("0x222");
+    finishRestore?.([{ address: "0x111" }]);
+
+    await expect(staleRestore).resolves.toBeNull();
+    expect(selectedStarknetProvider()).toBe(newWallet);
+    expect(connectedStarknetAddress()).toBe("0x222");
+  });
+
+  it("does not retain a provider discovered after the user clears wallet state", async () => {
+    const wallet = provider("0x333");
+    wallet.id = "ready";
+    let reads = 0;
+    Object.defineProperty(window, "starknet_ready", {
+      configurable: true,
+      get() {
+        reads += 1;
+        return reads > 2 ? wallet : undefined;
+      },
+    });
+    window.sessionStorage.setItem(selectedWalletKey, wallet.id);
+
+    const staleRestore = restoreConnectedStarknetWallet();
+    clearSelectedStarknetProvider();
+
+    await expect(staleRestore).resolves.toBeNull();
+    expect(selectedStarknetProvider()).toBeNull();
+    expect(connectedStarknetAddress()).toBeNull();
   });
 
   it("discovers Ready and Xverse from object registries and ranks Ready first", () => {

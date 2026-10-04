@@ -20,6 +20,7 @@ export const zylith_wallet_recover_order_residuals: (a: number, b: number) => [n
 export const zylith_wallet_recovery_auth_tag: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_registry_fingerprint: (a: number, b: number) => [number, number, number, number];
 export const zylith_wallet_sign_strk20_exit_claim: (a: number, b: number) => [number, number, number, number];
+export const zylith_wallet_transition_output_root: (a: number, b: number) => [number, number, number, number];
 export const init: () => void;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;

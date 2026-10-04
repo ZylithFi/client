@@ -9,6 +9,7 @@ export type PairConfig = {
   base_asset_id: string;
   quote_asset_id: string;
   min_order_amount: string;
+  min_order_quote_amount: string;
   price_base_scale?: string;
   taker_fee_bps?: number;
   enabled: boolean;
@@ -437,13 +438,6 @@ function bps(delta: number, base: number): number {
 
 function normalizePair(pair: string): string {
   return pair.replace(/[-_]/g, "/").toUpperCase();
-}
-
-function isNonZeroHexFelt(value: string | undefined): boolean {
-  if (typeof value !== "string") return false;
-  const trimmed = value.trim();
-  if (!/^0x[0-9a-fA-F]+$/.test(trimmed)) return false;
-  return BigInt(trimmed) !== 0n;
 }
 
 function numberValue(value: unknown): number {

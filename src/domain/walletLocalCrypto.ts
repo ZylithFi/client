@@ -1,8 +1,8 @@
-export type WalletSignatureMessageVersion = 1;
+export type WalletSignatureMessageVersion = 2;
 
 export type WalletSignatureVaultRecord = {
-  version: 1;
-  kdf: "wallet-signature-sha256-v1";
+  version: 2;
+  kdf: "wallet-signature-sha256-v2";
   algorithm: "AES-GCM";
   wallet_address: string;
   chain_id: string;
@@ -30,6 +30,9 @@ export type EncryptedLocalStore = {
   nonce: string;
   ciphertext: string;
 };
+
+const MAX_LOCAL_STORE_CIPHERTEXT_BYTES = 4 * 1024 * 1024;
+const AES_GCM_TAG_BYTES = 16;
 
 const WALLET_SIGNATURE_VAULT_KEYS = new Set([
   "version",
@@ -59,8 +62,8 @@ export async function encryptSeedWithWalletSignature(
       plaintext,
     );
     return {
-      version: 1,
-      kdf: "wallet-signature-sha256-v1",
+      version: 2,
+      kdf: "wallet-signature-sha256-v2",
       algorithm: "AES-GCM",
       wallet_address: normalizedContext.walletAddress,
       chain_id: normalizedContext.chainId,
@@ -113,7 +116,7 @@ export async function walletSignatureVaultId(
 ): Promise<string> {
   const authToken = await walletSignatureVaultAuthToken(context);
   const digest = await sha256(
-    `zylith/wallet-signature-vault/id/v1:${authToken}`,
+    `zylith/wallet-signature-vault/id/v2:${authToken}`,
   );
   return `0x${Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -125,7 +128,7 @@ export async function walletSignatureVaultAuthToken(
 ): Promise<string> {
   const normalizedContext = normalizeWalletSignatureVaultContext(context);
   const digest = await sha256(
-    `zylith/wallet-signature-vault/auth/v1:${walletSignatureVaultKeyMaterial(normalizedContext)}`,
+    `zylith/wallet-signature-vault/auth/v2:${walletSignatureVaultKeyMaterial(normalizedContext)}`,
   );
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -133,22 +136,31 @@ export async function walletSignatureVaultAuthToken(
 }
 
 export function isWalletSignatureVaultRecord(
-  vault: VaultRecord | null | undefined,
+  vault: unknown,
 ): vault is WalletSignatureVaultRecord {
   return (
     isPlainObject(vault) &&
     Object.keys(vault).every((key) => WALLET_SIGNATURE_VAULT_KEYS.has(key)) &&
-    vault?.version === 1 &&
-    vault.kdf === "wallet-signature-sha256-v1" &&
+    vault.version === 2 &&
+    vault.kdf === "wallet-signature-sha256-v2" &&
     vault.algorithm === "AES-GCM" &&
     typeof vault.wallet_address === "string" &&
     typeof vault.chain_id === "string" &&
     typeof vault.deployment_id === "string" &&
     typeof vault.origin === "string" &&
-    vault.message_version === 1 &&
-    typeof vault.nonce === "string" &&
-    typeof vault.ciphertext === "string"
+    vault.message_version === 2 &&
+    validBase64Bytes(vault.nonce, 12, 12) &&
+    validBase64Bytes(vault.ciphertext, 80, 80)
   );
+}
+
+export function isEncryptedLocalStoreRecord(value: unknown): value is EncryptedLocalStore {
+  return isPlainObject(value)
+    && Object.keys(value).every((key) => ["version", "algorithm", "nonce", "ciphertext"].includes(key))
+    && value.version === 1
+    && value.algorithm === "AES-GCM"
+    && validBase64Bytes(value.nonce, 12, 12)
+    && validBase64Bytes(value.ciphertext, 16, MAX_LOCAL_STORE_CIPHERTEXT_BYTES);
 }
 
 export function walletSignatureVaultMetadataMatches(
@@ -184,11 +196,17 @@ export async function encryptLocalStore(
   const key = await deriveLocalStoreKey(seedHex, accountId, label);
   const plaintext = new TextEncoder().encode(JSON.stringify(value));
   try {
+    if (plaintext.byteLength + AES_GCM_TAG_BYTES > MAX_LOCAL_STORE_CIPHERTEXT_BYTES) {
+      throw new Error("Encrypted local store is too large");
+    }
     const ciphertext = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: nonce },
       key,
       plaintext,
     );
+    if (ciphertext.byteLength > MAX_LOCAL_STORE_CIPHERTEXT_BYTES) {
+      throw new Error("Encrypted local store is too large");
+    }
     return {
       version: 1,
       algorithm: "AES-GCM",
@@ -206,6 +224,7 @@ export async function decryptLocalStore<T>(
   accountId: string,
   label: string,
 ): Promise<T> {
+  if (!isEncryptedLocalStoreRecord(store)) throw new Error("Encrypted local store is malformed");
   const key = await deriveLocalStoreKey(seedHex, accountId, label);
   const plaintext = new Uint8Array(
     await crypto.subtle.decrypt(
@@ -251,6 +270,18 @@ function base64ToBytes(value: string) {
   return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
 }
 
+function validBase64Bytes(value: unknown, minBytes: number, maxBytes: number): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > Math.ceil(maxBytes / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    return false;
+  }
+  try {
+    const length = atob(value).length;
+    return length >= minBytes && length <= maxBytes;
+  } catch {
+    return false;
+  }
+}
+
 async function deriveLocalStoreKey(
   seedHex: string,
   accountId: string,
@@ -286,7 +317,7 @@ async function deriveWalletSignatureVaultKey(
 ) {
   const material = new Uint8Array(
     await sha256(
-      `zylith/wallet-signature-vault/encryption/v1:${walletSignatureVaultKeyMaterial(context)}`,
+      `zylith/wallet-signature-vault/encryption/v2:${walletSignatureVaultKeyMaterial(context)}`,
     ),
   );
   try {
@@ -319,7 +350,7 @@ function normalizeWalletSignatureVaultContext(
     !normalized.chainId ||
     !normalized.deploymentId ||
     !normalized.origin ||
-    normalized.messageVersion !== 1 ||
+    normalized.messageVersion !== 2 ||
     !signatureMaterialPresent(normalized.signature)
   ) {
     throw new Error("Wallet signature vault context is incomplete");
@@ -329,7 +360,7 @@ function normalizeWalletSignatureVaultContext(
 
 function walletSignatureVaultKeyMaterial(context: WalletSignatureVaultContext) {
   return stableJsonStringify({
-    protocol: "zylith/wallet-signature-vault/v1",
+    protocol: "zylith/wallet-signature-vault/v2",
     signature: normalizeSignatureMaterial(context.signature),
     wallet_address: context.walletAddress,
     chain_id: context.chainId,
@@ -340,16 +371,54 @@ function walletSignatureVaultKeyMaterial(context: WalletSignatureVaultContext) {
 }
 
 function normalizeSignatureMaterial(value: unknown): unknown {
+  return normalizeSignatureValue(value, 0, new WeakSet<object>(), { count: 0 });
+}
+
+function normalizeSignatureValue(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>,
+  budget: { count: number },
+): unknown {
+  budget.count += 1;
+  if (budget.count > 64 || depth > 6) {
+    throw new Error("Connected Starknet wallet returned an invalid signature");
+  }
   if (typeof value === "bigint") return `0x${value.toString(16)}`;
   if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
-  if (typeof value === "string") return value.trim().toLowerCase();
-  if (Array.isArray(value)) return value.map(normalizeSignatureMaterial);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
+  if (typeof value === "string") {
+    if (value.length > 256) throw new Error("Connected Starknet wallet returned an invalid signature");
+    return value.trim().toLowerCase();
+  }
+  if (!value || typeof value !== "object") {
+    throw new Error("Connected Starknet wallet returned an invalid signature");
+  }
+  if (seen.has(value)) throw new Error("Connected Starknet wallet returned an invalid signature");
+  seen.add(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0 || value.length > 16) {
+      throw new Error("Connected Starknet wallet returned an invalid signature");
+    }
+    const normalized = value.map((entry) => normalizeSignatureValue(entry, depth + 1, seen, budget));
+    seen.delete(value);
+    return normalized;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > 16) {
+    throw new Error("Connected Starknet wallet returned an invalid signature");
+  }
+  const normalized = Object.fromEntries(
+    entries
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => [key, normalizeSignatureMaterial(entry)]),
+      .map(([key, entry]) => {
+        if (!/^[a-zA-Z0-9_]{1,64}$/.test(key)) {
+          throw new Error("Connected Starknet wallet returned an invalid signature");
+        }
+        return [key, normalizeSignatureValue(entry, depth + 1, seen, budget)];
+      }),
   );
+  seen.delete(value);
+  return normalized;
 }
 
 function normalizeContextText(value: string) {

@@ -1,36 +1,85 @@
 import { privateDepositFundingFailureMessage } from "./privateDepositErrors";
 
 function rawErrorMessage(error: unknown): string {
-  const structured = structuredErrorMessage(error);
+  let structured: string | null = null;
+  try {
+    structured = structuredErrorMessage(error);
+  } catch {}
   if (structured) return structured;
-  if (error instanceof Error) return error.message;
+  try {
+    if (error instanceof Error) return error.message;
+  } catch {}
   if (typeof error === "string") return error;
   try {
     return JSON.stringify(error);
   } catch {
-    return String(error);
+    try {
+      return String(error);
+    } catch {
+      return "";
+    }
   }
 }
 
-function structuredErrorMessage(error: unknown): string | null {
-  if (error instanceof Error) {
-    return structuredErrorMessage(error.message);
+const MAX_STRUCTURED_ERROR_DEPTH = 8;
+const MAX_STRUCTURED_ERROR_NODES = 32;
+const MAX_STRUCTURED_ERROR_JSON_LENGTH = 16_384;
+
+type StructuredErrorTraversal = {
+  remainingNodes: number;
+  seen: WeakSet<object>;
+};
+
+function structuredErrorMessage(
+  error: unknown,
+  depth = 0,
+  traversal: StructuredErrorTraversal = {
+    remainingNodes: MAX_STRUCTURED_ERROR_NODES,
+    seen: new WeakSet<object>(),
+  }
+): string | null {
+  if (
+    depth > MAX_STRUCTURED_ERROR_DEPTH ||
+    traversal.remainingNodes <= 0
+  ) {
+    return null;
+  }
+  try {
+    if (error instanceof Error) {
+      return structuredErrorMessage(error.message, depth + 1, traversal);
+    }
+  } catch {
+    return null;
   }
   if (typeof error === "string") {
     const trimmed = error.trim();
-    if (!trimmed || !/^[\[{]/.test(trimmed)) return null;
+    if (
+      !trimmed ||
+      trimmed.length > MAX_STRUCTURED_ERROR_JSON_LENGTH ||
+      !/^[\[{]/.test(trimmed)
+    ) {
+      return null;
+    }
     try {
-      return structuredErrorMessage(JSON.parse(trimmed));
+      return structuredErrorMessage(JSON.parse(trimmed), depth + 1, traversal);
     } catch {
       return null;
     }
   }
   if (!error || typeof error !== "object") return null;
+  if (traversal.seen.has(error)) return null;
+  traversal.seen.add(error);
+  traversal.remainingNodes -= 1;
   const record = error as Record<string, unknown>;
   for (const key of ["error", "detail", "message", "reason"]) {
-    const value = record[key];
+    let value: unknown;
+    try {
+      value = record[key];
+    } catch {
+      continue;
+    }
     if (typeof value === "string" && value.trim()) return value.trim();
-    const nested = structuredErrorMessage(value);
+    const nested = structuredErrorMessage(value, depth + 1, traversal);
     if (nested) return nested;
   }
   return null;

@@ -1,6 +1,7 @@
 import type { DeploymentConfig } from "./deployment";
 
 let configuredAssetDecimals: Record<string, number> | null = null;
+const MAX_U128 = (1n << 128n) - 1n;
 
 export type PricePair = {
   base_asset_id: string;
@@ -29,15 +30,25 @@ export function assetDecimals(assetId: string): number {
 
 export function toAtomicStr(human: string, assetId: string): string {
   const trimmed = human.trim();
-  if (!trimmed || !/^\d*(\.\d*)?$/.test(trimmed) || trimmed === ".") return "0";
+  if (!trimmed || trimmed.length > 64 || !/^\d+(?:\.\d*)?$/.test(trimmed)) {
+    throw new Error("Enter a valid amount.");
+  }
   const dec = assetDecimals(assetId);
   const [intPart = "0", fracPart = ""] = trimmed.split(".");
-  const frac = fracPart.padEnd(dec, "0").slice(0, dec);
-  return (BigInt(intPart || "0") * (10n ** BigInt(dec)) + BigInt(frac || "0")).toString();
+  if (fracPart.length > dec) {
+    throw new Error(`${assetId} supports at most ${dec} decimal places.`);
+  }
+  const frac = fracPart.padEnd(dec, "0");
+  const atomic = BigInt(intPart || "0") * (10n ** BigInt(dec)) + BigInt(frac || "0");
+  if (atomic > MAX_U128) throw new Error("Amount is too large.");
+  return atomic.toString();
 }
 
 export function fromAtomicStr(atomic: string, assetId: string): string {
   if (!atomic || atomic === "0") return "0";
+  if (!/^(0|[1-9]\d{0,38})$/.test(atomic) || BigInt(atomic) > MAX_U128) {
+    throw new Error("Atomic amount is invalid.");
+  }
   const dec = assetDecimals(assetId);
   const n = BigInt(atomic);
   const d = 10n ** BigInt(dec);
@@ -66,13 +77,10 @@ export function assetScale(assetId: string): bigint {
 
 /** a price in quote atoms per `price_base_scale` base atoms, as quote units per base unit. */
 export function formatPrice(priceAtoms: string, pair: PricePair): string {
-  try {
-    const baseScale = assetScale(pair.base_asset_id);
-    const priceBaseScale = BigInt(pair.price_base_scale ?? baseScale.toString());
-    return fromAtomicStr(((BigInt(priceAtoms) * baseScale) / priceBaseScale).toString(), pair.quote_asset_id);
-  } catch {
-    return priceAtoms;
-  }
+  const baseScale = assetScale(pair.base_asset_id);
+  const priceBaseScale = BigInt(pair.price_base_scale ?? baseScale.toString());
+  if (priceBaseScale <= 0n) throw new Error("Price scale is invalid.");
+  return fromAtomicStr(((BigInt(priceAtoms) * baseScale) / priceBaseScale).toString(), pair.quote_asset_id);
 }
 
 /** quote units per base unit as a price in quote atoms per `price_base_scale` base atoms. */

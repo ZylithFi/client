@@ -13,7 +13,7 @@ type WalletStateSnapshot = {
   hasVault: boolean;
 };
 
-let cachedSnapshot: WalletStateSnapshot | null = null;
+const cachedSnapshots = new Map<string, WalletStateSnapshot>();
 
 export function useWalletState(starknetAddress: string | null): {
   runtimeStatus: RuntimeStatus;
@@ -29,21 +29,21 @@ export function useWalletState(starknetAddress: string | null): {
 
 function walletStateSnapshot(starknetAddress: string | null) {
   const runtime = walletRuntime();
+  const cacheKey = starknetAddress ?? "";
   const next: WalletStateSnapshot = {
     starknetAddress,
     runtimeStatus: walletRuntimeStatus(),
-    walletReady: Boolean(runtime?.isReady()),
+    walletReady: Boolean(runtime?.isReady(starknetAddress)),
     hasVault: Boolean(runtime?.hasVault(starknetAddress)),
   };
+  const cachedSnapshot = cachedSnapshots.get(cacheKey);
   if (
-    cachedSnapshot &&
-    cachedSnapshot.starknetAddress === next.starknetAddress &&
-    cachedSnapshot.runtimeStatus === next.runtimeStatus &&
+    cachedSnapshot?.runtimeStatus === next.runtimeStatus &&
     cachedSnapshot.walletReady === next.walletReady &&
     cachedSnapshot.hasVault === next.hasVault
   ) {
     return cachedSnapshot;
   }
-  cachedSnapshot = next;
+  cachedSnapshots.set(cacheKey, next);
   return next;
 }

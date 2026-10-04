@@ -1,14 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { assertDeploymentManifest, assertPinnedExecutionKeys, defaultPair, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
+import { assertBrowserNetworkPolicy, assertDeploymentManifest, assertPinnedExecutionKeys, defaultPair, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
 import shipped from "../../public/deployment.example.json";
 
 const example = JSON.parse(JSON.stringify(shipped));
 
 function finalized(manifest: typeof example) {
   manifest.deployment = { finalized: true, release_commit: "a".repeat(40) };
+  for (const field of ["commitment_registry", "privacy_deposit_bridge", "ekubo_external_match_router", "exchange"]) {
+    if (!manifest.contracts[field] || manifest.contracts[field] === "0x0") manifest.contracts[field] = "0x1234";
+  }
   for (const field of ["transition_proof_program_address", "withdrawal_proof_program_address", "residual_recovery_proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) manifest.proof[field] = "0x1234";
   manifest.proof.config_locked_after_deploy = true;
   manifest.roles = { protocol_fee_recipient: "0x1234", pause_guardian_address: "0x1234", reference_price_signer: "0x1234" };
+  manifest.funding.starknet_privacy = {
+    ...manifest.funding.starknet_privacy,
+    privacy_pool: "0x1234",
+    privacy_pool_class_hash: "0x1234",
+    bridge_adapter: manifest.contracts.privacy_deposit_bridge,
+    discovery_url: "/starknet-privacy-discovery",
+    proving_url: "/starknet-privacy-prover",
+    proving_ohttp_policy: "best_effort",
+    paymaster_address: "0x1234",
+    paymaster_url: "/paymaster/execute-outside",
+    proof_signer_class_hash: "0x1234",
+    ingress_key_registry_fingerprint: "ab".repeat(32),
+    sdk_package: "@starkware-libs/starknet-privacy-sdk",
+    sdk_version: "0.14.3-rc.7",
+    min_proving_delay_blocks: 10,
+  };
   return manifest;
 }
 
@@ -42,6 +61,12 @@ describe("deployment manifest", () => {
   it("keeps synthetic residuals eligible for external multihop execution", () => {
     const deployed = finalized(JSON.parse(JSON.stringify(example)));
     for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange", "ekubo_external_match_router"]) deployed.contracts[name] = "0x1234";
+    const configured = deployed.market_registry.markets.find((candidate: { market_id: string }) => candidate.market_id === "STRK/ETH");
+    if (!configured) throw new Error("missing synthetic market fixture");
+    configured.capabilities.external_matching = true;
+    configured.external_settlement_support_quote = "1";
+    configured.external_min_profit_quote = "1";
+    deployed.runtime.external_window_seconds = 30;
     const pair = enabledPairs(deployed).find((candidate) => candidate.pair_id === "STRK/ETH");
     expect(pair?.external_match_enabled).toBe(true);
     expect(() => assertDeploymentManifest(deployed)).not.toThrow();
@@ -58,6 +83,68 @@ describe("deployment manifest", () => {
     for (const name of ["commitment_registry", "privacy_deposit_bridge", "exchange"]) manifest.contracts[name] = "0x1234";
     manifest.runtime.max_admissions_per_transition = manifest.runtime.max_book_orders + 1;
     expect(() => assertDeploymentManifest(manifest)).toThrow(/runtime is malformed/);
+  });
+
+  it("rejects network-path and backslash service URL confusion", () => {
+    const manifest = finalized(JSON.parse(JSON.stringify(example)));
+    manifest.funding.starknet_privacy.proving_url = "/\\attacker.example/prover";
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/funding configuration/i);
+    manifest.funding.starknet_privacy.proving_url = "//attacker.example/prover";
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/funding configuration/i);
+  });
+
+  it("rejects incomplete or unpinned proof identities", () => {
+    const manifest = finalized(JSON.parse(JSON.stringify(example)));
+    manifest.proof.scheme = "legacy";
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
+    manifest.proof.scheme = "snip36-stwo";
+    manifest.proof.proof_validity_blocks = 0;
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
+    manifest.proof.proof_validity_blocks = 450;
+    manifest.proof.prover_build_id = "";
+    expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
+  });
+
+  it("rejects oversized registry collections and arithmetic outside u128", () => {
+    const oversizedAmount = finalized(JSON.parse(JSON.stringify(example)));
+    oversizedAmount.market_registry.connected_wallet_fee_reserve_amount = (1n << 128n).toString();
+    expect(() => assertDeploymentManifest(oversizedAmount)).toThrow(/wallet fee reserve/);
+
+    const tooManyMarkets = finalized(JSON.parse(JSON.stringify(example)));
+    while (tooManyMarkets.market_registry.markets.length <= 8) {
+      tooManyMarkets.market_registry.markets.push(structuredClone(tooManyMarkets.market_registry.markets[0]));
+    }
+    expect(() => assertDeploymentManifest(tooManyMarkets)).toThrow(/registry size is invalid/);
+  });
+
+  it("rejects insecure rpc, incomplete funding, and bridge drift at startup", () => {
+    const insecure = finalized(JSON.parse(JSON.stringify(example)));
+    insecure.rpc_url = "http://rpc.example";
+    expect(() => assertDeploymentManifest(insecure)).toThrow(/RPC URL/i);
+
+    const unpinned = finalized(JSON.parse(JSON.stringify(example)));
+    unpinned.funding.starknet_privacy.ingress_key_registry_fingerprint = "0".repeat(64);
+    expect(() => assertDeploymentManifest(unpinned)).toThrow(/funding configuration/i);
+
+    const drifted = finalized(JSON.parse(JSON.stringify(example)));
+    drifted.funding.starknet_privacy.bridge_adapter = "0x9999";
+    expect(() => assertDeploymentManifest(drifted)).toThrow(/funding configuration/i);
+  });
+
+  it("keeps every production browser endpoint inside the deployed content-security policy", () => {
+    const manifest = finalized(JSON.parse(JSON.stringify(example)));
+    manifest.rpc_url = "https://api.zylith.fi/starknet-rpc";
+    manifest.funding.starknet_privacy.discovery_url = "/starknet-privacy-discovery";
+    manifest.funding.starknet_privacy.proving_url = "https://api.zylith.fi/starknet-privacy-prover";
+    manifest.funding.starknet_privacy.paymaster_url = "/paymaster/execute-outside";
+    expect(() => assertBrowserNetworkPolicy(manifest, "https://app.zylith.fi/trade")).not.toThrow();
+
+    manifest.rpc_url = "https://rpc.example";
+    expect(() => assertBrowserNetworkPolicy(manifest, "https://app.zylith.fi/trade")).toThrow(/browser network policy/i);
+
+    manifest.rpc_url = "https://api.zylith.fi/starknet-rpc";
+    manifest.funding.starknet_privacy.proving_url = "https://prover.example";
+    expect(() => assertBrowserNetworkPolicy(manifest, "https://app.zylith.fi/trade")).toThrow(/browser network policy/i);
   });
 
   it("rejects a pair whose registry key and canonical pair id disagree", () => {

@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 import { safeFromAtomicStr, toAtomicStr } from "../domain/assets";
@@ -48,6 +49,73 @@ function currentPrivacyFundingStageLabel(sinceUnixMs = 0) {
   return privacyFundingStageLabel(snapshot.stage);
 }
 
+function useSlideDialog(
+  open: boolean,
+  onClose: () => void,
+  panelRef: RefObject<HTMLDivElement | null>,
+) {
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    panel.inert = !open;
+    if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const siblings = panel.parentElement
+      ? [...panel.parentElement.children].filter(
+          (element): element is HTMLElement =>
+            element instanceof HTMLElement
+            && element !== panel
+            && !element.classList.contains("slide-panel"),
+        )
+      : [];
+    for (const sibling of siblings) sibling.inert = true;
+    panel.focus({ preventScroll: true });
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ), ...document.querySelectorAll<HTMLElement>(
+        '[data-slide-dialog-portal] button:not([disabled]), [data-slide-dialog-portal] input:not([disabled]), [data-slide-dialog-portal] [href]',
+      )].filter((element) => !element.hidden && !element.inert);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      for (const sibling of siblings) sibling.inert = false;
+      previousFocusRef.current?.focus({ preventScroll: true });
+      previousFocusRef.current = null;
+    };
+  }, [open, panelRef]);
+}
+
 async function ensureTradingAuthorized(
   starknetAddress: string,
   onStage?: (stage: string) => void
@@ -58,7 +126,7 @@ async function ensureTradingAuthorized(
       walletRuntimeLoadError() ?? "Private trading failed to load."
     );
   }
-  if (runtime.isReady()) return runtime;
+  if (runtime.isReady(starknetAddress)) return runtime;
   onStage?.("Authorizing trading");
   const mode = runtime.vaultAuthMode?.(starknetAddress) ?? "none";
   let ok =
@@ -68,7 +136,7 @@ async function ensureTradingAuthorized(
   if (!ok && mode === "none") {
     ok = await runtime.createWalletWithWalletSignature(starknetAddress);
   }
-  if (!ok || !runtime.isReady()) {
+  if (!ok || !runtime.isReady(starknetAddress)) {
     throw new Error("Trading authorization failed. Retry in your wallet.");
   }
   return runtime;
@@ -77,7 +145,12 @@ async function ensureTradingAuthorized(
 /** notes of `asset` that can start, or retry, a withdrawal: largest first. */
 function selectableWithdrawNotes(notes: WithdrawableNote[], asset: string) {
   return notes
-    .filter((note) => note.asset === asset && !note.spent && (!note.locked || note.exit_stage === "failed"))
+    .filter((note) =>
+      note.asset === asset
+      && /^\d+$/.test(note.amount)
+      && !note.spent
+      && (!note.locked || note.exit_stage === "failed")
+    )
     .sort((left, right) => {
       const leftAmount = BigInt(left.amount);
       const rightAmount = BigInt(right.amount);
@@ -123,6 +196,7 @@ function AssetPicker({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const listboxId = useId();
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
@@ -162,16 +236,11 @@ function AssetPicker({
 
   useEffect(() => {
     if (!open) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (
-        !rootRef.current?.contains(target) &&
-        !menuRef.current?.contains(target)
-      ) {
-        setOpen(false);
-      }
-    };
-    const closeOnOutsideFocus = (event: FocusEvent) => {
+    const frame = window.requestAnimationFrame(() => {
+      const selected = menuRef.current?.querySelector<HTMLElement>('[aria-selected="true"]');
+      (selected ?? menuRef.current?.querySelector<HTMLElement>("button"))?.focus();
+    });
+    const closeOnOutside = (event: Event) => {
       const target = event.target as Node;
       if (
         !rootRef.current?.contains(target) &&
@@ -181,17 +250,21 @@ function AssetPicker({
       }
     };
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
     };
     const closeOnViewportChange = () => setOpen(false);
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("focusin", closeOnOutsideFocus);
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("focusin", closeOnOutside);
     document.addEventListener("keydown", closeOnEscape);
     window.addEventListener("resize", closeOnViewportChange);
     window.addEventListener("scroll", closeOnViewportChange, true);
     return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("focusin", closeOnOutsideFocus);
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("focusin", closeOnOutside);
       document.removeEventListener("keydown", closeOnEscape);
       window.removeEventListener("resize", closeOnViewportChange);
       window.removeEventListener("scroll", closeOnViewportChange, true);
@@ -204,6 +277,7 @@ function AssetPicker({
       ref={rootRef}
     >
       <button
+        ref={triggerRef}
         className="funding-asset-trigger"
         type="button"
         role="combobox"
@@ -216,6 +290,13 @@ function AssetPicker({
           if (!open) positionMenu();
           setOpen((current) => !current);
         }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) positionMenu();
+            setOpen(true);
+          }
+        }}
       >
         <TokenIcon token={value} size={20} />
         <strong>{value}</strong>
@@ -226,9 +307,27 @@ function AssetPicker({
           ref={menuRef}
           id={listboxId}
           className="funding-asset-menu portal"
+          data-slide-dialog-portal="true"
           role="listbox"
           aria-label="Assets"
           style={menuStyle}
+          onKeyDown={(event) => {
+            const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+            const index = items.indexOf(document.activeElement as HTMLButtonElement);
+            let next = index;
+            if (event.key === "ArrowDown") next = Math.min(items.length - 1, index + 1);
+            else if (event.key === "ArrowUp") next = Math.max(0, index - 1);
+            else if (event.key === "Home") next = 0;
+            else if (event.key === "End") next = items.length - 1;
+            else if (event.key === "Escape") {
+              event.preventDefault();
+              setOpen(false);
+              triggerRef.current?.focus();
+              return;
+            } else return;
+            event.preventDefault();
+            items[next]?.focus();
+          }}
         >
           {options.map((option) => (
             <button
@@ -240,6 +339,7 @@ function AssetPicker({
               onClick={() => {
                 onChange(option);
                 setOpen(false);
+                triggerRef.current?.focus();
               }}
             >
               <TokenIcon token={option} size={20} />
@@ -292,36 +392,50 @@ export function WalletSlide({
     "idle" | "scanning" | "complete"
   >("idle");
   const [showStarknetFirstHint, setShowStarknetFirstHint] = useState(false);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const scanGenerationRef = useRef(0);
   const walletScannerActiveRef = useRef(false);
+  const walletScanInFlightRef = useRef<Promise<void> | null>(null);
   const autoPrivateSetupAttemptRef = useRef<string | null>(null);
+  const authorizationGenerationRef = useRef(0);
+  const openRef = useRef(open);
+  openRef.current = open;
   const w = walletRuntime();
   const connectedVaultAuthMode = w?.vaultAuthMode?.(starknetAddress) ??
     (starknetAddress && hasVault ? "wallet-signature" : "none");
   const connectedHasVault = connectedVaultAuthMode === "wallet-signature";
+  useSlideDialog(open, onClose, panelRef);
 
   async function refreshWalletOptions({
     showLoading = false,
   }: { showLoading?: boolean } = {}) {
-    const scanGeneration = scanGenerationRef.current + 1;
-    scanGenerationRef.current = scanGeneration;
-    if (showLoading) setWalletScanState("scanning");
-    const immediateOptions = discoverStarknetWallets();
-    if (walletScannerActiveRef.current) {
-      setWalletOptions(immediateOptions);
-      if (immediateOptions.length > 0) setWalletScanState("complete");
-    }
+    if (walletScanInFlightRef.current) return walletScanInFlightRef.current;
+    const scan = (async () => {
+      const scanGeneration = scanGenerationRef.current + 1;
+      scanGenerationRef.current = scanGeneration;
+      if (showLoading) setWalletScanState("scanning");
+      const immediateOptions = discoverStarknetWallets();
+      if (walletScannerActiveRef.current) {
+        setWalletOptions(immediateOptions);
+        if (immediateOptions.length > 0) setWalletScanState("complete");
+      }
+      try {
+        const options = await discoverStarknetWalletsAsync();
+        if (scanGenerationRef.current !== scanGeneration) return;
+        if (!walletScannerActiveRef.current) return;
+        setWalletOptions(options);
+      } finally {
+        if (
+          walletScannerActiveRef.current &&
+          scanGenerationRef.current === scanGeneration
+        ) setWalletScanState("complete");
+      }
+    })();
+    walletScanInFlightRef.current = scan;
     try {
-      const options = await discoverStarknetWalletsAsync();
-      if (scanGenerationRef.current !== scanGeneration) return;
-      if (!walletScannerActiveRef.current) return;
-      setWalletOptions(options);
+      await scan;
     } finally {
-      if (
-        walletScannerActiveRef.current &&
-        scanGenerationRef.current === scanGeneration
-      )
-        setWalletScanState("complete");
+      if (walletScanInFlightRef.current === scan) walletScanInFlightRef.current = null;
     }
   }
 
@@ -348,6 +462,11 @@ export function WalletSlide({
   useEffect(() => {
     if (!open || !starknetAddress) {
       autoPrivateSetupAttemptRef.current = null;
+      authorizationGenerationRef.current += 1;
+      if (!open) {
+        setWorking(false);
+        setConnectingWalletId(null);
+      }
     }
   }, [open, starknetAddress]);
 
@@ -359,24 +478,37 @@ export function WalletSlide({
   }, [connectedHasVault, open, runtimeStatus, starknetAddress, working]);
 
   async function handleConnectStarknet(wallet: StarknetWalletOption) {
+    const connectionGeneration = ++authorizationGenerationRef.current;
     setConnectingWalletId(wallet.id);
     setError("");
     try {
       const addr = await connectStarknetProvider(wallet.provider, wallet.id);
+      if (
+        authorizationGenerationRef.current !== connectionGeneration
+        || !openRef.current
+      ) return;
       if (addr) {
         setShowStarknetFirstHint(false);
         onStarknetConnected(addr);
+        setConnectingWalletId(null);
         await enablePrivateTradingForAddress(addr);
       } else setError("Wallet did not return an account. Unlock it and retry.");
     } catch (e) {
-      setError(userFacingErrorMessage(e, "Wallet connection failed."));
+      if (authorizationGenerationRef.current === connectionGeneration) {
+        setError(userFacingErrorMessage(e, "Wallet connection failed."));
+      }
     } finally {
-      setConnectingWalletId(null);
+      if (authorizationGenerationRef.current === connectionGeneration) {
+        setConnectingWalletId(null);
+      }
     }
   }
 
   function handleChangeStarknetWallet() {
     autoPrivateSetupAttemptRef.current = null;
+    authorizationGenerationRef.current += 1;
+    setWorking(false);
+    setConnectingWalletId(null);
     walletRuntime()?.lock();
     clearSelectedStarknetProvider();
     onStarknetDisconnected();
@@ -386,6 +518,9 @@ export function WalletSlide({
 
   function handleDisconnectStarknetWallet() {
     autoPrivateSetupAttemptRef.current = null;
+    authorizationGenerationRef.current += 1;
+    setWorking(false);
+    setConnectingWalletId(null);
     walletRuntime()?.lock();
     disconnectStarknetProvider();
     onStarknetDisconnected();
@@ -401,8 +536,8 @@ export function WalletSlide({
       setError("Private trading is still loading. Please retry later.");
       return;
     }
-    if (w.isReady?.()) {
-      onClose();
+    if (w.isReady?.(address)) {
+      if (openRef.current) onClose();
       return;
     }
     const addressVaultAuthMode = w.vaultAuthMode?.(address) ?? "none";
@@ -413,6 +548,7 @@ export function WalletSlide({
     if (forceRetry) autoPrivateSetupAttemptRef.current = null;
     if (autoPrivateSetupAttemptRef.current === attemptKey) return;
     autoPrivateSetupAttemptRef.current = attemptKey;
+    const authorizationGeneration = ++authorizationGenerationRef.current;
     setWorking(true);
     setError("");
     let completed = false;
@@ -423,18 +559,30 @@ export function WalletSlide({
       } else {
         authorized = await w.createWalletWithWalletSignature(address);
       }
-      if (!authorized || !w.isReady()) {
+      if (!authorized || !w.isReady(address)) {
         throw new Error("Trading authorization failed. Retry in your wallet.");
       }
+      if (
+        autoPrivateSetupAttemptRef.current !== attemptKey
+        || authorizationGenerationRef.current !== authorizationGeneration
+      ) return;
       completed = true;
-      onClose();
+      if (openRef.current) onClose();
     } catch (e) {
-      setError(userFacingErrorMessage(e));
-    } finally {
-      if (!completed && autoPrivateSetupAttemptRef.current === attemptKey) {
-        autoPrivateSetupAttemptRef.current = attemptKey;
+      if (
+        autoPrivateSetupAttemptRef.current === attemptKey
+        && authorizationGenerationRef.current === authorizationGeneration
+      ) {
+        setError(userFacingErrorMessage(e));
       }
-      setWorking(false);
+    } finally {
+      if (
+        autoPrivateSetupAttemptRef.current === attemptKey
+        && authorizationGenerationRef.current === authorizationGeneration
+      ) {
+        if (!completed) autoPrivateSetupAttemptRef.current = attemptKey;
+        setWorking(false);
+      }
     }
   }
 
@@ -474,10 +622,18 @@ export function WalletSlide({
   }
 
   return (
-    <div className={`slide-panel ${open ? "open" : ""}`}>
+    <div
+      ref={panelRef}
+      className={`slide-panel ${open ? "open" : ""}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Connect wallet"
+      aria-hidden={!open}
+      tabIndex={-1}
+    >
       <div className="slide-hd">
         <span className="slide-title">Connect Wallet</span>
-        <button className="slide-close" onClick={onClose}>
+        <button type="button" className="slide-close" aria-label="Close wallet" onClick={onClose}>
           ×
         </button>
       </div>
@@ -583,6 +739,7 @@ export function WalletSlide({
         {hasStarknetAccount && (
           <button
             className="slide-submit"
+            type="button"
             disabled={!createEnabled}
             onClick={() => {
               if (requireStarknetFirst()) return;
@@ -599,9 +756,10 @@ export function WalletSlide({
 
         {error && (
           <div
+            role="alert"
             style={{
               fontSize: 13,
-              color: "var(--z-status-danger)",
+              color: "var(--negative)",
               marginTop: 10,
               lineHeight: 1.5,
             }}
@@ -640,6 +798,17 @@ export function DepositSlide({
   const [fundingStage, setFundingStage] = useState("");
   const wasOpenRef = useRef(false);
   const depositStartedAtRef = useRef(0);
+  const operationInFlightRef = useRef(false);
+  const openRef = useRef(open);
+  const openGenerationRef = useRef(0);
+  const previousOpenRef = useRef(open);
+  if (open !== previousOpenRef.current) {
+    previousOpenRef.current = open;
+    openGenerationRef.current += 1;
+  }
+  openRef.current = open;
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useSlideDialog(open, onClose, panelRef);
 
   useEffect(() => {
     if (!working) {
@@ -676,6 +845,8 @@ export function DepositSlide({
   }
 
   async function handleDeposit() {
+    if (operationInFlightRef.current) return;
+    const openGeneration = openGenerationRef.current;
     const w = walletRuntime();
     if (!starknetAddress) {
       setError("");
@@ -686,29 +857,44 @@ export function DepositSlide({
       setError("Enter an amount");
       return;
     }
-    const atomicAmount = toAtomicStr(amount, asset);
-    if (atomicAmount === "0") {
-      setError("Enter a valid amount.");
+    let atomicAmount: string;
+    try {
+      atomicAmount = toAtomicStr(amount, asset);
+    } catch (parseError) {
+      setError(userFacingErrorMessage(parseError));
       return;
     }
+    if (atomicAmount === "0") {
+      setError("Enter an amount greater than zero.");
+      return;
+    }
+    operationInFlightRef.current = true;
     depositStartedAtRef.current = Date.now();
     setWorking(true);
     setError("");
     setFundingStage(
-      walletReady && w?.isReady() ? "Preparing deposit" : "Authorizing trading"
+      walletReady && w?.isReady(starknetAddress) ? "Preparing deposit" : "Authorizing trading"
     );
+    const updateStage = (stage: string) => {
+      if (openGenerationRef.current === openGeneration) setFundingStage(stage);
+    };
     try {
       const authorizedRuntime = await ensureTradingAuthorized(
         starknetAddress,
-        setFundingStage
+        updateStage
       );
-      setFundingStage("Preparing deposit");
+      updateStage("Preparing deposit");
       await authorizedRuntime.submitDepositViaWallet(asset, atomicAmount);
-      setAmount("");
-      onClose();
+      if (openGenerationRef.current === openGeneration) {
+        setAmount("");
+        if (openRef.current) onClose();
+      }
     } catch (e) {
-      setError(userFacingErrorMessage(e));
+      if (openGenerationRef.current === openGeneration) {
+        setError(userFacingErrorMessage(e));
+      }
     } finally {
+      operationInFlightRef.current = false;
       setWorking(false);
     }
   }
@@ -718,14 +904,17 @@ export function DepositSlide({
 
   return (
     <div
+      ref={panelRef}
       className={`slide-panel ${open ? "open" : ""}`}
       role="dialog"
       aria-modal="true"
       aria-label="Deposit"
+      aria-hidden={!open}
+      tabIndex={-1}
     >
       <div className="slide-hd">
         <span className="slide-title">Deposit</span>
-        <button className="slide-close" aria-label="Close deposit" onClick={onClose}>
+        <button type="button" className="slide-close" aria-label="Close deposit" onClick={onClose}>
           ×
         </button>
       </div>
@@ -765,9 +954,13 @@ export function DepositSlide({
               className="f-input"
               type="text"
               inputMode="decimal"
+              maxLength={64}
               placeholder="0"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (next === "" || (next.length <= 64 && /^\d+(?:\.\d*)?$/.test(next))) setAmount(next);
+              }}
             />
             <AssetPicker
               value={asset}
@@ -783,9 +976,10 @@ export function DepositSlide({
         </div>
         {error && (
           <div
+            role="alert"
             style={{
               fontSize: 13,
-              color: "var(--z-status-danger)",
+              color: "var(--negative)",
               marginBottom: 8,
             }}
           >
@@ -794,6 +988,7 @@ export function DepositSlide({
         )}
         <button
           className="slide-submit"
+          type="button"
           disabled={!depositEnabled}
           onClick={() => {
             void handleDeposit();
@@ -838,6 +1033,17 @@ export function WithdrawSlide({
   const [selectedNote, setSelectedNote] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const operationInFlightRef = useRef(false);
+  const openRef = useRef(open);
+  const openGenerationRef = useRef(0);
+  const previousOpenRef = useRef(open);
+  if (open !== previousOpenRef.current) {
+    previousOpenRef.current = open;
+    openGenerationRef.current += 1;
+  }
+  openRef.current = open;
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useSlideDialog(open, onClose, panelRef);
 
   useEffect(() => {
     if (open) {
@@ -853,37 +1059,52 @@ export function WithdrawSlide({
   }
 
   const w = walletRuntime();
-  const notes = w?.isReady() ? w.getWithdrawableNotes() : [];
-  const withdrawalAvailable = Boolean(w?.isReady() && w.withdrawalAvailable());
+  const notes = w?.isReady(starknetAddress) ? w.getWithdrawableNotes() : [];
+  const withdrawalAvailable = Boolean(w?.isReady(starknetAddress) && w.withdrawalAvailable());
   const assetNotes = selectableWithdrawNotes(notes, asset);
   const inProgress = notes.filter((note) => note.asset === asset && note.exit_stage && note.exit_stage !== "failed" && !note.spent);
   const selectedWithdrawNote = assetNotes.find((n) => n.note_commitment === selectedNote) ?? assetNotes[0] ?? null;
 
   async function handleWithdraw() {
+    if (operationInFlightRef.current) return;
+    const openGeneration = openGenerationRef.current;
+    const requestedNoteCommitment = selectedWithdrawNote?.note_commitment ?? null;
     if (!starknetAddress) {
       setError("");
       onOpenWallet();
       return;
     }
+    operationInFlightRef.current = true;
     setWorking(true);
     setError("");
     try {
       const authorizedRuntime = await ensureTradingAuthorized(starknetAddress);
       if (!authorizedRuntime.withdrawalAvailable()) {
-        setError("Withdrawals are not configured for this deployment.");
+        if (openGenerationRef.current === openGeneration) {
+          setError("Withdrawals are not configured for this deployment.");
+        }
         return;
       }
       const available = selectableWithdrawNotes(authorizedRuntime.getWithdrawableNotes(), asset);
-      const note = available.find((n) => n.note_commitment === selectedNote) ?? available[0] ?? null;
+      const note = requestedNoteCommitment
+        ? available.find((candidate) => candidate.note_commitment === requestedNoteCommitment) ?? null
+        : available[0] ?? null;
       if (!note) {
-        setError(`No available ${asset} notes.`);
+        if (openGenerationRef.current === openGeneration) {
+          setError(requestedNoteCommitment
+            ? "The selected withdrawal note is no longer available. Review the updated balance and retry."
+            : `No available ${asset} notes.`);
+        }
         return;
       }
       await authorizedRuntime.withdraw(note.note_commitment);
-      onClose();
+      if (openRef.current && openGenerationRef.current === openGeneration) onClose();
     } catch (e) {
-      setError(userFacingErrorMessage(e));
+      if (openGenerationRef.current === openGeneration) {
+        setError(userFacingErrorMessage(e));
+      }
     } finally {
+      operationInFlightRef.current = false;
       setWorking(false);
     }
   }
@@ -892,14 +1113,17 @@ export function WithdrawSlide({
 
   return (
     <div
+      ref={panelRef}
       className={`slide-panel ${open ? "open" : ""}`}
       role="dialog"
       aria-modal="true"
       aria-label="Withdraw"
+      aria-hidden={!open}
+      tabIndex={-1}
     >
       <div className="slide-hd">
         <span className="slide-title">Withdraw</span>
-        <button className="slide-close" aria-label="Close withdrawal" onClick={onClose}>
+        <button type="button" className="slide-close" aria-label="Close withdrawal" onClick={onClose}>
           ×
         </button>
       </div>
@@ -960,8 +1184,8 @@ export function WithdrawSlide({
         <div className="funding-helper">
           Withdrawals stay private and typically complete within a few minutes.
         </div>
-        {error && <div style={{ fontSize: 13, color: "var(--z-status-danger)", marginBottom: 8 }}>{error}</div>}
-        <button className="slide-submit" disabled={!withdrawEnabled} onClick={() => void handleWithdraw()}>
+        {error && <div role="alert" style={{ fontSize: 13, color: "var(--negative)", marginBottom: 8 }}>{error}</div>}
+        <button type="button" className="slide-submit" disabled={!withdrawEnabled} onClick={() => void handleWithdraw()}>
           {working
             ? privateSessionReady
               ? "Submitting…"

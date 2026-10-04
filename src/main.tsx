@@ -7,7 +7,7 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 
 import App from "./App";
-import { walletRuntime } from "./domain/browserWallet";
+import { setWalletRuntime, walletRuntime } from "./domain/browserWallet";
 import { e2eHooksEnabled } from "./domain/e2eHooks";
 import "./globals.css";
 
@@ -21,7 +21,8 @@ void import("./zylithWalletRuntime")
       (window as unknown as { zylithWallet?: unknown }).zylithWallet =
         walletRuntime();
     }
-  });
+  })
+  .catch(() => setWalletRuntime(null, "Private trading failed to load."));
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

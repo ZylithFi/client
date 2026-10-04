@@ -27,6 +27,16 @@ function TransferStatus({ status }: { status: "Completed" | "Pending" | "Failed"
   return <span className={`status-chip ${tone}`}><i/>{status}</span>;
 }
 
+function safeAtomic(value: string | undefined) {
+  return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
+}
+
+function displayTimestamp(value: number | null) {
+  return value !== null && Number.isSafeInteger(value) && value > 0
+    ? new Date(value).toLocaleString()
+    : "Pending";
+}
+
 export function AssetsPage({
   allAssets,
   balances,
@@ -57,8 +67,8 @@ export function AssetsPage({
   const assets = allAssets;
   const balanceRows = assets.map((asset) => {
     const balance = balances.find((entry) => entry.asset === asset);
-    const availableAtomic = BigInt(balance?.available ?? "0");
-    const lockedAtomic = BigInt(balance?.locked ?? "0");
+    const availableAtomic = safeAtomic(balance?.available);
+    const lockedAtomic = safeAtomic(balance?.locked);
     const total = safeFromAtomicStr((availableAtomic + lockedAtomic).toString(), asset, "0");
     const unitPrice = assetUnitPrices[asset];
     const valueNumeric = unitPrice === undefined ? null : Number(total.replaceAll(",", "")) * unitPrice;
@@ -98,7 +108,7 @@ export function AssetsPage({
       amount,
       status: deposit.failed ? "Failed" as const : deposit.confirmed ? "Completed" as const : "Pending" as const,
       timestamp,
-      time: timestamp === null ? "Pending" : new Date(timestamp).toLocaleString(),
+      time: displayTimestamp(timestamp),
       ...transferValue(deposit.asset, amount),
     };
   });
@@ -112,7 +122,7 @@ export function AssetsPage({
       amount,
       status: note.spent ? "Completed" as const : note.exit_stage === "failed" ? "Failed" as const : "Pending" as const,
       timestamp,
-      time: timestamp === null ? "Pending" : new Date(timestamp).toLocaleString(),
+      time: displayTimestamp(timestamp),
       ...transferValue(note.asset, amount),
     };
   }));

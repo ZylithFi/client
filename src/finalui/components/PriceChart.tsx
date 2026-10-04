@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AreaSeries,
   BarSeries,
@@ -33,6 +33,7 @@ interface PriceChartProps {
   baseAsset: string;
   quoteAsset: string;
   loading?: boolean;
+  syntheticReference?: boolean;
 }
 
 const intervals: Array<{ value: ChartInterval; label: string }> = [
@@ -85,21 +86,29 @@ function heikinAshi(data: MarketCandle[]) {
 function seriesInput(data: MarketCandle[], style: ChartStyle) {
   const candles = style === "heikin-ashi" ? heikinAshi(data) : data;
   if (["bars", "candles", "hollow-candles", "high-low", "heikin-ashi"].includes(style)) return candles.map(toSeriesData);
-  return candles.map((candle) => ({ time: candle.time as UTCTimestamp, value: style === "hlc-area" ? candle.high : candle.close }));
+  return candles.map((candle) => ({ time: candle.time as UTCTimestamp, value: style === "hlc-area" ? (candle.high + candle.low + candle.close) / 3 : candle.close }));
 }
 
 function seriesPoint(candle: MarketCandle, style: ChartStyle) {
   const source = style === "heikin-ashi" ? heikinAshi([candle])[0] : candle;
   if (["bars", "candles", "hollow-candles", "high-low", "heikin-ashi"].includes(style)) return toSeriesData(source);
-  return { time: source.time as UTCTimestamp, value: style === "hlc-area" ? source.high : source.close };
+  return { time: source.time as UTCTimestamp, value: style === "hlc-area" ? (source.high + source.low + source.close) / 3 : source.close };
 }
 
-function isSameHistory(previous: MarketCandle[], next: MarketCandle[]) {
+export function isIncrementalChartUpdate(previous: MarketCandle[], next: MarketCandle[]) {
   if (previous.length === 0 || next.length === 0) return false;
   if (next.length < previous.length || next.length > previous.length + 1) return false;
-  const shared = Math.min(previous.length, next.length) - 1;
+  const shared = next.length === previous.length ? previous.length - 1 : previous.length;
   for (let index = 0; index < shared; index += 1) {
-    if (previous[index].time !== next[index].time) return false;
+    const left = previous[index];
+    const right = next[index];
+    if (
+      left.time !== right.time
+      || left.open !== right.open
+      || left.high !== right.high
+      || left.low !== right.low
+      || left.close !== right.close
+    ) return false;
   }
   return true;
 }
@@ -112,8 +121,13 @@ export function PriceChart({
   baseAsset,
   quoteAsset,
   loading = false,
+  syntheticReference = false,
 }: PriceChartProps) {
   const panelRef = useRef<HTMLElement | null>(null);
+  const styleControlRef = useRef<HTMLDivElement | null>(null);
+  const styleTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const styleMenuRef = useRef<HTMLDivElement | null>(null);
+  const styleMenuId = useId();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<any, Time> | null>(null);
@@ -291,10 +305,15 @@ export function PriceChart({
   useEffect(() => {
     const chart = chartRef.current;
     const series = seriesRef.current;
-    if (!chart || !series || data.length === 0) return;
+    if (!chart || !series) return;
+    if (data.length === 0) {
+      series.setData([]);
+      previousDataRef.current = [];
+      return;
+    }
 
     const previous = previousDataRef.current;
-    if (chartStyle !== "heikin-ashi" && isSameHistory(previous, data)) {
+    if (chartStyle !== "heikin-ashi" && isIncrementalChartUpdate(previous, data)) {
       series.update(seriesPoint(data[data.length - 1], chartStyle));
     } else {
       let preservedView = preservedViewRef.current;
@@ -333,6 +352,9 @@ export function PriceChart({
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
+    if (chartStyle === "baseline" && Number.isFinite(bboMidpoint) && bboMidpoint > 0) {
+      series.applyOptions({ baseValue: { type: "price", price: bboMidpoint } });
+    }
     if (!Number.isFinite(bboMidpoint) || bboMidpoint <= 0) {
       if (midpointLineRef.current) {
         series.removePriceLine(midpointLineRef.current);
@@ -356,7 +378,14 @@ export function PriceChart({
 
   useEffect(() => {
     const series = seriesRef.current;
-    if (!series || data.length === 0) return;
+    if (!series) return;
+    if (data.length === 0) {
+      if (highLineRef.current) series.removePriceLine(highLineRef.current);
+      if (lowLineRef.current) series.removePriceLine(lowLineRef.current);
+      highLineRef.current = null;
+      lowLineRef.current = null;
+      return;
+    }
     const high = Math.max(...data.map((candle) => candle.high));
     const low = Math.min(...data.map((candle) => candle.low));
     if (!highLineRef.current) {
@@ -373,6 +402,35 @@ export function PriceChart({
     document.addEventListener("fullscreenchange", onFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
+
+  useEffect(() => {
+    if (!styleMenuOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      const selected = styleMenuRef.current?.querySelector<HTMLElement>('[aria-checked="true"]');
+      (selected ?? styleMenuRef.current?.querySelector<HTMLElement>("button"))?.focus();
+    });
+    const closeOutside = (event: PointerEvent) => {
+      if (!styleControlRef.current?.contains(event.target as Node)) setStyleMenuOpen(false);
+    };
+    const closeFocus = (event: FocusEvent) => {
+      if (!styleControlRef.current?.contains(event.target as Node)) setStyleMenuOpen(false);
+    };
+    const closeEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setStyleMenuOpen(false);
+        styleTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("focusin", closeFocus);
+    document.addEventListener("keydown", closeEscape);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("focusin", closeFocus);
+      document.removeEventListener("keydown", closeEscape);
+    };
+  }, [styleMenuOpen]);
 
   async function toggleFullscreen() {
     if (!panelRef.current) return;
@@ -402,16 +460,16 @@ export function PriceChart({
             <div className="chart-toolbar-actions">
               <div className="range-control" aria-label="Candle interval">
                 {intervals.map((interval) => (
-                  <button key={interval.value} className={interval.value === activeInterval ? "active" : ""} type="button" aria-label={interval.label} onClick={() => onIntervalChange(interval.value)}>{interval.label}</button>
+                  <button key={interval.value} className={interval.value === activeInterval ? "active" : ""} type="button" aria-label={interval.label} aria-pressed={interval.value === activeInterval} onClick={() => onIntervalChange(interval.value)}>{interval.label}</button>
                 ))}
               </div>
               <span className="chart-control-divider" aria-hidden="true" />
-              <div className="chart-style-control">
-                <button className="chart-icon-button" type="button" aria-label="Chart type" aria-expanded={styleMenuOpen} aria-haspopup="menu" onClick={() => setStyleMenuOpen((open) => !open)}><ChartStyleIcon variant={chartStyle} className="icon-16" /></button>
+              <div className="chart-style-control" ref={styleControlRef}>
+                <button ref={styleTriggerRef} className="chart-icon-button" type="button" aria-label="Chart type" aria-expanded={styleMenuOpen} aria-haspopup="menu" aria-controls={styleMenuOpen ? styleMenuId : undefined} onClick={() => setStyleMenuOpen((open) => !open)} onKeyDown={(event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setStyleMenuOpen(true); } }}><ChartStyleIcon variant={chartStyle} className="icon-16" /></button>
                 {styleMenuOpen && (
-                  <div className="chart-style-menu" role="menu" aria-label="Chart type">
+                  <div ref={styleMenuRef} id={styleMenuId} className="chart-style-menu" role="menu" aria-label="Chart type" onKeyDown={(event) => { const items = [...(styleMenuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? [])]; const index = items.indexOf(document.activeElement as HTMLButtonElement); let next = index; if (event.key === "ArrowDown") next = Math.min(items.length - 1, index + 1); else if (event.key === "ArrowUp") next = Math.max(0, index - 1); else if (event.key === "Home") next = 0; else if (event.key === "End") next = items.length - 1; else return; event.preventDefault(); items[next]?.focus(); }}>
                     {chartStyles.map((style) => (
-                      <button key={style.value} className={style.value === chartStyle ? "active" : ""} type="button" role="menuitemradio" aria-checked={style.value === chartStyle} data-divider-before={style.dividerBefore || undefined} onClick={() => { setChartStyle(style.value); setStyleMenuOpen(false); }}><ChartStyleIcon variant={style.value} className="chart-style-option-icon" /><span>{style.label}</span></button>
+                      <button key={style.value} className={style.value === chartStyle ? "active" : ""} type="button" role="menuitemradio" aria-checked={style.value === chartStyle} data-divider-before={style.dividerBefore || undefined} onClick={() => { setChartStyle(style.value); setStyleMenuOpen(false); styleTriggerRef.current?.focus(); }}><ChartStyleIcon variant={style.value} className="chart-style-option-icon" /><span>{style.label}</span></button>
                     ))}
                   </div>
                 )}
@@ -435,7 +493,7 @@ export function PriceChart({
       </div>
 
       <div className="chart-source-row">
-        <span>Source</span><strong>Binance spot</strong><i/><span>Live Binance market data</span>
+        <span>Source</span><strong>{syntheticReference ? "Binance implied cross" : "Binance spot"}</strong><i/><span>{syntheticReference ? "Derived from authenticated spot legs" : "Live Binance market data"}</span>
       </div>
     </section>
   );

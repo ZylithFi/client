@@ -3,7 +3,9 @@ import { type OrderRow, isOpenOrder, orderStatusLabel } from "../../domain/order
 import { FilledProgress, type OrderSortDirection, type OrderSortKey, SortableTableHeader, sortOrderRows } from "./OrderTableCells";
 
 function submittedAt(value: number) {
-  return new Date(value).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return Number.isSafeInteger(value) && value > 0
+    ? new Date(value).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "Unavailable";
 }
 
 export function OrdersPanel({ orders, onViewAll }: { orders: OrderRow[]; onViewAll: () => void }) {

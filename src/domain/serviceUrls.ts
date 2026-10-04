@@ -20,6 +20,14 @@ export function browserSafeServiceUrl(url: string, sameOriginPath: string) {
   ) {
     throw new Error("Configured service URL must use HTTPS on the production app");
   }
+  if (
+    normalizedUrl
+    && typeof window !== "undefined"
+    && window.location.hostname === "app.zylith.fi"
+    && !productionServiceUrlAllowed(normalizedUrl, sameOriginPath)
+  ) {
+    throw new Error("Configured service URL is outside the production Zylith boundary");
+  }
   return normalizedUrl;
 }
 
@@ -27,10 +35,7 @@ export function defaultServiceUrlForHost(host: string, servicePath: string) {
   const normalizedHost = host.trim().toLowerCase();
   const normalizedPath = servicePath.replace(/^\/+|\/+$/g, "");
   if (!normalizedHost || !normalizedPath) return "";
-  if (
-    normalizedHost === "app.zylith.fi" ||
-    normalizedHost.endsWith(".zylith.fi")
-  ) {
+  if (normalizedHost === "app.zylith.fi") {
     return `https://api.zylith.fi/${normalizedPath}`;
   }
   return "";
@@ -103,10 +108,25 @@ function isSameOriginServiceUrl(url: string, sameOriginPath: string) {
 }
 
 function matchesServicePath(pathname: string, normalizedPath: string) {
+  const sepoliaProverPath = "/starknet-privacy-prover-sepolia";
   return (
     pathname === normalizedPath ||
     pathname.startsWith(`${normalizedPath}/`) ||
     (normalizedPath === "/starknet-privacy-prover" &&
-      pathname.startsWith("/starknet-privacy-prover-"))
+      (pathname === sepoliaProverPath ||
+        pathname.startsWith(`${sepoliaProverPath}/`)))
   );
+}
+
+function productionServiceUrlAllowed(url: string, servicePath: string) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    const normalizedPath = `/${servicePath.replace(/^\/+|\/+$/g, "")}`;
+    return !parsed.username
+      && !parsed.password
+      && (parsed.origin === window.location.origin || parsed.origin === "https://api.zylith.fi")
+      && matchesServicePath(parsed.pathname, normalizedPath);
+  } catch {
+    return false;
+  }
 }

@@ -16,7 +16,7 @@
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.2.7",
-    "@starkware-libs/starknet-privacy-sdk": "file:vendor/starkware-libs-starknet-privacy-sdk-0.14.3-rc.0.tgz",
+    "@starkware-libs/starknet-privacy-sdk": "file:vendor/starkware-libs-starknet-privacy-sdk-0.14.3-rc.7.tgz",
     "@zylith/sdk": "file:./sdk",
     "lightweight-charts": "5.2.1",
     "react": "^19.2.7",
@@ -28,7 +28,6 @@
     "@tailwindcss/postcss": "^4.3.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",

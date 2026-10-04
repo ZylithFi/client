@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   paymasterExecuteUrl,
-  paymasterPrivacySignerEnsureUrl,
   paymasterPrivacySignerRelayUrl,
   serviceBaseUrl,
   transactionHashFromResult,
@@ -28,15 +27,9 @@ describe("starknet privacy transport urls", () => {
     );
   });
 
-  it("builds privacy-signer urls from either base or execute endpoint", () => {
-    expect(paymasterPrivacySignerEnsureUrl("https://paymaster.example.com")).toBe(
-      "https://paymaster.example.com/privacy-signer/ensure"
-    );
+  it("builds privacy-signer relay urls from either base or execute endpoint", () => {
     expect(paymasterPrivacySignerRelayUrl("https://paymaster.example.com")).toBe(
       "https://paymaster.example.com/privacy-signer/relay"
-    );
-    expect(paymasterPrivacySignerEnsureUrl("https://paymaster.example.com/execute-outside")).toBe(
-      "https://paymaster.example.com/privacy-signer/ensure"
     );
     expect(paymasterPrivacySignerRelayUrl("https://paymaster.example.com/execute-outside")).toBe(
       "https://paymaster.example.com/privacy-signer/relay"
@@ -55,6 +48,8 @@ describe("transactionHashFromResult", () => {
   it("returns null for missing or empty hashes", () => {
     expect(transactionHashFromResult(null)).toBeNull();
     expect(transactionHashFromResult({ transaction_hash: "" })).toBeNull();
+    expect(transactionHashFromResult({ transaction_hash: "0x0" })).toBeNull();
+    expect(transactionHashFromResult({ transaction_hash: "not-a-felt" })).toBeNull();
     expect(transactionHashFromResult({ transaction_hash: 123 })).toBeNull();
   });
 });

@@ -1,6 +1,5 @@
 type E2eHookEnv = {
   DEV?: boolean;
-  VITE_ZYLITH_ENABLE_E2E_HOOKS?: string;
 };
 
 export function e2eHooksEnabled(input: {
@@ -8,12 +7,7 @@ export function e2eHooksEnabled(input: {
   env?: E2eHookEnv;
 } = {}) {
   const env = input.env ?? import.meta.env;
-  if (
-    env.DEV !== true &&
-    env.VITE_ZYLITH_ENABLE_E2E_HOOKS !== "1"
-  ) {
-    return false;
-  }
+  if (env.DEV !== true) return false;
   const search =
     input.search ??
     (typeof window !== "undefined" ? window.location.search : "");

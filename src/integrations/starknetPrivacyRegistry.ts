@@ -48,10 +48,104 @@ type SerializedNotesCursor = {
   }>>;
 };
 
+const MAX_REGISTRY_CHANNELS = 256;
+const MAX_REGISTRY_TOKENS = 256;
+const MAX_REGISTRY_NOTES = 20_000;
+const MAX_CURSOR_CHANNELS = 256;
+const MAX_U256 = (1n << 256n) - 1n;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isUnsignedInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isDecimal(value: unknown): value is string {
+  return typeof value === "string"
+    && /^(0|[1-9]\d{0,77})$/.test(value)
+    && BigInt(value) <= MAX_U256;
+}
+
+function assertUniqueAddressEntries(value: unknown, label: string, limit: number): asserts value is Array<[string, unknown]> {
+  if (!Array.isArray(value) || value.length > limit) {
+    throw new Error(`Encrypted privacy registry ${label} is too large.`);
+  }
+  const keys = new Set<string>();
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2 || !isDecimal(entry[0])) {
+      throw new Error(`Encrypted privacy registry ${label} is malformed.`);
+    }
+    const key = BigInt(entry[0]).toString();
+    if (keys.has(key)) throw new Error(`Encrypted privacy registry ${label} contains duplicate addresses.`);
+    keys.add(key);
+  }
+}
+
+function assertSerializedRegistry(value: unknown): asserts value is SerializedStarknetPrivacyRegistry {
+  if (!isRecord(value) || value.version !== 1) {
+    throw new Error("Encrypted privacy registry is malformed.");
+  }
+  assertUniqueAddressEntries(value.channels, "channels", MAX_REGISTRY_CHANNELS);
+  assertUniqueAddressEntries(value.notes, "tokens", MAX_REGISTRY_TOKENS);
+  let noteCount = 0;
+  for (const [, channelValue] of value.channels) {
+    if (!isRecord(channelValue) || !isDecimal(channelValue.public_key) || (channelValue.key !== undefined && !isDecimal(channelValue.key))) {
+      throw new Error("Encrypted privacy registry channel is malformed.");
+    }
+    assertUniqueAddressEntries(channelValue.tokens, "channel tokens", MAX_REGISTRY_TOKENS);
+    for (const [, tokenValue] of channelValue.tokens) {
+      if (!isRecord(tokenValue) || !isUnsignedInteger(tokenValue.token_index) || !isUnsignedInteger(tokenValue.note_nonce)) {
+        throw new Error("Encrypted privacy registry channel token is malformed.");
+      }
+    }
+  }
+  for (const [, notesValue] of value.notes) {
+    if (!Array.isArray(notesValue)) throw new Error("Encrypted privacy registry notes are malformed.");
+    noteCount += notesValue.length;
+    if (noteCount > MAX_REGISTRY_NOTES) throw new Error("Encrypted privacy registry notes are too large.");
+    const noteIds = new Set<string>();
+    for (const note of notesValue) {
+      if (
+        !isRecord(note)
+        || !isDecimal(note.id)
+        || !isDecimal(note.amount)
+        || !isDecimal(note.sender)
+        || (note.created !== undefined && !isUnsignedInteger(note.created))
+        || (note.open !== undefined && typeof note.open !== "boolean")
+        || (note.viewing_key !== undefined && !isDecimal(note.viewing_key))
+        || !isRecord(note.witness)
+        || !isDecimal(note.witness.channel_key)
+        || !isUnsignedInteger(note.witness.nonce)
+        || !isDecimal(note.witness.r)
+      ) throw new Error("Encrypted privacy registry note is malformed.");
+      const id = BigInt(note.id).toString();
+      if (noteIds.has(id)) throw new Error("Encrypted privacy registry contains duplicate notes.");
+      noteIds.add(id);
+    }
+  }
+  if (value.cursor === undefined) return;
+  if (!isRecord(value.cursor) || !isUnsignedInteger(value.cursor.block_id)) {
+    throw new Error("Encrypted privacy registry cursor is malformed.");
+  }
+  assertUniqueAddressEntries(value.cursor.incoming_channels, "cursor channels", MAX_CURSOR_CHANNELS);
+  for (const [, cursorValue] of value.cursor.incoming_channels) {
+    if (!isRecord(cursorValue) || !isDecimal(cursorValue.channel_key) || !isUnsignedInteger(cursorValue.subchannel_id_index)) {
+      throw new Error("Encrypted privacy registry cursor channel is malformed.");
+    }
+    assertUniqueAddressEntries(cursorValue.note_indexes, "cursor note indexes", MAX_REGISTRY_TOKENS);
+    assertUniqueAddressEntries(cursorValue.total_note_counts, "cursor note counts", MAX_REGISTRY_TOKENS);
+    for (const [, index] of [...cursorValue.note_indexes, ...cursorValue.total_note_counts]) {
+      if (!isUnsignedInteger(index)) throw new Error("Encrypted privacy registry cursor value is malformed.");
+    }
+  }
+}
+
 export function serializeStarknetPrivacyRegistry(
   registry: PrivateRegistry,
 ): SerializedStarknetPrivacyRegistry {
-  return {
+  const serialized: SerializedStarknetPrivacyRegistry = {
     version: 1,
     channels: [...registry.channels.entries()].map(([recipient, channel]) => [
       encodeBigint(recipient),
@@ -63,12 +157,15 @@ export function serializeStarknetPrivacyRegistry(
     ]),
     cursor: registry.cursor ? serializeNotesCursor(registry.cursor) : undefined,
   };
+  assertSerializedRegistry(serialized);
+  return serialized;
 }
 
 export function deserializeStarknetPrivacyRegistry(
   serialized?: SerializedStarknetPrivacyRegistry | null,
 ): PrivateRegistry {
-  if (!serialized || serialized.version !== 1) return createEmptyRegistry();
+  if (!serialized) return createEmptyRegistry();
+  assertSerializedRegistry(serialized);
   const registry = createEmptyRegistry();
   registry.channels = new AddressMap(
     serialized.channels.map(([recipient, channel]) => [

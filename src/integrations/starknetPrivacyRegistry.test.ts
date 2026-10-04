@@ -64,4 +64,30 @@ describe("Starknet Privacy registry persistence", () => {
     expect(cursor.incomingChannels.get(0x123n)?.noteIndexes.get(0xaaan)).toBe(5);
     expect(cursor.incomingChannels.get(0x123n)?.totalNoteCounts.get(0xaaan)).toBe(6);
   });
+
+  it("rejects malformed, duplicate, and oversized encrypted registry state", () => {
+    expect(() => deserializeStarknetPrivacyRegistry({
+      version: 1,
+      channels: [["not-a-felt", { public_key: "1", tokens: [] }]],
+      notes: [],
+    })).toThrow(/malformed/i);
+
+    expect(() => deserializeStarknetPrivacyRegistry({
+      version: 1,
+      channels: [],
+      notes: [["1", []], ["1", []]],
+    })).toThrow(/duplicate/i);
+
+    expect(() => deserializeStarknetPrivacyRegistry({
+      version: 1,
+      channels: [],
+      notes: Array.from({ length: 257 }, (_, index) => [String(index + 1), []]),
+    })).toThrow(/too large/i);
+
+    expect(() => deserializeStarknetPrivacyRegistry({
+      version: 1,
+      channels: [["1".repeat(10_000), { public_key: "1", tokens: [] }]],
+      notes: [],
+    })).toThrow(/malformed/i);
+  });
 });

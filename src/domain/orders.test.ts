@@ -8,6 +8,7 @@ const pair: PairConfig = {
   base_asset_id: "STRK",
   quote_asset_id: "USDC",
   min_order_amount: "1",
+  min_order_quote_amount: "1",
   price_base_scale: "1000000000000000000",
   taker_fee_bps: 4,
   external_match_enabled: true,

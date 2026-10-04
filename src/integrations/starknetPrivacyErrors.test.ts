@@ -10,6 +10,9 @@ import {
   isUserRejected,
   isWalletCallShapeError,
   isWalletRequestUnavailableError,
+  markProofSubmissionStarted,
+  markProofSubmissionRejected,
+  proofSubmissionStarted,
   sanitizeRpcMessage,
   starknetRpcReason,
   summarizeFundingError,
@@ -24,6 +27,11 @@ describe("starknet privacy error summaries", () => {
     expect(summarizeFundingError('{"error":"paymaster_address does not match paymaster configuration"}')).toContain(
       "deployment configuration does not match the relay"
     );
+  });
+
+  it("does not parse oversized structured error bodies", () => {
+    const oversized = JSON.stringify({ error: "x".repeat(16_384) });
+    expect(unwrapJsonErrorBody(oversized)).toBe(oversized);
   });
 
   it("maps known wallet funding failures to user-facing summaries", () => {
@@ -107,6 +115,59 @@ describe("starknet privacy error summaries", () => {
     expect(isProofProviderTransientNetworkError(new Error("outer", {
       cause: new Error("Signal is aborted without reason"),
     }))).toBe(true);
+    expect(
+      isProofProviderTransientNetworkError(
+        new Error("submission", {
+          cause: markProofSubmissionStarted(new Error("Network request failed")),
+        }),
+      ),
+    ).toBe(false);
+    expect(proofSubmissionStarted(new Error("outer", {
+      cause: markProofSubmissionStarted(new Error("relay acknowledgement was malformed")),
+    }))).toBe(true);
+    expect(proofSubmissionStarted(new Error("before relay"))).toBe(false);
+  });
+
+  it("bounds cyclic and deeply nested provider errors", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.cause = cyclic;
+    expect(errorMessage(cyclic)).toBe("[object Object]");
+    expect(isProofBlockTooRecent(cyclic)).toBe(false);
+    expect(isProofExpired(cyclic)).toBe(false);
+    expect(isProofProviderContractVisibilityLag(cyclic)).toBe(false);
+    expect(isProofProviderServiceBusy(cyclic)).toBe(false);
+    expect(isProofProviderTransientNetworkError(cyclic)).toBe(false);
+    expect(proofSubmissionStarted(cyclic)).toBe(false);
+
+    const root: Record<string, unknown> = {};
+    let current = root;
+    for (let depth = 0; depth < 100; depth += 1) {
+      const next: Record<string, unknown> = {};
+      current.cause = next;
+      current = next;
+    }
+    current.message = "PROOF_EXPIRED";
+    expect(isProofExpired(root)).toBe(false);
+  });
+
+  it("marks submission-started failures without mutating provider errors", () => {
+    const frozen = Object.freeze(new Error("relay acknowledgement failed"));
+    const marked = markProofSubmissionStarted(frozen);
+    expect(marked).not.toBe(frozen);
+    expect(marked.cause).toBe(frozen);
+    expect(proofSubmissionStarted(marked)).toBe(true);
+
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(() => markProofSubmissionStarted(proxy)).not.toThrow();
+    expect(errorMessage(proxy)).toBe("");
+  });
+
+  it("does not classify an explicit relay rejection as an ambiguous submission", () => {
+    const rejected = markProofSubmissionRejected(new Error("proof version rejected"));
+    const classified = markProofSubmissionStarted(rejected);
+    expect(classified).toBe(rejected);
+    expect(proofSubmissionStarted(classified)).toBe(false);
   });
 
   it("detects wallet request and shape failures", () => {

@@ -269,6 +269,55 @@ describe("userFacingErrorMessage", () => {
     );
   });
 
+  it("handles cyclic provider error objects without overflowing", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.error = cyclic;
+
+    expect(
+      userFacingErrorMessage(cyclic, "Wallet request failed. Retry.")
+    ).toBe("Wallet request failed. Retry.");
+  });
+
+  it("bounds deeply nested provider error traversal", () => {
+    const root: Record<string, unknown> = {};
+    let current = root;
+    for (let depth = 0; depth < 100; depth += 1) {
+      const nested: Record<string, unknown> = {};
+      current.error = nested;
+      current = nested;
+    }
+    current.message = "internal wallet detail";
+
+    expect(
+      userFacingErrorMessage(root, "Wallet request failed. Retry.")
+    ).toBe("Wallet request failed. Retry.");
+  });
+
+  it("still extracts ordinary bounded nested provider errors", () => {
+    expect(
+      userFacingErrorMessage({
+        error: {
+          detail: {
+            message: "user rejected the request",
+          },
+        },
+      })
+    ).toBe("Request cancelled in wallet.");
+  });
+
+  it("isolates provider errors with throwing fields and revoked proxies", () => {
+    const throwing = Object.defineProperty({}, "message", {
+      get: () => { throw new Error("broken message getter"); },
+    });
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+
+    expect(userFacingErrorMessage(throwing, "Wallet request failed. Retry."))
+      .toBe("Wallet request failed. Retry.");
+    expect(userFacingErrorMessage(proxy, "Wallet request failed. Retry."))
+      .toBe("Wallet request failed. Retry.");
+  });
+
   it("explains body-size failures without a generic fallback", () => {
     expect(
       userFacingErrorMessage(

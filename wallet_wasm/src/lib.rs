@@ -6,13 +6,14 @@ use starknet_crypto::Felt;
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 use zylith_core::exchange::{
-    NoteAccumulator, NoteFields, NoteMembership, OrderTerms, OutputRecord, PrivateRequest,
-    RecoveredOutput, RecoveryCapacity, RecoveryExit, ResidualNote, ResidualRecoveryInput,
-    SealedRequest, Signature, StatusRequest, WalletKeys, asset_id, build_residual_recovery,
-    chunk_status, output_tree_root, pair_id, preview_residual_recovery, public_key, random_felt,
-    recover_order_outputs, recover_order_residual, residual_recovery_amounts,
-    residual_recovery_authorization_message, residual_recovery_calldata, seal_request,
-    short_string, sign_message, sponge,
+    NoteAccumulator, NoteFields, NoteMembership, OrderQuery, OrderTerms, OutputRecord,
+    PrivateRequest, RecoveredOutput, RecoveryCapacity, RecoveryExit, ResidualNote,
+    ResidualRecoveryInput, SealedRequest, Signature, StatusRequest, WalletKeys, WithdrawalQuery,
+    asset_id, build_residual_recovery, chunk_status, output_tree_root, pair_id,
+    preview_residual_recovery, public_key, random_felt, recover_order_outputs,
+    recover_order_residual, residual_recovery_amounts, residual_recovery_authorization_message,
+    residual_recovery_calldata, seal_request, short_string, sign_message, sponge,
+    withdrawal_status_message,
 };
 use zylith_core::{
     AssetId, DepositIntent, DepositSubmissionPlan, PrivateExecutionKeyRegistry, RecoveryArtifact,
@@ -308,8 +309,10 @@ pub fn zylith_wallet_build_withdraw_request(input_json: &str) -> Result<String, 
 #[serde(deny_unknown_fields)]
 pub struct StatusInput {
     pub registry: PrivateExecutionKeyRegistry,
-    #[serde(flatten)]
-    pub status: StatusRequest,
+    pub seed_hex: String,
+    pub chain_context: String,
+    pub orders: Vec<OrderQuery>,
+    pub nullifiers: Vec<String>,
 }
 
 /// the fingerprint a deployment manifest pins for an execution key registry.
@@ -324,11 +327,31 @@ pub fn zylith_wallet_registry_fingerprint(registry_json: &str) -> Result<String,
 #[wasm_bindgen]
 pub fn zylith_wallet_build_status_requests(input_json: &str) -> Result<String, JsValue> {
     let input: StatusInput = from_json(input_json)?;
+    let keys = wallet_keys(&input.seed_hex)?;
+    let chain_context = felt(&input.chain_context)?;
+    let withdrawals = input
+        .nullifiers
+        .iter()
+        .map(|nullifier| {
+            let nullifier = felt(nullifier)?;
+            Ok(WithdrawalQuery {
+                nullifier,
+                authorization: sign_message(
+                    &keys.withdraw_key,
+                    &withdrawal_status_message(chain_context, nullifier),
+                )
+                .map_err(js_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, JsValue>>()?;
     to_json(
-        &chunk_status(input.status)
-            .into_iter()
-            .map(|status| seal(&input.registry, PrivateRequest::Status(status)))
-            .collect::<Result<Vec<_>, _>>()?,
+        &chunk_status(StatusRequest {
+            orders: input.orders,
+            withdrawals,
+        })
+        .into_iter()
+        .map(|status| seal(&input.registry, PrivateRequest::Status(status)))
+        .collect::<Result<Vec<_>, _>>()?,
     )
 }
 
@@ -337,6 +360,31 @@ pub fn zylith_wallet_build_status_requests(input_json: &str) -> Result<String, J
 pub struct TransitionRecords {
     pub seq: u32,
     pub outputs: Vec<OutputRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionOutputRootInput {
+    pub outputs: Vec<OutputRecord>,
+}
+
+/// recomputes the authenticated output root before browser recovery trusts indexer records.
+#[wasm_bindgen]
+pub fn zylith_wallet_transition_output_root(input_json: &str) -> Result<String, JsValue> {
+    let input: TransitionOutputRootInput = from_json(input_json)?;
+    if input.outputs.is_empty() || !input.outputs.len().is_power_of_two() {
+        return Err(js_error("transition outputs are not a padded tree"));
+    }
+    to_json(&format!(
+        "{:#x}",
+        output_tree_root(
+            &input
+                .outputs
+                .iter()
+                .map(|output| output.leaf)
+                .collect::<Vec<_>>()
+        )
+    ))
 }
 
 #[derive(Deserialize)]
@@ -770,6 +818,54 @@ mod tests {
     }
 
     #[test]
+    fn deposit_note_nonce_is_serialized_losslessly_for_javascript() {
+        let plan = call(
+            zylith_wallet_build_deposit_submission_plan,
+            json!({
+                "seed_hex": "11".repeat(32),
+                "asset_id": "USDC",
+                "amount": "2000000",
+                "deposit_nonce": u64::MAX.to_string(),
+            }),
+        );
+        assert_eq!(plan["note_fields"]["nonce"], u64::MAX.to_string());
+    }
+
+    #[test]
+    fn transition_output_root_rejects_unpadded_records_and_matches_core() {
+        let record = |leaf: u64| OutputRecord {
+            leaf: Felt::from(leaf),
+            enc: Felt::ZERO,
+            enc_remaining: Felt::ZERO,
+            enc_reserved: Felt::ZERO,
+            enc_reserved_offset: Felt::ZERO,
+        };
+        let outputs = vec![record(1), record(2), record(3), record(4)];
+        let computed = call(
+            zylith_wallet_transition_output_root,
+            json!({ "outputs": outputs }),
+        );
+        assert_eq!(
+            computed,
+            json!(format!(
+                "{:#x}",
+                output_tree_root(&[
+                    Felt::ONE,
+                    Felt::from(2_u8),
+                    Felt::from(3_u8),
+                    Felt::from(4_u8)
+                ])
+            ))
+        );
+        assert!(
+            zylith_wallet_transition_output_root(
+                &json!({ "outputs": [record(1), record(2), record(3)] }).to_string()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn market_ids_use_the_protocol_encodings() {
         let encoded = call(
             zylith_wallet_market_ids,
@@ -985,19 +1081,21 @@ mod tests {
     fn a_status_request_is_answered_under_its_response_key() {
         let (public, private) = execution_key("k1", 7);
         let registry = PrivateExecutionKeyRegistry { keys: vec![public] };
+        let seed_hex = "11".repeat(32);
+        let chain_context = "0x123";
         let idle = call(
             zylith_wallet_build_status_requests,
-            json!({ "registry": registry, "orders": [], "nullifiers": [] }),
+            json!({ "registry": registry, "seed_hex": seed_hex, "chain_context": chain_context, "orders": [], "nullifiers": [] }),
         );
         assert!(idle.as_array().unwrap().is_empty());
         let many = call(
             zylith_wallet_build_status_requests,
-            json!({ "registry": registry, "orders": vec![json!({ "order_id": "0x77" }); 40], "nullifiers": [] }),
+            json!({ "registry": registry, "seed_hex": seed_hex, "chain_context": chain_context, "orders": vec![json!({ "order_id": "0x77" }); 40], "nullifiers": [] }),
         );
         assert_eq!(many.as_array().unwrap().len(), 5);
         let built = call(
             zylith_wallet_build_status_requests,
-            json!({ "registry": registry, "orders": [{ "order_id": "0x77", "after_seq": 3 }], "nullifiers": ["0x9"] }),
+            json!({ "registry": registry, "seed_hex": seed_hex, "chain_context": chain_context, "orders": [{ "order_id": "0x77", "after_seq": 3 }], "nullifiers": ["0x9"] }),
         )[0]
         .clone();
         let sealed: SealedRequest = serde_json::from_value(built["sealed"].clone()).unwrap();
@@ -1006,7 +1104,13 @@ mod tests {
             panic!("a status request seals as one");
         };
         assert_eq!(status.orders[0].after_seq, 3);
-        assert_eq!(status.nullifiers, vec![Felt::from(9_u8)]);
+        assert_eq!(status.withdrawals[0].nullifier, Felt::from(9_u8));
+        let keys = wallet_keys(&seed_hex).unwrap();
+        assert!(verify_message(
+            &public_key(&keys.withdraw_key),
+            &withdrawal_status_message(Felt::from_hex(chain_context).unwrap(), Felt::from(9_u8),),
+            &status.withdrawals[0].authorization,
+        ));
         let answer = json!({ "ok": true, "orders": [], "withdrawals": [] });
         let response =
             zylith_core::exchange::seal_response(&opened.response_key, &sealed.digest, &answer)

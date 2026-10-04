@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type {
   PairConfig,
   ReferencePriceSnapshot,
   TicketSubmitIntent,
 } from "../../domain/tradeIntent";
-import { safeFromAtomicStr } from "../../domain/assets";
+import { safeFromAtomicStr, toAtomicStr } from "../../domain/assets";
 import type { WalletBalance } from "../../domain/shieldedBalances";
 import { ShieldIcon, SwapIcon } from "./Icons";
 import { TokenIcon } from "./TokenIcon";
@@ -17,13 +17,8 @@ function positiveNumber(value: string | undefined) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
-function decimalInput(value: string) {
-  const sanitized = value.replace(/[^0-9.]/g, "");
-  const separator = sanitized.indexOf(".");
-  if (separator < 0) return sanitized;
-  return `${sanitized.slice(0, separator + 1)}${sanitized
-    .slice(separator + 1)
-    .replaceAll(".", "")}`;
+function validDecimalInput(value: string) {
+  return value === "" || (value.length <= 64 && /^\d+(?:\.\d*)?$/.test(value));
 }
 
 function formatAmount(value: number, maximumFractionDigits = 8) {
@@ -43,9 +38,8 @@ export function IntentPanel({
   pair,
   balances,
   referencePrice,
-  marketMidpoint,
+  online,
   walletReady,
-  hasPrivateBalance,
   submitting,
   submitError,
   onOpenWallet,
@@ -55,13 +49,12 @@ export function IntentPanel({
   pair: PairConfig | null;
   balances: WalletBalance[];
   referencePrice: ReferencePriceSnapshot | null;
-  marketMidpoint: number;
+  online: boolean;
   walletReady: boolean;
-  hasPrivateBalance: boolean;
   submitting: boolean;
   submitError: string | null;
   onOpenWallet: () => void;
-  onDeposit: () => void;
+  onDeposit: (asset: string) => void;
   onSubmit: (intent: TicketSubmitIntent) => Promise<boolean | void>;
 }) {
   const [side, setSide] = useState<IntentSide>("buy");
@@ -69,8 +62,9 @@ export function IntentPanel({
   const [amount, setAmount] = useState(() =>
     defaultTradeAmount(pair?.quote_asset_id ?? "")
   );
+  const submitInFlight = useRef(false);
   const signedMidpoint = positiveNumber(referencePrice?.displayPrice);
-  const midpoint = marketMidpoint || signedMidpoint;
+  const midpoint = signedMidpoint;
   const baseAsset = pair?.base_asset_id ?? "";
   const quoteAsset = pair?.quote_asset_id ?? "";
   const payAsset = side === "buy" ? quoteAsset : baseAsset;
@@ -78,31 +72,59 @@ export function IntentPanel({
   const numericAmount = positiveNumber(amount);
   const output = useMemo(() => {
     if (!numericAmount || !midpoint) return 0;
-    return side === "buy" ? numericAmount / midpoint : numericAmount * midpoint;
-  }, [midpoint, numericAmount, side]);
+    const gross = side === "buy" ? numericAmount / midpoint : numericAmount * midpoint;
+    return gross * (1 - (pair?.taker_fee_bps ?? 0) / 10_000);
+  }, [midpoint, numericAmount, pair?.taker_fee_bps, side]);
   const fundingBalance = balances.find((balance) => balance.asset === payAsset);
+  const availableAtoms = fundingBalance && /^\d+$/.test(fundingBalance.available)
+    ? BigInt(fundingBalance.available)
+    : 0n;
+  const hasSpendableBalance = availableAtoms > 0n;
+  let amountAtoms: bigint | null = null;
+  if (amount && payAsset) {
+    try {
+      amountAtoms = BigInt(toAtomicStr(amount, payAsset));
+    } catch {
+      amountAtoms = null;
+    }
+  }
+  let orderBaseAtoms: bigint | null = null;
+  if (pair && amountAtoms !== null) {
+    if (side === "sell") {
+      orderBaseAtoms = amountAtoms;
+    } else if (/^\d+$/.test(referencePrice?.midpointPrice ?? "")) {
+      const midpointAtoms = BigInt(referencePrice!.midpointPrice);
+      if (midpointAtoms > 0n) {
+        orderBaseAtoms =
+          (amountAtoms * BigInt(pair.price_base_scale)) / midpointAtoms;
+      }
+    }
+  }
+  const belowMinimum = Boolean(
+    pair &&
+      amountAtoms !== null &&
+      amountAtoms > 0n &&
+      orderBaseAtoms !== null &&
+      orderBaseAtoms < BigInt(pair.min_order_amount)
+  );
   const available =
     walletReady && fundingBalance
       ? positiveNumber(
           safeFromAtomicStr(fundingBalance.available, payAsset, "0")
         )
       : 0;
-  const priceProtectionBps = 30;
-  const limitPrice =
-    signedMidpoint > 0
-      ? signedMidpoint *
-        (side === "buy"
-          ? 1 + priceProtectionBps / 10_000
-          : 1 - priceProtectionBps / 10_000)
-      : 0;
+  const limitPrice = signedMidpoint;
   const canSubmit = Boolean(
     pair &&
       walletReady &&
-      hasPrivateBalance &&
+      hasSpendableBalance &&
+      online &&
       !submitting &&
-      numericAmount > 0 &&
-      numericAmount <= available &&
-      output > 0 &&
+      amountAtoms !== null &&
+      amountAtoms > 0n &&
+      amountAtoms <= availableAtoms &&
+      orderBaseAtoms !== null &&
+      orderBaseAtoms >= BigInt(pair.min_order_amount) &&
       limitPrice > 0
   );
 
@@ -119,8 +141,14 @@ export function IntentPanel({
   }
 
   function quickFill(percent: number) {
-    if (available <= 0) return;
-    setAmount(String((available * percent) / 100));
+    const availableAtoms = fundingBalance?.available;
+    if (!availableAtoms || !payAsset) return;
+    try {
+      const filledAtoms = (BigInt(availableAtoms) * BigInt(percent)) / 100n;
+      setAmount(safeFromAtomicStr(filledAtoms, payAsset, "0"));
+    } catch {
+      setAmount("");
+    }
   }
 
   async function submit() {
@@ -129,26 +157,34 @@ export function IntentPanel({
       onOpenWallet();
       return;
     }
-    if (!hasPrivateBalance) {
-      onDeposit();
+    if (!hasSpendableBalance) {
+      onDeposit(payAsset);
       return;
     }
-    if (!canSubmit) return;
-    const ok = await onSubmit({
-      pairId: pair.pair_id,
-      side: side === "buy" ? "Buy" : "Sell",
-      payAmount: amount,
-      limitPrice: limitPrice.toFixed(12).replace(/\.?0+$/, ""),
-      external: pair.external_match_enabled && externalMatching,
-    });
-    if (ok) setAmount("");
+    if (!canSubmit || submitInFlight.current) return;
+    submitInFlight.current = true;
+    try {
+      const ok = await onSubmit({
+        pairId: pair.pair_id,
+        side: side === "buy" ? "Buy" : "Sell",
+        payAmount: amount,
+        midpointPrice: referencePrice!.midpointPrice,
+        priceBaseScale: referencePrice!.priceBaseScale,
+        observedAtUnixMs: referencePrice!.observedAtUnixMs,
+        validUntilUnixMs: referencePrice!.validUntilUnixMs,
+        external: pair.external_match_enabled && externalMatching,
+      });
+      if (ok) setAmount("");
+    } finally {
+      submitInFlight.current = false;
+    }
   }
 
   const actionLabel = submitting
     ? "Submitting..."
     : !walletReady
     ? "Connect wallet"
-    : !hasPrivateBalance
+    : !hasSpendableBalance
     ? "Deposit"
     : "Submit order";
 
@@ -160,10 +196,11 @@ export function IntentPanel({
         </div>
       </div>
 
-      <div className="side-toggle" aria-label="Order side">
+      <div className="side-toggle" role="group" aria-label="Order side">
         <button
           type="button"
           className={side === "buy" ? "active buy" : ""}
+          aria-pressed={side === "buy"}
           onClick={() => setMode("buy")}
         >
           Buy
@@ -171,6 +208,7 @@ export function IntentPanel({
         <button
           type="button"
           className={side === "sell" ? "active sell" : ""}
+          aria-pressed={side === "sell"}
           onClick={() => setMode("sell")}
         >
           Sell
@@ -192,17 +230,17 @@ export function IntentPanel({
           <input
             aria-label="Trade amount"
             inputMode="decimal"
+            maxLength={64}
             placeholder="0"
             value={amount}
-            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              setAmount(decimalInput(event.target.value))
-            }
+            onChange={(event: ChangeEvent<HTMLInputElement>) => {
+              if (validDecimalInput(event.target.value)) setAmount(event.target.value);
+            }}
           />
-          <button className="token-select" type="button">
+          <div className="token-select" aria-label={`Pay with ${payAsset}`}>
             <TokenIcon token={payAsset} />
             <strong>{payAsset}</strong>
-            <span>⌄</span>
-          </button>
+          </div>
         </div>
         <div className="asset-card-foot">
           <span>
@@ -265,11 +303,10 @@ export function IntentPanel({
                 )}`
               : "Unavailable"}
           </div>
-          <button className="token-select" type="button">
+          <div className="token-select" aria-label={`Receive ${receiveAsset}`}>
             <TokenIcon token={receiveAsset} />
             <strong>{receiveAsset}</strong>
-            <span>⌄</span>
-          </button>
+          </div>
         </div>
         <div className="asset-card-foot">
           <span>
@@ -323,10 +360,16 @@ export function IntentPanel({
         </div>
       </div>
 
-      {pair && numericAmount > available && walletReady && (
+      {pair && amountAtoms !== null && amountAtoms > availableAtoms && walletReady && (
         <p className="field-error">
           Amount exceeds your available {payAsset} balance.
         </p>
+      )}
+      {amount && (amountAtoms === null || amountAtoms === 0n) && (
+        <p className="field-error">Enter an amount supported by {payAsset} precision.</p>
+      )}
+      {belowMinimum && (
+        <p className="field-error">Order is below the {pair!.pair_id} minimum.</p>
       )}
       {submitError && (
         <p className="field-error" role="alert">
@@ -338,7 +381,7 @@ export function IntentPanel({
         type="button"
         aria-label={actionLabel}
         disabled={
-          submitting || (walletReady && hasPrivateBalance && !canSubmit)
+          submitting || (walletReady && hasSpendableBalance && !canSubmit)
         }
         onClick={() => void submit()}
       >

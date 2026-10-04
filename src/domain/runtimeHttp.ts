@@ -190,27 +190,39 @@ export async function fetchWithTimeout(
 }
 
 function isAbortError(error: unknown): boolean {
-  const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const message = runtimeErrorText(error);
+  const name = runtimeErrorField(error, "name");
   return (
-    error instanceof DOMException &&
-    (error.name === "AbortError" || error.name === "TimeoutError")
-  ) || (
-    error instanceof Error &&
-    (error.name === "AbortError" || error.name === "TimeoutError")
-  ) || /runtime request aborted|request aborted|signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted/i.test(message);
+    name === "AbortError"
+    || name === "TimeoutError"
+    || /runtime request aborted|request aborted|signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted/i.test(message)
+  );
 }
 
 function isRuntimeTimeoutError(error: unknown): boolean {
-  return error instanceof Error && error.message === "Runtime request timed out";
+  return runtimeErrorText(error) === "Runtime request timed out";
 }
 
 function isNetworkError(error: unknown): boolean {
-  const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const message = runtimeErrorText(error);
   return /failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
     message
   );
+}
+
+function runtimeErrorField(error: unknown, key: string): unknown {
+  if (!error || typeof error !== "object") return undefined;
+  try {
+    return (error as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function runtimeErrorText(error: unknown): string {
+  if (typeof error === "string") return error.slice(0, 4_096);
+  const message = runtimeErrorField(error, "message");
+  return typeof message === "string" ? message.slice(0, 4_096) : "";
 }
 
 function remainingTimeout(deadline: number): number {

@@ -26,8 +26,14 @@ export function isOpenOrder(row: { state: OrderState }) {
   return OPEN_ORDER_STATES.has(row.state);
 }
 
+export function hasPositiveAmount(value: string) {
+  return /^\d+(?:\.\d+)?$/.test(value) && /[1-9]/.test(value);
+}
+
 export function orderStatusLabel(row: OrderRow) {
-  if (row.state === "live" && row.filled !== "0") return "Partially filled";
+  if (row.state === "live" && hasPositiveAmount(row.filled)) {
+    return "Partially filled";
+  }
   const labels: Record<OrderState, string> = {
     submitting: "Submitting",
     pending: "Submitting",
@@ -52,30 +58,34 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[], assetUnitP
   return orders.flatMap((order) => {
     const pair = pairs.find((candidate) => candidate.pair_id === order.pair);
     if (!pair) return [];
-    const filledBase = BigInt(order.filled_base);
-    const average =
-      filledBase > 0n ? formatPrice(((BigInt(order.filled_quote) * BigInt(pair.price_base_scale)) / filledBase).toString(), pair) : "Not filled";
-    const proceedsAsset = order.side === "Sell" ? pair.quote_asset_id : pair.base_asset_id;
-    const orderValueAmount = fromAtomicStr(order.funding_amount, order.funding_asset);
-    const unitPrice = assetUnitPrices[order.funding_asset];
-    const orderValueNumeric = unitPrice === undefined ? null : Number(orderValueAmount.replaceAll(",", "")) * unitPrice;
-    return [
-      {
-        id: order.order_id,
-        pair: order.pair,
-        side: order.side,
-        state: order.state,
-        external: order.external,
-        amount: fromAtomicStr(order.amount, pair.base_asset_id),
-        filled: fromAtomicStr(order.filled_base, pair.base_asset_id),
-        orderValue: `${orderValueAmount} ${order.funding_asset}`,
-        orderValueNumeric: orderValueNumeric !== null && Number.isFinite(orderValueNumeric) ? orderValueNumeric : null,
-        averagePrice: average,
-        fees: order.fees === "0" ? "None" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
-        submittedAt: order.submitted_at_ms,
-        recoveryAvailable: order.residual_recovery_available === true,
-        error: order.last_error,
-      },
-    ];
+    try {
+      const filledBase = BigInt(order.filled_base);
+      const average =
+        filledBase > 0n ? formatPrice(((BigInt(order.filled_quote) * BigInt(pair.price_base_scale)) / filledBase).toString(), pair) : "Not filled";
+      const proceedsAsset = order.side === "Sell" ? pair.quote_asset_id : pair.base_asset_id;
+      const orderValueAmount = fromAtomicStr(order.funding_amount, order.funding_asset);
+      const unitPrice = assetUnitPrices[order.funding_asset];
+      const orderValueNumeric = unitPrice === undefined ? null : Number(orderValueAmount.replaceAll(",", "")) * unitPrice;
+      return [
+        {
+          id: order.order_id,
+          pair: order.pair,
+          side: order.side,
+          state: order.state,
+          external: order.external,
+          amount: fromAtomicStr(order.amount, pair.base_asset_id),
+          filled: fromAtomicStr(order.filled_base, pair.base_asset_id),
+          orderValue: `${orderValueAmount} ${order.funding_asset}`,
+          orderValueNumeric: orderValueNumeric !== null && Number.isFinite(orderValueNumeric) ? orderValueNumeric : null,
+          averagePrice: average,
+          fees: order.fees === "0" ? "None" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
+          submittedAt: Number.isSafeInteger(order.submitted_at_ms) ? order.submitted_at_ms : 0,
+          recoveryAvailable: order.residual_recovery_available === true,
+          error: order.last_error,
+        },
+      ];
+    } catch {
+      return [];
+    }
   });
 }

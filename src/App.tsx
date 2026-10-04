@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./globals.css";
 import "./finalui/styles.css";
 import type { WalletOrder, WithdrawableNote } from "@zylith/sdk";
-import { configureAssetDecimals, formatPrice, toAtomicStr, toPriceAtoms } from "./domain/assets";
+import { configureAssetDecimals, formatPrice, toAtomicStr } from "./domain/assets";
 import { connectedStarknetAddress, restoreConnectedStarknetWallet, subscribeWalletRuntime, walletRuntime } from "./domain/browserWallet";
 import { defaultPair, enabledPairs, exchange, useDeploymentState } from "./domain/deployment";
 import { type OrderRow, orderRows } from "./domain/orders";
 import type { PendingDeposit, WalletBalance } from "./domain/shieldedBalances";
-import type { ReferencePriceSnapshot, TicketSubmitIntent } from "./domain/tradeIntent";
+import { ticketReferenceIsFresh, type ReferencePriceSnapshot, type TicketSubmitIntent } from "./domain/tradeIntent";
 import { takerPath, takerTabFromPath, type AppTab } from "./domain/appRoutes";
 import { AppHeader } from "./finalui/components/AppHeader";
 import { TradePage } from "./finalui/pages/TradePage";
@@ -20,7 +20,6 @@ import { useWalletState } from "./hooks/useWalletState";
 
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const REFERENCE_PRICE_POLL_MS = 5_000;
-const WALLET_VIEW_POLL_MS = 2_000;
 
 type WalletView = {
   balances: WalletBalance[];
@@ -31,9 +30,15 @@ type WalletView = {
 
 const EMPTY_WALLET_VIEW: WalletView = { balances: [], orders: [], pendingDeposits: [], withdrawables: [] };
 
-function readWalletView(): WalletView {
+function positiveAtomic(value: string) {
+  return /^(0|[1-9]\d{0,38})$/.test(value)
+    && BigInt(value) > 0n
+    && BigInt(value) <= ((1n << 128n) - 1n);
+}
+
+function readWalletView(starknetAddress: string | null): WalletView {
   const runtime = walletRuntime();
-  if (!runtime?.isReady()) return EMPTY_WALLET_VIEW;
+  if (!runtime?.isReady(starknetAddress)) return EMPTY_WALLET_VIEW;
   return {
     balances: runtime.getBalances(),
     orders: runtime.getOrders(),
@@ -43,18 +48,14 @@ function readWalletView(): WalletView {
 }
 
 /** the wallet's balances, orders and transfers, re-read whenever the runtime changes. */
-function useWalletView(walletReady: boolean) {
+function useWalletView(walletReady: boolean, starknetAddress: string | null) {
   const [view, setView] = useState<WalletView>(EMPTY_WALLET_VIEW);
   useEffect(() => {
-    const update = () => setView(readWalletView());
+    const update = () => setView(readWalletView(starknetAddress));
     update();
     const unsubscribe = subscribeWalletRuntime(update);
-    const timer = window.setInterval(update, WALLET_VIEW_POLL_MS);
-    return () => {
-      unsubscribe();
-      window.clearInterval(timer);
-    };
-  }, [walletReady]);
+    return unsubscribe;
+  }, [starknetAddress, walletReady]);
   return view;
 }
 
@@ -74,14 +75,17 @@ export default function App() {
     const path = takerPath(next);
     setTab(next);
     sessionSet(LAST_TAKER_ROUTE_KEY, path);
-    window.history.pushState(null, "", path);
+    if (window.location.pathname !== path) window.history.pushState(null, "", path);
   }, []);
   useEffect(() => {
-    if (window.location.pathname === "/" || window.location.pathname === "") window.history.replaceState(null, "", "/trade");
+    const canonicalPath = takerPath(takerTabFromPath(window.location.pathname));
+    if (window.location.pathname !== canonicalPath) window.history.replaceState(null, "", canonicalPath);
     const onPop = () => {
       const next = takerTabFromPath(window.location.pathname);
+      const nextPath = takerPath(next);
+      if (window.location.pathname !== nextPath) window.history.replaceState(null, "", nextPath);
       setTab(next);
-      sessionSet(LAST_TAKER_ROUTE_KEY, takerPath(next));
+      sessionSet(LAST_TAKER_ROUTE_KEY, nextPath);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -99,17 +103,43 @@ export default function App() {
   useEffect(() => {
     if (!activePair) return;
     let cancelled = false;
+    let polling = false;
     async function poll() {
+      if (polling) return;
+      polling = true;
       try {
         const prices = await exchange().referencePrices();
+        const now = Date.now();
         const expectedPairs = new Set(pairs.map((pair) => pair.pair_id));
-        if (prices.length !== expectedPairs.size || prices.some((candidate) => !expectedPairs.has(candidate.pair))) {
+        const returnedPairs = new Set(prices.map((candidate) => candidate.pair));
+        if (
+          prices.length !== expectedPairs.size
+          || returnedPairs.size !== expectedPairs.size
+          || prices.some((candidate) => !expectedPairs.has(candidate.pair))
+        ) {
           throw new Error("The reference-price batch does not match the deployment registry.");
         }
         const numeraire = deployment?.market_registry.objective_numeraire_asset_id;
         const nextAssetUnitPrices: Record<string, number> = numeraire ? { [numeraire]: 1 } : {};
         for (const candidate of prices) {
           const configuredPair = pairs.find((pair) => pair.pair_id === candidate.pair);
+          const observedAt = candidate.observed_at_ms;
+          const validUntil = candidate.valid_until_ms;
+          const age = now - observedAt;
+          if (
+            !configuredPair
+            || !positiveAtomic(candidate.midpoint)
+            || !positiveAtomic(candidate.scale)
+            || candidate.scale !== configuredPair.price_base_scale
+            || !Number.isSafeInteger(observedAt)
+            || observedAt <= 0
+            || !Number.isSafeInteger(validUntil)
+            || validUntil < now
+            || validUntil < observedAt
+            || validUntil - observedAt > (configuredPair.reference_attestation_ttl_ms ?? 15_000)
+            || age < -5_000
+            || age > (configuredPair.reference_max_age_ms ?? 15_000)
+          ) throw new Error("The reference-price batch is stale or malformed.");
           if (!configuredPair || configuredPair.quote_asset_id !== numeraire) continue;
           const unitPrice = Number(formatPrice(candidate.midpoint, { ...configuredPair, price_base_scale: candidate.scale }));
           if (Number.isFinite(unitPrice) && unitPrice > 0) nextAssetUnitPrices[configuredPair.base_asset_id] = unitPrice;
@@ -124,15 +154,19 @@ export default function App() {
             midpointPrice: price.midpoint,
             priceBaseScale: price.scale,
             observedAtUnixMs: price.observed_at_ms,
+            validUntilUnixMs: price.valid_until_ms,
           },
         });
         setAssetUnitPrices(nextAssetUnitPrices);
         setOnline(true);
       } catch {
         if (!cancelled) {
+          setReference(null);
           setAssetUnitPrices({});
           setOnline(false);
         }
+      } finally {
+        polling = false;
       }
     }
     void poll();
@@ -151,20 +185,42 @@ export default function App() {
     if (!allAssets.includes(slideAsset)) setSlideAsset(allAssets[0] ?? "");
   }, [allAssets, slideAsset]);
   const [starknetAddress, setStarknetAddress] = useState<string | null>(() => connectedStarknetAddress());
+  const walletSelectionRevision = useRef(0);
+  const updateStarknetAddress = useCallback((next: string | null) => {
+    walletSelectionRevision.current += 1;
+    setStarknetAddress((previous) => {
+      if (previous === next) return previous;
+      if (previous) walletRuntime()?.lock();
+      return next;
+    });
+  }, []);
   const { runtimeStatus, walletReady, hasVault } = useWalletState(starknetAddress);
-  const view = useWalletView(walletReady);
+  const view = useWalletView(walletReady, starknetAddress);
   const rows = useMemo<OrderRow[]>(() => orderRows(view.orders, pairs, assetUnitPrices), [assetUnitPrices, pairs, view.orders]);
 
   useEffect(() => {
+    let restoreInFlight = false;
     const reconcile = (next: string | null) =>
       setStarknetAddress((previous) => {
         if (previous === next) return previous;
         if (previous) walletRuntime()?.lock();
         return next;
       });
-    const restore = () => void restoreConnectedStarknetWallet().then(reconcile).catch(() => undefined);
+    const restore = () => {
+      if (restoreInFlight) return;
+      restoreInFlight = true;
+      const revision = walletSelectionRevision.current;
+      void restoreConnectedStarknetWallet()
+        .then((next) => {
+          if (revision === walletSelectionRevision.current) reconcile(next);
+        })
+        .catch(() => {
+          if (revision === walletSelectionRevision.current) reconcile(null);
+        })
+        .finally(() => { restoreInFlight = false; });
+    };
     restore();
-    const timer = window.setInterval(() => reconcile(connectedStarknetAddress()), 1_500);
+    const timer = window.setInterval(restore, 1_500);
     window.addEventListener("focus", restore);
     window.addEventListener("starknet#initialized", restore);
     return () => {
@@ -181,15 +237,17 @@ export default function App() {
   async function handleSubmit(intent: TicketSubmitIntent) {
     const runtime = walletRuntime();
     const pair = pairs.find((candidate) => candidate.pair_id === intent.pairId);
-    if (!runtime?.isReady() || !pair) {
+    if (!runtime?.isReady(starknetAddress) || !pair) {
       setOpenSlide("wallet");
       return false;
     }
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const limitPrice = toPriceAtoms(intent.limitPrice, pair);
-      if (limitPrice === "0") throw new Error("The reference price is unavailable. Retry shortly.");
+      if (!ticketReferenceIsFresh(intent, pair)) {
+        throw new Error("The reference price is unavailable. Retry shortly.");
+      }
+      const limitPrice = intent.midpointPrice;
       // a buy spends quote: the base it buys at the limit is its size.
       const amount =
         intent.side === "Sell"
@@ -207,8 +265,13 @@ export default function App() {
   }
 
   async function handleCancel(row: OrderRow) {
+    setSubmitError(null);
     try {
-      await walletRuntime()?.cancelOrder(row.id);
+      const runtime = walletRuntime();
+      if (!runtime?.isReady(starknetAddress)) {
+        throw new Error("Reconnect and authorize your wallet before cancelling this order.");
+      }
+      await runtime.cancelOrder(row.id);
     } catch (error) {
       setSubmitError(userFacingErrorMessage(error, "Order cancellation failed. Retry."));
     }
@@ -221,7 +284,7 @@ export default function App() {
       <div>
         {deploymentError && (
           <div className="slide-inline-notice" role="alert">
-            {deploymentError}. Trading is unavailable until the deployment manifest is corrected.
+            Trading is temporarily unavailable while the deployment manifest is being finalized.
           </div>
         )}
         {tab === "trade" && (
@@ -231,22 +294,21 @@ export default function App() {
             referencePrice={referencePrice}
             balances={view.balances}
             walletReady={walletReady}
-            hasPrivateBalance={view.balances.some((balance) => BigInt(balance.available) > 0n || BigInt(balance.locked) > 0n)}
             submitting={submitting}
             submitError={submitError}
             orders={rows}
             online={online}
             onSelectPair={setActivePairId}
             onOpenWallet={() => setOpenSlide("wallet")}
-            onDeposit={() => {
-              setSlideAsset(activePair?.quote_asset_id ?? allAssets[0] ?? "");
+            onDeposit={(asset) => {
+              setSlideAsset(asset || activePair?.quote_asset_id || allAssets[0] || "");
               setOpenSlide("deposit");
             }}
             onSubmit={handleSubmit}
             onViewOrders={() => changeTab("orders")}
           />
         )}
-        {tab === "orders" && <OrdersPage orders={rows} error={submitError} onCancel={(row) => void handleCancel(row)} walletReady={walletReady} onConnectWallet={() => setOpenSlide("wallet")} />}
+        {tab === "orders" && <OrdersPage orders={rows} error={submitError} onCancel={handleCancel} walletReady={walletReady} onConnectWallet={() => setOpenSlide("wallet")} />}
         {tab === "assets" && (
           <AssetsPage
             allAssets={allAssets}
@@ -274,14 +336,14 @@ export default function App() {
         runtimeStatus={runtimeStatus}
         hasVault={hasVault}
         starknetAddress={starknetAddress}
-        onStarknetConnected={setStarknetAddress}
-        onStarknetDisconnected={() => setStarknetAddress(null)}
+        onStarknetConnected={updateStarknetAddress}
+        onStarknetDisconnected={() => updateStarknetAddress(null)}
       />
       <DepositSlide
         open={openSlide === "deposit"}
         onClose={() => setOpenSlide(null)}
         defaultAsset={slideAsset}
-        allAssets={depositableAssets.length > 0 ? depositableAssets : allAssets}
+        allAssets={depositableAssets}
         starknetAddress={starknetAddress}
         walletReady={walletReady}
         onOpenWallet={() => setOpenSlide("wallet")}

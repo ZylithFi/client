@@ -31,7 +31,6 @@ export type ExchangeStatus = {
   seq: number;
   last_close_ms: number;
   epoch_ms: number;
-  in_flight: number;
   pairs: string[];
   registry_version: number;
   registry_hash: string;
@@ -91,7 +90,6 @@ export type WithdrawalStatus = {
   nullifier: string;
   /** null when the operator has no such withdrawal. */
   stage: WithdrawalStage | null;
-  updated_at_ms: number | null;
 };
 
 /** the answer to a sealed status request: one entry per queried order and nullifier. */

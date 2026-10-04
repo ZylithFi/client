@@ -64,6 +64,11 @@ export function zylith_wallet_registry_fingerprint(registry_json: string): strin
  */
 export function zylith_wallet_sign_strk20_exit_claim(input_json: string): string;
 
+/**
+ * recomputes the authenticated output root before browser recovery trusts indexer records.
+ */
+export function zylith_wallet_transition_output_root(input_json: string): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -87,6 +92,7 @@ export interface InitOutput {
     readonly zylith_wallet_recovery_auth_tag: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_registry_fingerprint: (a: number, b: number) => [number, number, number, number];
     readonly zylith_wallet_sign_strk20_exit_claim: (a: number, b: number) => [number, number, number, number];
+    readonly zylith_wallet_transition_output_root: (a: number, b: number) => [number, number, number, number];
     readonly init: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

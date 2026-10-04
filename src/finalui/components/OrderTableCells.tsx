@@ -3,9 +3,25 @@ import type { OrderRow } from "../../domain/orders";
 export type OrderSortKey = "orderValue" | "time";
 export type OrderSortDirection = "ascending" | "descending";
 
-function numericValue(value: string) {
-  const parsed = Number.parseFloat(value.replaceAll(",", ""));
-  return Number.isFinite(parsed) ? parsed : 0;
+function decimalParts(value: string) {
+  const normalized = value.replaceAll(",", "");
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return null;
+  const [whole, fraction = ""] = normalized.split(".");
+  return { whole, fraction };
+}
+
+export function filledPercentage(filled: string, total: string) {
+  const filledParts = decimalParts(filled);
+  const totalParts = decimalParts(total);
+  if (!filledParts || !totalParts) return 0;
+  const decimals = Math.max(filledParts.fraction.length, totalParts.fraction.length);
+  const integer = ({ whole, fraction }: NonNullable<ReturnType<typeof decimalParts>>) =>
+    BigInt(`${whole}${fraction.padEnd(decimals, "0")}`);
+  const filledValue = integer(filledParts);
+  const totalValue = integer(totalParts);
+  if (totalValue <= 0n) return 0;
+  const tenths = (filledValue * 1_000n + totalValue / 2n) / totalValue;
+  return Number(tenths > 1_000n ? 1_000n : tenths) / 10;
 }
 
 export function sortOrderRows(rows: OrderRow[], key: OrderSortKey | null, direction: OrderSortDirection) {
@@ -59,10 +75,17 @@ export function SortableTableHeader<T extends string>({
 }
 
 export function FilledProgress({ filled, total }: { filled: string; total: string }) {
-  const totalValue = numericValue(total);
-  const percentage = totalValue > 0 ? Math.min(100, Math.max(0, numericValue(filled) / totalValue * 100)) : 0;
+  const percentage = filledPercentage(filled, total);
   return (
-    <div className="filled-progress" title={`${percentage.toFixed(1)}% filled`}>
+    <div
+      className="filled-progress"
+      title={`${percentage.toFixed(1)}% filled`}
+      role="progressbar"
+      aria-label={`${filled} of ${total} filled`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Number(percentage.toFixed(1))}
+    >
       <div className="filled-progress-track" aria-hidden="true"><i style={{ width: `${percentage}%` }}/></div>
       <span>{filled}</span>
     </div>

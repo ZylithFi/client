@@ -10,8 +10,9 @@ const pair: PairConfig = {
   base_asset_id: "STRK",
   quote_asset_id: "USDC",
   min_order_amount: "1",
+  min_order_quote_amount: "1",
   price_base_scale: "1000000000000000000",
-  taker_fee_bps: 4,
+  taker_fee_bps: 2,
   external_match_enabled: true,
   external_settlement_support_quote: "1",
   enabled: true,
@@ -25,9 +26,9 @@ const commonProps = {
     midpointPrice: "50000",
     priceBaseScale: "1000000000000000000",
     observedAtUnixMs: Date.now(),
+    validUntilUnixMs: Date.now() + 10_000,
   },
-  marketMidpoint: 0.04,
-  hasPrivateBalance: false,
+  online: true,
   submitting: false,
   submitError: null,
   onOpenWallet: vi.fn(),
@@ -58,14 +59,13 @@ describe("IntentPanel", () => {
     expect(screen.getByRole("button", { name: "25%" })).toBeDisabled();
   });
 
-  it("uses the signed reference for protection while keeping direct bbo sizing indicative", async () => {
+  it("uses the authenticated signed midpoint for both estimates and execution", async () => {
     const onSubmit = vi.fn().mockResolvedValue(true);
     render(
       <IntentPanel
         {...commonProps}
         balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
         walletReady
-        hasPrivateBalance
         onSubmit={onSubmit}
       />,
     );
@@ -73,7 +73,7 @@ describe("IntentPanel", () => {
     fireEvent.change(screen.getByLabelText("Trade amount"), {
       target: { value: "100" },
     });
-    expect(screen.getByText("≈ 2,500")).toBeInTheDocument();
+    expect(screen.getByText("≈ 1,999.6")).toBeInTheDocument();
     expect(screen.getByLabelText("External matching")).not.toBeChecked();
     expect(screen.queryByText("Residual route")).not.toBeInTheDocument();
     expect(screen.queryByText("Unfilled amount")).not.toBeInTheDocument();
@@ -87,7 +87,8 @@ describe("IntentPanel", () => {
       expect.objectContaining({
         side: "Buy",
         payAmount: "100",
-        limitPrice: "0.05015",
+        midpointPrice: "50000",
+        priceBaseScale: "1000000000000000000",
         external: false,
       })
     );
@@ -100,7 +101,6 @@ describe("IntentPanel", () => {
         {...commonProps}
         balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
         walletReady
-        hasPrivateBalance
         onSubmit={onSubmit}
       />
     );
@@ -133,6 +133,35 @@ describe("IntentPanel", () => {
     expect(screen.queryByText("Residual route")).not.toBeInTheDocument();
   });
 
+  it("requests a deposit for the selected side's exact pay asset", () => {
+    const onDeposit = vi.fn();
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "1000000", locked: "0" }]}
+        walletReady
+        onDeposit={onDeposit}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Sell" }));
+    fireEvent.click(screen.getByRole("button", { name: "Deposit" }));
+
+    expect(onDeposit).toHaveBeenCalledWith("STRK");
+  });
+
+  it("does not treat funds locked in orders as spendable", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "0", locked: "1000000" }]}
+        walletReady
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Deposit" })).toBeEnabled();
+  });
+
   it("does not display a nonzero small receive amount as zero", () => {
     render(
       <IntentPanel
@@ -142,24 +171,77 @@ describe("IntentPanel", () => {
           pair_id: "STRK/ETH",
           quote_asset_id: "ETH",
         }}
-        marketMidpoint={0.000015637}
+        referencePrice={{
+          displayPrice: "0.000015637",
+          midpointPrice: "15637",
+          priceBaseScale: "1000000000000000000",
+          observedAtUnixMs: Date.now(),
+          validUntilUnixMs: Date.now() + 10_000,
+        }}
         walletReady={false}
       />
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Sell" }));
 
-    expect(screen.getByText("≈ 0.000015637")).toBeInTheDocument();
+    expect(screen.getByText("≈ 0.000015633873")).toBeInTheDocument();
   });
 
-  it("normalizes pasted amounts to one decimal separator", () => {
+  it("does not reinterpret malformed pasted amounts", () => {
     render(<IntentPanel {...commonProps} walletReady={false} />);
+    const input = screen.getByLabelText("Trade amount");
+    const original = (input as HTMLInputElement).value;
 
-    fireEvent.change(screen.getByLabelText("Trade amount"), {
+    fireEvent.change(input, {
       target: { value: "1abc.2.3" },
     });
 
-    expect(screen.getByLabelText("Trade amount")).toHaveValue("1.23");
-    expect(screen.getByText("≈ 30.75")).toBeInTheDocument();
+    expect(input).toHaveValue(original);
+  });
+
+  it("submits at most once while the first submission is unresolved", async () => {
+    let finish: ((value: boolean) => void) | undefined;
+    const onSubmit = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
+        walletReady
+        onSubmit={onSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Trade amount"), { target: { value: "100" } });
+    const submit = screen.getByRole("button", { name: "Submit order" });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    await act(async () => finish?.(true));
+  });
+
+  it("fails closed while the signed-price service is offline", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
+        walletReady
+        online={false}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Trade amount"), { target: { value: "100" } });
+    expect(screen.getByRole("button", { name: "Submit order" })).toBeDisabled();
+  });
+
+  it("rejects a pay amount that cannot meet the market's base-size minimum", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        pair={{ ...pair, min_order_amount: "1000000000000000000000" }}
+        balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
+        walletReady
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Trade amount"), { target: { value: "1" } });
+    expect(screen.getByText(/below the STRK\/USDC minimum/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit order" })).toBeDisabled();
   });
 });

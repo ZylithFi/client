@@ -145,7 +145,7 @@ export function summarizeFundingError(error: unknown): string {
 
 export function unwrapJsonErrorBody(message: string): string {
   const trimmed = message.trim();
-  if (!/^\{/.test(trimmed)) return message;
+  if (!/^\{/.test(trimmed) || trimmed.length > 16_384) return message;
   try {
     const parsed = JSON.parse(trimmed) as Record<string, unknown>;
     for (const key of ["error", "message", "detail", "reason"]) {
@@ -179,118 +179,146 @@ export function isWalletRequestUnavailableError(error: unknown): boolean {
 
 export function isProofBlockTooRecent(error: unknown): boolean {
   const message = errorMessage(error);
-  if (
+  return (
     /proof block number .* too recent|maximum allowed block number|proof block is not old enough/i.test(
       message
     )
-  ) {
-    return true;
-  }
-  if (error instanceof Error && "cause" in error) {
-    return isProofBlockTooRecent((error as Error & { cause?: unknown }).cause);
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofBlockTooRecent((error as { cause?: unknown }).cause);
-  }
-  return false;
+  );
 }
 
 export function isProofExpired(error: unknown): boolean {
   const message = errorMessage(error);
-  if (/PROOF_EXPIRED|proof expired|proof.*expired/i.test(message)) {
-    return true;
-  }
-  if (error instanceof Error && "cause" in error) {
-    return isProofExpired((error as Error & { cause?: unknown }).cause);
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofExpired((error as { cause?: unknown }).cause);
-  }
-  return false;
+  return /PROOF_EXPIRED|proof expired|proof.*expired/i.test(message);
 }
 
 export function isProofProviderContractVisibilityLag(error: unknown): boolean {
   const message = errorMessage(error);
-  if (
+  return (
     /requested contract address .* is not deployed|contract.*not.*found|not deployed|class hash: 0x0{8,}/i.test(
       message
     )
-  ) {
-    return true;
-  }
-  if (error instanceof Error && "cause" in error) {
-    return isProofProviderContractVisibilityLag(
-      (error as Error & { cause?: unknown }).cause
-    );
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofProviderContractVisibilityLag(
-      (error as { cause?: unknown }).cause
-    );
-  }
-  return false;
+  );
 }
 
 export function isProofProviderServiceBusy(error: unknown): boolean {
   const message = errorMessage(error);
-  if (
+  return (
     /service busy|service is busy|proving service is at capacity|prover.*capacity|-32005/i.test(
       message
     )
-  ) {
-    return true;
-  }
-  if (error instanceof Error && "cause" in error) {
-    return isProofProviderServiceBusy(
-      (error as Error & { cause?: unknown }).cause
-    );
-  }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofProviderServiceBusy((error as { cause?: unknown }).cause);
-  }
-  return false;
+  );
 }
 
 export function isProofProviderTransientNetworkError(error: unknown): boolean {
+  if (proofSubmissionStarted(error)) return false;
   const message = errorMessage(error);
-  if (
+  return (
     /signal is aborted|aborted without reason|aborterror|timeouterror|timed out|operation was aborted|request aborted|failed to fetch|networkerror|network request failed|load failed|fetch failed/i.test(
       message
     )
-  ) {
-    return true;
+  );
+}
+
+export function markProofSubmissionStarted(error: unknown): Error {
+  if (proofSubmissionRejected(error)) {
+    return error instanceof Error ? error : new Error(errorMessage(error));
   }
-  if (error instanceof Error && "cause" in error) {
-    return isProofProviderTransientNetworkError(
-      (error as Error & { cause?: unknown }).cause
-    );
+  const marked = new Error(errorMessage(error) || "Proof submission failed", {
+    cause: error,
+  });
+  Object.defineProperty(marked, "zylithProofSubmissionStarted", {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return marked;
+}
+
+export function markProofSubmissionRejected(error: unknown): Error {
+  const marked = new Error(errorMessage(error) || "Proof submission was rejected", {
+    cause: error,
+  });
+  Object.defineProperty(marked, "zylithProofSubmissionRejected", {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return marked;
+}
+
+function proofSubmissionRejected(
+  error: unknown,
+  seen = new Set<unknown>(),
+  depth = 0,
+): boolean {
+  if (!error || seen.has(error) || depth > 8 || seen.size >= 32) return false;
+  if (typeof error !== "object") return false;
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  let rejected: unknown;
+  let cause: unknown;
+  try {
+    rejected = record.zylithProofSubmissionRejected;
+    cause = record.cause;
+  } catch {
+    return false;
   }
-  if (error && typeof error === "object" && "cause" in error) {
-    return isProofProviderTransientNetworkError(
-      (error as { cause?: unknown }).cause
-    );
+  return rejected === true || proofSubmissionRejected(cause, seen, depth + 1);
+}
+
+export function proofSubmissionStarted(
+  error: unknown,
+  seen = new Set<unknown>(),
+  depth = 0,
+): boolean {
+  if (!error || seen.has(error) || depth > 8 || seen.size >= 32) return false;
+  if (typeof error !== "object") return false;
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  let started: unknown;
+  let cause: unknown;
+  try {
+    started = record.zylithProofSubmissionStarted;
+    cause = record.cause;
+  } catch {
+    return false;
   }
-  return false;
+  return started === true
+    || proofSubmissionStarted(cause, seen, depth + 1);
 }
 
 export function errorMessage(error: unknown): string {
   const nested = nestedErrorMessages(error);
   if (nested.length > 0) return nested.join(" ");
-  if (error instanceof Error) return error.message;
+  try {
+    if (error instanceof Error) return error.message;
+  } catch {}
   if (typeof error === "string") return error;
   try {
-    return JSON.stringify(error);
-  } catch {
     return String(error);
+  } catch {
+    return "";
   }
 }
 
 function nestedErrorMessages(
   error: unknown,
-  seen = new Set<unknown>()
+  seen = new Set<unknown>(),
+  depth = 0,
+  budget: { remaining: number } = { remaining: 64 },
 ): string[] {
-  if (error === null || error === undefined || seen.has(error)) return [];
-  if (typeof error === "string") return [decodeMaybeHexString(error)];
+  if (
+    error === null ||
+    error === undefined ||
+    seen.has(error) ||
+    depth > 8 ||
+    budget.remaining <= 0
+  ) return [];
+  if (typeof error === "string") {
+    return [decodeMaybeHexString(error.slice(0, 4_096))];
+  }
   if (
     typeof error === "number" ||
     typeof error === "bigint" ||
@@ -298,23 +326,46 @@ function nestedErrorMessages(
   ) {
     return [String(error)];
   }
-  if (error instanceof Error) {
+  let isError = false;
+  try {
+    isError = error instanceof Error;
+  } catch {
+    return [];
+  }
+  if (isError) {
     seen.add(error);
+    budget.remaining -= 1;
+    let message = "";
+    let cause: unknown;
+    try {
+      const typedError = error as Error & { cause?: unknown };
+      message = typedError.message;
+      cause = typedError.cause;
+    } catch {
+      return [];
+    }
     return [
-      error.message,
-      ...nestedErrorMessages(
-        (error as Error & { cause?: unknown }).cause,
-        seen
-      ),
+      message.slice(0, 4_096),
+      ...nestedErrorMessages(cause, seen, depth + 1, budget),
     ].filter(Boolean);
   }
-  if (Array.isArray(error)) {
+  let isArray = false;
+  try {
+    isArray = Array.isArray(error);
+  } catch {
+    return [];
+  }
+  if (isArray) {
     seen.add(error);
-    return error.flatMap((item) => nestedErrorMessages(item, seen));
+    budget.remaining -= 1;
+    return (error as unknown[])
+      .slice(0, 32)
+      .flatMap((item) => nestedErrorMessages(item, seen, depth + 1, budget));
   }
   if (typeof error !== "object") return [];
 
   seen.add(error);
+  budget.remaining -= 1;
   const record = error as Record<string, unknown>;
   const messages: string[] = [];
   for (const key of [
@@ -327,13 +378,21 @@ function nestedErrorMessages(
     "details",
     "cause",
   ]) {
-    if (key in record) messages.push(...nestedErrorMessages(record[key], seen));
+    let value: unknown;
+    try {
+      value = record[key];
+    } catch {
+      continue;
+    }
+    if (value !== undefined) {
+      messages.push(...nestedErrorMessages(value, seen, depth + 1, budget));
+    }
   }
   if (messages.length > 0) return dedupeMessages(messages);
   try {
-    return [JSON.stringify(error)];
-  } catch {
     return [String(error)];
+  } catch {
+    return [];
   }
 }
 

@@ -100,13 +100,41 @@ describe("serviceUrls", () => {
     ).toThrow("Configured service URL must use HTTPS");
   });
 
-  it("maps zylith hosts to the API host", () => {
+  it("rejects production services outside the Zylith API boundary", () => {
+    vi.stubGlobal("window", {
+      location: {
+        hostname: "app.zylith.fi",
+        origin: "https://app.zylith.fi",
+        protocol: "https:",
+      },
+    });
+
+    expect(() => browserSafeServiceUrl(
+      "https://attacker.example/operator",
+      "/operator",
+    )).toThrow(/outside the production Zylith boundary/i);
+    expect(() => browserSafeServiceUrl(
+      "https://api.zylith.fi/indexer",
+      "/operator",
+    )).toThrow(/outside the production Zylith boundary/i);
+    expect(browserSafeServiceUrl(
+      "https://api.zylith.fi/operator",
+      "/operator",
+    )).toBe("https://api.zylith.fi/operator");
+    expect(() => browserSafeServiceUrl(
+      "https://api.zylith.fi/starknet-privacy-prover-unreviewed",
+      "/starknet-privacy-prover",
+    )).toThrow(/outside the production Zylith boundary/i);
+    expect(browserSafeServiceUrl(
+      "https://api.zylith.fi/starknet-privacy-prover-sepolia",
+      "/starknet-privacy-prover",
+    )).toBe("https://api.zylith.fi/starknet-privacy-prover-sepolia");
+  });
+
+  it("maps only the production app host to the API host", () => {
     expect(
       defaultServiceUrlForHost("app.zylith.fi", "/starknet-privacy-prover"),
     ).toBe("https://api.zylith.fi/starknet-privacy-prover");
-    expect(defaultServiceUrlForHost("preview.zylith.fi", "/operator/")).toBe(
-      "https://api.zylith.fi/operator",
-    );
     expect(defaultServiceUrlForHost("example.com", "indexer")).toBe("");
   });
 

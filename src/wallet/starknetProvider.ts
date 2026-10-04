@@ -7,9 +7,15 @@ import {
   selectedStarknetProvider,
 } from "../domain/browserWallet";
 import { type DeploymentConfig, loadDeployment } from "../domain/deployment";
-import { normalizeFeltForComparison } from "../domain/felt";
+import {
+  normalizeConfiguredFelt,
+  normalizeFeltForComparison,
+} from "../domain/felt";
 import { starknetRpc } from "../domain/runtimeHttp";
-import { stableJsonStringify, type WalletSignatureMessageVersion } from "../domain/walletLocalCrypto";
+import {
+  stableJsonStringify,
+  type WalletSignatureMessageVersion,
+} from "../domain/walletLocalCrypto";
 
 const WALLET_SIGNATURE_REQUEST_TIMEOUT_MS = 90_000;
 const STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS = 10_000;
@@ -37,17 +43,20 @@ export async function executeStarknetWalletCall(
   provider: StarknetInjectedProvider,
   call: StarknetWalletCall
 ) {
-  if (typeof provider.account?.execute === "function") {
+  const account = safeWalletValue(provider, "account");
+  const execute = safeWalletValue(account, "execute");
+  if (typeof execute === "function") {
     return withStarknetWalletRequestTimeout(
-      provider.account.execute([call]),
+      Promise.resolve().then(() => execute.call(account, [call])),
       WALLET_SIGNATURE_REQUEST_TIMEOUT_MS
     );
   }
-  if (typeof provider.request !== "function") {
+  const providerRequest = safeWalletValue(provider, "request");
+  if (typeof providerRequest !== "function") {
     throw new Error("Selected Starknet wallet cannot submit this transaction");
   }
   return withStarknetWalletRequestTimeout(
-    provider.request.call(provider, {
+    Promise.resolve().then(() => providerRequest.call(provider, {
       type: "wallet_addInvokeTransaction",
       params: {
         calls: [{
@@ -56,7 +65,7 @@ export async function executeStarknetWalletCall(
           calldata: call.calldata,
         }],
       },
-    }),
+    })),
     WALLET_SIGNATURE_REQUEST_TIMEOUT_MS
   );
 }
@@ -107,6 +116,10 @@ export async function buildZylithWalletAuthTypedData(input: {
   origin: string;
   messageVersion: WalletSignatureMessageVersion;
 }) {
+  const origin = input.origin.trim().toLowerCase();
+  if (!/^[\x20-\x7e]{1,31}$/.test(origin)) {
+    throw new Error("Zylith wallet authorization origin is not a readable short string");
+  }
   return {
     types: {
       StarknetDomain: [
@@ -118,7 +131,7 @@ export async function buildZylithWalletAuthTypedData(input: {
       ZylithSession: [
         { name: "action", type: "shortstring" },
         { name: "wallet", type: "ContractAddress" },
-        { name: "origin", type: "felt" },
+        { name: "origin", type: "shortstring" },
         { name: "deployment", type: "felt" },
         { name: "version", type: "u128" },
       ],
@@ -126,16 +139,16 @@ export async function buildZylithWalletAuthTypedData(input: {
     primaryType: "ZylithSession",
     domain: {
       name: "Zylith",
-      version: "1",
+      version: "2",
       chainId: input.chainId,
       revision: "1",
     },
     message: {
-      action: "Authorize",
+      action: "Only sign on app.zylith.fi",
       wallet: input.walletAddress,
-      origin: await feltHashForText(input.origin),
+      origin,
       deployment: feltFromHexHash(input.deploymentId),
-      version: "1",
+      version: String(input.messageVersion),
     },
   };
 }
@@ -144,7 +157,8 @@ export async function requestStarknetWalletTypedSignature(
   provider: StarknetInjectedProvider,
   typedData: unknown
 ) {
-  if (provider.request) {
+  const providerRequest = safeWalletValue(provider, "request");
+  if (typeof providerRequest === "function") {
     const requests = [
       { type: "wallet_signTypedData", params: typedData },
       { method: "wallet_signTypedData", params: typedData },
@@ -153,7 +167,7 @@ export async function requestStarknetWalletTypedSignature(
     for (const request of requests) {
       try {
         const result = await withWalletSignatureTimeout(
-          provider.request.call(provider, request)
+          Promise.resolve().then(() => providerRequest.call(provider, request))
         );
         if (result !== null && result !== undefined) return result;
       } catch (error) {
@@ -171,10 +185,12 @@ export async function requestStarknetWalletTypedSignature(
       }
     }
   }
-  if (typeof provider.account?.signMessage === "function") {
+  const account = safeWalletValue(provider, "account");
+  const signMessage = safeWalletValue(account, "signMessage");
+  if (typeof signMessage === "function") {
     try {
       return await withWalletSignatureTimeout(
-        provider.account.signMessage(typedData)
+        Promise.resolve().then(() => signMessage.call(account, typedData))
       );
     } catch (error) {
       if (isWalletSignatureProviderTimeout(error)) {
@@ -227,14 +243,6 @@ export async function sha256Hex(value: string) {
   return `0x${bytesToHex(new Uint8Array(digest))}`;
 }
 
-async function feltHashForText(value: string) {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value)
-  );
-  return `0x${bytesToHex(new Uint8Array(digest).slice(0, 31))}`;
-}
-
 function feltFromHexHash(value: string) {
   const normalized = value.trim().replace(/^0x/i, "").toLowerCase();
   return `0x${normalized.slice(0, 62) || "0"}`;
@@ -265,29 +273,60 @@ function isWalletRequestUnavailableError(error: unknown) {
   );
 }
 
-function runtimeAddressFromUnknown(value: unknown): string | null {
-  if (typeof value === "string" && value.trim()) return value;
-  if (Array.isArray(value)) {
+const MAX_WALLET_VALUE_DEPTH = 8;
+const MAX_WALLET_VALUE_NODES = 32;
+
+function safeWalletValue(value: unknown, key: string): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeIsArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+function runtimeAddressFromUnknown(
+  value: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet<object>(),
+  budget: { remaining: number } = { remaining: MAX_WALLET_VALUE_NODES },
+): string | null {
+  if (depth > MAX_WALLET_VALUE_DEPTH || budget.remaining <= 0) return null;
+  if (typeof value === "string") return normalizeConfiguredFelt(value) || null;
+  if (safeIsArray(value)) {
+    if (seen.has(value)) return null;
+    seen.add(value);
+    budget.remaining -= 1;
     for (const item of value) {
-      const address = runtimeAddressFromUnknown(item);
+      const address = runtimeAddressFromUnknown(item, depth + 1, seen, budget);
       if (address) return address;
     }
     return null;
   }
   if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  budget.remaining -= 1;
   return (
-    runtimeAddressFromUnknown(record.address) ??
-    runtimeAddressFromUnknown(record.selectedAddress) ??
-    runtimeAddressFromUnknown(record.account) ??
-    runtimeAddressFromUnknown(record.accounts)
+    runtimeAddressFromUnknown(safeWalletValue(value, "address"), depth + 1, seen, budget) ??
+    runtimeAddressFromUnknown(safeWalletValue(value, "selectedAddress"), depth + 1, seen, budget) ??
+    runtimeAddressFromUnknown(safeWalletValue(value, "account"), depth + 1, seen, budget) ??
+    runtimeAddressFromUnknown(safeWalletValue(value, "accounts"), depth + 1, seen, budget)
   );
 }
 
 export function connectedProviderAddress(provider: StarknetInjectedProvider) {
   return (
-    runtimeAddressFromUnknown(provider.account?.address) ??
-    runtimeAddressFromUnknown(provider.selectedAddress)
+    runtimeAddressFromUnknown(safeWalletValue(safeWalletValue(provider, "account"), "address")) ??
+    runtimeAddressFromUnknown(safeWalletValue(provider, "selectedAddress"))
   );
 }
 
@@ -311,7 +350,11 @@ export async function selectInjectedStarknetProvider() {
       if (isUserRejectedWalletError(error)) throw error;
       continue;
     }
-    if (provider.account?.execute || provider.request) {
+    const account = safeWalletValue(provider, "account");
+    if (
+      typeof safeWalletValue(account, "execute") === "function"
+      || typeof safeWalletValue(provider, "request") === "function"
+    ) {
       await ensureWalletChain(provider, deployment);
       return provider;
     }
@@ -331,16 +374,9 @@ export async function ensureWalletChain(
   }
   const current = await requestWalletChainId(provider);
   if (normalizeRuntimeChainId(current) === expected) return;
-  const switchAccepted = await requestWalletChainSwitch(provider, expected);
+  await requestWalletChainSwitch(provider, expected);
   const switched = await requestWalletChainId(provider);
   if (normalizeRuntimeChainId(switched) === expected) return;
-  if (
-    !normalizeRuntimeChainId(current) &&
-    !normalizeRuntimeChainId(switched) &&
-    switchAccepted
-  ) {
-    return;
-  }
   validateWalletChainMatch(deployment.chain_id, switched, deployment.network);
 }
 
@@ -371,7 +407,8 @@ async function requestWalletChainSwitch(
   provider: StarknetInjectedProvider,
   chainId: string
 ): Promise<boolean> {
-  if (!provider.request) return false;
+  const providerRequest = safeWalletValue(provider, "request");
+  if (typeof providerRequest !== "function") return false;
   const requests = [
     { type: "wallet_switchStarknetChain", params: { chainId } },
     { method: "wallet_switchStarknetChain", params: { chainId } },
@@ -379,7 +416,7 @@ async function requestWalletChainSwitch(
   for (const request of requests) {
     try {
       await withStarknetWalletRequestTimeout(
-        provider.request.call(provider, request),
+        providerRequest.call(provider, request),
         STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
       );
       return true;
@@ -388,9 +425,7 @@ async function requestWalletChainSwitch(
       if (
         !isWalletRequestUnavailableError(error) &&
         !isWalletCallShapeError(error)
-      ) {
-        return true;
-      }
+      ) throw error;
     }
   }
   return false;
@@ -399,7 +434,8 @@ async function requestWalletChainSwitch(
 async function requestWalletChainId(
   provider: StarknetInjectedProvider
 ): Promise<string | null> {
-  if (provider.request) {
+  const providerRequest = safeWalletValue(provider, "request");
+  if (typeof providerRequest === "function") {
     const requests = [
       { type: "wallet_requestChainId" },
       { method: "wallet_requestChainId" },
@@ -408,40 +444,44 @@ async function requestWalletChainId(
     ];
     for (const request of requests) {
       const result = await withStarknetWalletRequestTimeout(
-        provider.request.call(provider, request),
+        Promise.resolve().then(() => providerRequest.call(provider, request)),
         STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
       ).catch(() => null);
       const chainId = chainIdFromUnknown(result);
       if (chainId) return chainId;
     }
   }
-  if (provider.getChainId) {
+  const getChainId = safeWalletValue(provider, "getChainId");
+  if (typeof getChainId === "function") {
     const value = await withStarknetWalletRequestTimeout(
-      Promise.resolve(provider.getChainId()),
+      Promise.resolve().then(() => getChainId.call(provider)),
       STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
     ).catch(() => null);
     const chainId = chainIdFromUnknown(value);
     if (chainId) return chainId;
   }
-  if (provider.account?.getChainId) {
+  const account = safeWalletValue(provider, "account");
+  const accountGetChainId = safeWalletValue(account, "getChainId");
+  if (typeof accountGetChainId === "function") {
     const value = await withStarknetWalletRequestTimeout(
-      provider.account.getChainId(),
+      Promise.resolve().then(() => accountGetChainId.call(account)),
       STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
     ).catch(() => null);
     const chainId = chainIdFromUnknown(value);
     if (chainId) return chainId;
   }
-  if (typeof provider.chainId === "function") {
+  const providerChainId = safeWalletValue(provider, "chainId");
+  if (typeof providerChainId === "function") {
     const value = await withStarknetWalletRequestTimeout(
-      Promise.resolve((provider.chainId as () => unknown)()),
+      Promise.resolve().then(() => providerChainId.call(provider)),
       STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
     ).catch(() => null);
     const chainId = chainIdFromUnknown(value);
     if (chainId) return chainId;
   }
   return (
-    chainIdFromUnknown(provider.chainId) ??
-    chainIdFromUnknown(provider.chain_id)
+    chainIdFromUnknown(providerChainId) ??
+    chainIdFromUnknown(safeWalletValue(provider, "chain_id"))
   );
 }
 
@@ -463,27 +503,38 @@ async function withStarknetWalletRequestTimeout<T>(
   }
 }
 
-function chainIdFromUnknown(value: unknown): string | null {
+function chainIdFromUnknown(
+  value: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet<object>(),
+  budget: { remaining: number } = { remaining: MAX_WALLET_VALUE_NODES },
+): string | null {
+  if (depth > MAX_WALLET_VALUE_DEPTH || budget.remaining <= 0) return null;
   if (typeof value === "string" && value.trim()) return value;
   if (typeof value === "bigint") return `0x${value.toString(16)}`;
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
     return `0x${value.toString(16)}`;
-  if (Array.isArray(value)) {
+  if (safeIsArray(value)) {
+    if (seen.has(value)) return null;
+    seen.add(value);
+    budget.remaining -= 1;
     for (const item of value) {
-      const chainId = chainIdFromUnknown(item);
+      const chainId = chainIdFromUnknown(item, depth + 1, seen, budget);
       if (chainId) return chainId;
     }
     return null;
   }
   if (!value || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  budget.remaining -= 1;
   return (
-    chainIdFromUnknown(record.chainId) ??
-    chainIdFromUnknown(record.chain_id) ??
-    chainIdFromUnknown(record.id) ??
-    chainIdFromUnknown(record.result) ??
-    chainIdFromUnknown(record.data) ??
-    chainIdFromUnknown(record.network)
+    chainIdFromUnknown(safeWalletValue(value, "chainId"), depth + 1, seen, budget) ??
+    chainIdFromUnknown(safeWalletValue(value, "chain_id"), depth + 1, seen, budget) ??
+    chainIdFromUnknown(safeWalletValue(value, "id"), depth + 1, seen, budget) ??
+    chainIdFromUnknown(safeWalletValue(value, "result"), depth + 1, seen, budget) ??
+    chainIdFromUnknown(safeWalletValue(value, "data"), depth + 1, seen, budget) ??
+    chainIdFromUnknown(safeWalletValue(value, "network"), depth + 1, seen, budget)
   );
 }
 
@@ -498,12 +549,36 @@ function normalizeRuntimeChainId(value: unknown): string | null {
 }
 
 export function walletErrorMessage(error: unknown) {
-  if (error instanceof Error) return error.message;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
+  return boundedWalletErrorMessage(error);
+}
+
+function boundedWalletErrorMessage(
+  error: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet<object>(),
+  budget: { remaining: number } = { remaining: 32 },
+): string {
+  if (depth > 8 || budget.remaining <= 0) return "";
+  if (typeof error === "string") return error.slice(0, 4_096);
+  if (
+    typeof error === "number"
+    || typeof error === "bigint"
+    || typeof error === "boolean"
+  ) return String(error);
+  if (!error || typeof error !== "object") return "";
+  if (seen.has(error)) return "";
+  seen.add(error);
+  budget.remaining -= 1;
+  for (const key of ["message", "error", "reason", "detail", "cause"]) {
+    const message = boundedWalletErrorMessage(
+      safeWalletValue(error, key),
+      depth + 1,
+      seen,
+      budget,
+    );
+    if (message) return message;
   }
+  return "";
 }
 
 export async function fetchTransactionReceiptStatus(
@@ -572,16 +647,14 @@ export async function fetchTransactionReceiptStatus(
       reason: revertReason || "Deposit transaction reverted.",
     };
   }
-  const confirmed =
-    /ACCEPTED|SUCCEEDED/.test(executionStatus) ||
-    /ACCEPTED|SUCCEEDED/.test(finalityStatus);
+  const confirmed = /ACCEPTED_ON_L1|ACCEPTED_ON_L2/.test(finalityStatus);
   return { failed: false, notFound: false, confirmed };
 }
 
 /** the id a wallet-signature vault is bound to: the chain and the contracts holding its notes. */
 export async function walletAuthDeploymentId(
   deployment: DeploymentConfig,
-  messageVersion: WalletSignatureMessageVersion
+  messageVersion: WalletSignatureMessageVersion,
 ) {
   return sha256Hex(
     stableJsonStringify({

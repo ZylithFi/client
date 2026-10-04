@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ZylithExchangeClient } from "@zylith/sdk";
+import { ZylithExchangeClient, readSdkJsonResponse } from "@zylith/sdk";
 import { normalizeConfiguredFelt } from "./felt";
 import { fetchWithTimeout } from "./runtimeHttp";
 import { browserSafeServiceUrl, localServiceUrl, normalizeUrl } from "./serviceUrls";
@@ -9,11 +9,15 @@ export type PairConfig = {
   base_asset_id: string;
   quote_asset_id: string;
   min_order_amount: string;
+  min_order_quote_amount: string;
   price_base_scale: string;
   taker_fee_bps: number;
   external_match_enabled: boolean;
   external_settlement_support_quote: string;
   enabled: boolean;
+  reference_price_methodology?: RegistryMarketConfig["reference_price"]["methodology"];
+  reference_max_age_ms?: number;
+  reference_attestation_ttl_ms?: number;
 };
 
 export type RegistryMarketConfig = {
@@ -21,6 +25,7 @@ export type RegistryMarketConfig = {
   base_asset_id: string;
   quote_asset_id: string;
   min_order_amount: string;
+  min_order_quote_amount: string;
   price_base_scale: string;
   taker_fee_bps: number;
   capabilities: {
@@ -99,6 +104,7 @@ export type DeploymentConfig = {
     primary: "starknet_privacy" | string;
     starknet_privacy?: {
       privacy_pool?: string;
+      privacy_pool_class_hash?: string;
       bridge_adapter?: string;
       discovery_url?: string;
       proving_url?: string;
@@ -115,6 +121,8 @@ export type DeploymentConfig = {
     };
   };
   proof: {
+    scheme: "snip36-stwo";
+    proof_version: string;
     transition_proof_program_address: string;
     withdrawal_proof_program_address: string;
     residual_recovery_proof_program_address: string;
@@ -122,7 +130,9 @@ export type DeploymentConfig = {
     starknet_os_config_hash: string;
     proof_account_address: string;
     settlement_account_address: string;
+    proof_validity_blocks: number;
     config_locked_after_deploy: boolean;
+    prover_build_id: string;
   };
   roles: {
     protocol_fee_recipient: string;
@@ -141,6 +151,7 @@ export type DeploymentConfig = {
 };
 
 const DEPLOYMENT_MANIFEST_TIMEOUT_MS = 10_000;
+const MAX_U128 = (1n << 128n) - 1n;
 const REQUIRED_FIELDS = ["deployment", "network", "chain_id", "rpc_url", "contracts", "market_registry", "funding", "proof", "roles", "runtime"] as const;
 const REQUIRED_CONTRACTS = ["commitment_registry", "privacy_deposit_bridge", "exchange"] as const;
 
@@ -182,6 +193,12 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
       throw new Error(`Deployment manifest is missing ${field}`);
     }
   }
+  if (!/^[a-z0-9_-]{1,32}$/.test(String(record.network)) || !normalizeConfiguredFelt(record.chain_id)) {
+    throw new Error("Deployment manifest network identity is malformed");
+  }
+  if (!validHttpsUrl(record.rpc_url)) {
+    throw new Error("Deployment manifest RPC URL must use HTTPS");
+  }
   const contracts = record.contracts as Record<string, unknown>;
   for (const contract of REQUIRED_CONTRACTS) {
     if (!normalizeConfiguredFelt(contracts?.[contract])) {
@@ -193,7 +210,15 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
     throw new Error("Deployment manifest is not a finalized release");
   }
   const proof = record.proof as Record<string, unknown>;
-  if (proof.config_locked_after_deploy !== true) {
+  if (
+    proof.config_locked_after_deploy !== true
+    || proof.scheme !== "snip36-stwo"
+    || !validProofVersion(proof.proof_version)
+    || !Number.isSafeInteger(proof.proof_validity_blocks)
+    || (proof.proof_validity_blocks as number) < 1
+    || (proof.proof_validity_blocks as number) > 100_000
+    || !/^[A-Za-z0-9._+-]{1,128}$/.test(String(proof.prover_build_id ?? ""))
+  ) {
     throw new Error("Deployment manifest proof configuration is not locked");
   }
   for (const field of ["transition_proof_program_address", "withdrawal_proof_program_address", "residual_recovery_proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) {
@@ -213,10 +238,27 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
   if (funding.primary !== "starknet_privacy" || funding.starknet_privacy?.proving_ohttp_policy !== "best_effort") {
     throw new Error("Production funding must use best-effort OHTTP");
   }
+  const rail = funding.starknet_privacy;
+  if (
+    !rail
+    || !normalizeConfiguredFelt(rail.privacy_pool)
+    || !normalizeConfiguredFelt(rail.privacy_pool_class_hash)
+    || normalizeConfiguredFelt(rail.bridge_adapter) !== normalizeConfiguredFelt(contracts.privacy_deposit_bridge)
+    || !normalizeConfiguredFelt(rail.paymaster_address)
+    || !normalizeConfiguredFelt(rail.proof_signer_class_hash)
+    || !validServiceUrl(rail.discovery_url)
+    || !validServiceUrl(rail.proving_url)
+    || !validServiceUrl(rail.paymaster_url)
+    || rail.sdk_package !== "@starkware-libs/starknet-privacy-sdk"
+    || rail.sdk_version !== "0.14.3-rc.7"
+    || !Number.isSafeInteger(rail.min_proving_delay_blocks)
+    || (rail.min_proving_delay_blocks ?? 0) < 1
+    || pinnedRegistryFingerprints({ funding }).length === 0
+  ) throw new Error("Deployment manifest private funding configuration is malformed");
   for (const pair of registry.markets) {
     const support = pair.external_settlement_support_quote;
     const profit = pair.external_min_profit_quote;
-    if (!/^\d+$/.test(support ?? "") || !/^\d+$/.test(profit ?? "") || pair.capabilities.external_matching !== (BigInt(support) > 0n && BigInt(profit) > 0n)) {
+    if (!validU128Decimal(support) || !validU128Decimal(profit) || pair.capabilities.external_matching !== (BigInt(support) > 0n && BigInt(profit) > 0n)) {
       throw new Error(`Deployment manifest market ${pair.market_id} has inconsistent external matching configuration`);
     }
     if (!pair.enabled && pair.capabilities.external_matching) {
@@ -258,6 +300,60 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
   if ((runtime.external_window_seconds as number) > 300) {
     throw new Error("Deployment manifest external window is too long");
   }
+  assertBrowserNetworkPolicy(record as DeploymentConfig);
+}
+
+/** keeps manifest-selected browser traffic inside the production csp boundary. */
+export function assertBrowserNetworkPolicy(
+  deployment: Pick<DeploymentConfig, "rpc_url" | "funding">,
+  pageUrl = typeof window === "undefined" ? "" : window.location.href,
+): void {
+  if (!pageUrl) return;
+  const page = new URL(pageUrl);
+  if (page.hostname !== "app.zylith.fi") return;
+  const allowedOrigins = new Set([page.origin, "https://api.zylith.fi"]);
+  const rail = deployment.funding.starknet_privacy;
+  const endpoints = [
+    deployment.rpc_url,
+    rail?.discovery_url,
+    rail?.proving_url,
+    rail?.paymaster_url,
+  ];
+  for (const endpoint of endpoints) {
+    if (typeof endpoint !== "string") continue;
+    const resolved = new URL(endpoint, page.origin);
+    if (!allowedOrigins.has(resolved.origin)) {
+      throw new Error(`Deployment manifest browser network policy rejects ${resolved.origin}`);
+    }
+  }
+}
+
+function validProofVersion(value: unknown): boolean {
+  return (typeof value === "string" && /^PROOF[1-9][0-9]{0,3}$/.test(value))
+    || Boolean(normalizeConfiguredFelt(value));
+}
+
+function validHttpsUrl(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && Boolean(url.hostname) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+function validServiceUrl(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (validHttpsUrl(value)) return true;
+  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return false;
+  try {
+    const base = "https://zylith.invalid";
+    const parsed = new URL(value, base);
+    return parsed.origin === base && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
 }
 
 function assertMarketRegistry(registry: DeploymentConfig["market_registry"], network: string, chainId: string): void {
@@ -267,8 +363,15 @@ function assertMarketRegistry(registry: DeploymentConfig["market_registry"], net
   if (!/^[a-z0-9_-]{1,32}$/.test(registry.network) || !/^[0-9a-f]{64}$/.test(registry.registry_hash) || registry.network !== network || registry.chain_id !== chainId) {
     throw new Error("Deployment manifest and market registry identities differ");
   }
-  if (!Array.isArray(registry.assets) || !Array.isArray(registry.markets) || registry.assets.length === 0 || registry.markets.length === 0) {
-    throw new Error("Deployment manifest market registry is empty");
+  if (
+    !Array.isArray(registry.assets)
+    || !Array.isArray(registry.markets)
+    || registry.assets.length === 0
+    || registry.assets.length > 8
+    || registry.markets.length === 0
+    || registry.markets.length > 8
+  ) {
+    throw new Error("Deployment manifest market registry size is invalid");
   }
   const assetIds = registry.assets.map((asset) => asset.asset_id);
   const marketIds = registry.markets.map((market) => market.market_id);
@@ -280,7 +383,7 @@ function assertMarketRegistry(registry: DeploymentConfig["market_registry"], net
   for (const asset of registry.assets) {
     if (!validRegistryIdentifier(asset.asset_id)) throw new Error(`Deployment manifest asset ${asset.asset_id} has an invalid identifier`);
     const token = normalizeConfiguredFelt(asset.token_address);
-    if (!token || tokens.has(token) || !Number.isSafeInteger(asset.decimals) || asset.decimals < 0 || asset.decimals > 36 || !/^[1-9]\d*$/.test(asset.min_trade_amount) || asset.erc20_behavior !== "vanilla_exact_delta") {
+    if (!token || tokens.has(token) || !Number.isSafeInteger(asset.decimals) || asset.decimals < 0 || asset.decimals > 36 || !validU128Decimal(asset.min_trade_amount, true) || asset.erc20_behavior !== "vanilla_exact_delta") {
       throw new Error(`Deployment manifest asset ${asset.asset_id} is malformed or duplicated`);
     }
     tokens.add(token);
@@ -295,13 +398,13 @@ function assertMarketRegistry(registry: DeploymentConfig["market_registry"], net
   if (!assets.get(registry.gas_fee_asset_id)?.enabled || !assets.get(registry.objective_numeraire_asset_id)?.enabled) {
     throw new Error("Deployment manifest market registry has invalid gas or numeraire assets");
   }
-  if (!/^[1-9]\d*$/.test(registry.connected_wallet_fee_reserve_amount)) {
+  if (!validU128Decimal(registry.connected_wallet_fee_reserve_amount, true)) {
     throw new Error("Deployment manifest market registry has an invalid wallet fee reserve");
   }
   for (const market of registry.markets) {
     const base = assets.get(market.base_asset_id);
     const quote = assets.get(market.quote_asset_id);
-    if (!base || !quote || !validRegistryIdentifier(market.market_id) || market.market_id !== `${market.base_asset_id}/${market.quote_asset_id}` || !/^[1-9]\d*$/.test(market.price_base_scale ?? "") || !/^[1-9]\d*$/.test(market.min_order_amount ?? "") || BigInt(market.min_order_amount) < BigInt(base.min_trade_amount) || !Number.isSafeInteger(market.taker_fee_bps) || market.taker_fee_bps < 1 || market.taker_fee_bps > 100 || (market.enabled && (!base.enabled || !quote.enabled || market.capabilities.market_data !== true))) {
+    if (!base || !quote || !validRegistryIdentifier(market.market_id) || market.market_id !== `${market.base_asset_id}/${market.quote_asset_id}` || !validU128Decimal(market.price_base_scale, true) || !validU128Decimal(market.min_order_amount, true) || !validU128Decimal(market.min_order_quote_amount, true) || BigInt(market.min_order_amount) < BigInt(base.min_trade_amount) || BigInt(market.min_order_quote_amount) < BigInt(quote.min_trade_amount) || !Number.isSafeInteger(market.taker_fee_bps) || market.taker_fee_bps < 1 || market.taker_fee_bps > 100 || (market.enabled && (!base.enabled || !quote.enabled || market.capabilities.market_data !== true))) {
       throw new Error(`Deployment manifest market ${market.market_id || "?"} is malformed`);
     }
     assertReferencePrice(market, registry);
@@ -330,6 +433,9 @@ function assertReferencePrice(market: RegistryMarketConfig, registry: Deployment
     }
     return;
   }
+  if (!Array.isArray(reference.corroborating) || reference.corroborating.length > 7) {
+    throw new Error(`Deployment manifest market ${market.market_id} has invalid reference pricing`);
+  }
   const sources = [reference.primary, ...reference.corroborating];
   const adapters = sources.map((source) => source?.adapter);
   const validSymbol = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9._-]{1,40}$/.test(value);
@@ -347,6 +453,12 @@ function assertReferencePrice(market: RegistryMarketConfig, registry: Deployment
 
 function validBps(value: unknown): boolean {
   return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) < 10_000;
+}
+
+function validU128Decimal(value: unknown, nonzero = false): value is string {
+  if (typeof value !== "string" || !/^(0|[1-9]\d{0,38})$/.test(value)) return false;
+  const parsed = BigInt(value);
+  return parsed <= MAX_U128 && (!nonzero || parsed > 0n);
 }
 
 function validRegistryIdentifier(value: unknown): value is string {
@@ -421,7 +533,10 @@ async function requestDeployment(): Promise<DeploymentConfig> {
   if (!response.ok) {
     throw new Error(`Deployment manifest request failed with HTTP ${response.status}`);
   }
-  const value = (await response.json()) as Record<string, unknown>;
+  const value = (await readSdkJsonResponse(response, {
+    timeoutMs: DEPLOYMENT_MANIFEST_TIMEOUT_MS,
+    label: "Deployment manifest",
+  })) as Record<string, unknown>;
   const manifest = value.manifest ?? value;
   assertDeploymentManifest(manifest);
   await verifyMarketRegistryHash(manifest);
@@ -437,11 +552,15 @@ export function enabledPairs(deployment: DeploymentConfig | null): PairConfig[] 
           base_asset_id: market.base_asset_id,
           quote_asset_id: market.quote_asset_id,
           min_order_amount: market.min_order_amount,
+          min_order_quote_amount: market.min_order_quote_amount,
           price_base_scale: market.price_base_scale,
           taker_fee_bps: market.taker_fee_bps,
           external_match_enabled: market.capabilities.external_matching,
           external_settlement_support_quote: market.external_settlement_support_quote,
           enabled: market.enabled,
+          reference_price_methodology: market.reference_price.methodology,
+          reference_max_age_ms: market.reference_price.max_age_ms,
+          reference_attestation_ttl_ms: market.reference_price.attestation_ttl_ms,
         }))
     : [];
   return pairs.sort((left, right) => {

@@ -5,6 +5,7 @@ import {
   encryptLocalStore,
   encryptSeedWithWalletSignature,
   isWalletSignatureVaultRecord,
+  isEncryptedLocalStoreRecord,
   stableJsonStringify,
   walletSignatureVaultAuthToken,
   walletSignatureVaultId,
@@ -18,7 +19,7 @@ const signatureContext: WalletSignatureVaultContext = {
   chainId: "0x534e5f5345504f4c4941",
   deploymentId: "0x123",
   origin: "https://app.zylith.fi",
-  messageVersion: 1,
+  messageVersion: 2,
 };
 
 describe("walletLocalCrypto", () => {
@@ -41,15 +42,26 @@ describe("walletLocalCrypto", () => {
     ).rejects.toBeTruthy();
   });
 
+  it("refuses to create a local store larger than the reader accepts", async () => {
+    await expect(
+      encryptLocalStore(
+        { value: "a".repeat(4 * 1024 * 1024) },
+        seedHex,
+        "acct-a",
+        "wallet-state",
+      ),
+    ).rejects.toThrow(/too large/i);
+  });
+
   it("domain-separates vault encryption, lookup, and authorization", async () => {
     const vault = await encryptSeedWithWalletSignature(seedHex, signatureContext);
     const authToken = await walletSignatureVaultAuthToken(signatureContext);
     const vaultId = await walletSignatureVaultId(signatureContext);
     const expectedId = await sha256Hex(
-      `zylith/wallet-signature-vault/id/v1:${authToken}`,
+      `zylith/wallet-signature-vault/id/v2:${authToken}`,
     );
 
-    expect(vault.version).toBe(1);
+    expect(vault.version).toBe(2);
     expect(vaultId).toBe(`0x${expectedId}`);
     await expect(
       decryptSeedWithWalletSignature(vault, signatureContext),
@@ -74,34 +86,34 @@ describe("walletLocalCrypto", () => {
   it("rejects partial wallet-signature vault records", () => {
     expect(
       isWalletSignatureVaultRecord({
-        version: 1,
-        kdf: "wallet-signature-sha256-v1",
+        version: 2,
+        kdf: "wallet-signature-sha256-v2",
       } as never),
     ).toBe(false);
     expect(
       isWalletSignatureVaultRecord({
         version: 2,
-        kdf: "wallet-signature-sha256-v1",
+        kdf: "wallet-signature-sha256-v2",
         algorithm: "AES-GCM",
         wallet_address: "0xabc",
         chain_id: "0x534e5f5345504f4c4941",
         deployment_id: "0x123",
         origin: "https://app.zylith.fi",
-        message_version: 1,
+        message_version: 2,
         nonce: "AA==",
         ciphertext: "AA==",
       } as never),
     ).toBe(false);
     expect(
       isWalletSignatureVaultRecord({
-        version: 1,
-        kdf: "wallet-signature-sha256-v1",
+        version: 2,
+        kdf: "wallet-signature-sha256-v2",
         algorithm: "AES-GCM",
         wallet_address: "0xabc",
         chain_id: "0x534e5f5345504f4c4941",
         deployment_id: "0x123",
         origin: "https://app.zylith.fi",
-        message_version: 1,
+        message_version: 2,
         nonce: "AA==",
         ciphertext: "AA==",
         unsupported_passphrase_hint: "removed",
@@ -109,26 +121,40 @@ describe("walletLocalCrypto", () => {
     ).toBe(false);
   });
 
-  it("accepts only the one vault format", () => {
+  it("accepts only the one vault format and bounded ciphertext", () => {
     const vault = {
-      version: 1,
-      kdf: "wallet-signature-sha256-v1",
+      version: 2,
+      kdf: "wallet-signature-sha256-v2",
       algorithm: "AES-GCM",
       wallet_address: "0xabc",
       chain_id: "0x534e5f5345504f4c4941",
       deployment_id: "0x123",
       origin: "https://app.zylith.fi",
-      message_version: 1,
-      nonce: "AA==",
-      ciphertext: "AA==",
+      message_version: 2,
+      nonce: bytesToBase64(new Uint8Array(12)),
+      ciphertext: bytesToBase64(new Uint8Array(80)),
     };
     expect(isWalletSignatureVaultRecord(vault as never)).toBe(true);
     expect(
-      isWalletSignatureVaultRecord({ ...vault, message_version: 2 } as never),
+      isWalletSignatureVaultRecord({ ...vault, message_version: 1 } as never),
     ).toBe(false);
     expect(
-      isWalletSignatureVaultRecord({ ...vault, kdf: "wallet-signature-sha256-v2" } as never),
+      isWalletSignatureVaultRecord({ ...vault, kdf: "wallet-signature-sha256-v1" } as never),
     ).toBe(false);
+    expect(isWalletSignatureVaultRecord({ ...vault, nonce: "AA==" } as never)).toBe(false);
+    expect(isWalletSignatureVaultRecord({ ...vault, ciphertext: "not-base64" } as never)).toBe(false);
+    expect(isEncryptedLocalStoreRecord({
+      version: 1,
+      algorithm: "AES-GCM",
+      nonce: vault.nonce,
+      ciphertext: bytesToBase64(new Uint8Array(16)),
+    })).toBe(true);
+    expect(isEncryptedLocalStoreRecord({
+      version: 1,
+      algorithm: "AES-GCM",
+      nonce: "AA==",
+      ciphertext: bytesToBase64(new Uint8Array(16)),
+    })).toBe(false);
   });
 
   it("rejects incomplete wallet-signature vault contexts", async () => {
@@ -144,6 +170,20 @@ describe("walletLocalCrypto", () => {
         deploymentId: "   ",
       }),
     ).rejects.toThrow("Wallet signature vault context is incomplete");
+  });
+
+  it("bounds wallet-provided signature structures", async () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.signature = cyclic;
+    await expect(
+      walletSignatureVaultAuthToken({ ...signatureContext, signature: cyclic }),
+    ).rejects.toThrow("invalid signature");
+    await expect(
+      walletSignatureVaultAuthToken({
+        ...signatureContext,
+        signature: Array.from({ length: 17 }, (_, index) => `0x${index + 1}`),
+      }),
+    ).rejects.toThrow("invalid signature");
   });
 
   it("rejects wallet-signature vaults outside the original wallet and deployment domain", async () => {
