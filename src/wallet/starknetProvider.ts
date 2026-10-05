@@ -4,6 +4,7 @@ import { hash } from "starknet";
 import {
   connectStarknetProvider,
   discoverStarknetWallets,
+  restoreConnectedStarknetWallet,
   selectedStarknetProvider,
 } from "../domain/browserWallet";
 import { type DeploymentConfig, loadDeployment } from "../domain/deployment";
@@ -343,6 +344,14 @@ export async function selectInjectedStarknetProvider() {
         ...discovered.filter(({ provider }) => provider !== preferredProvider),
       ]
     : discovered;
+  if (preferredProvider) {
+    const restoredAddress = connectedProviderAddress(preferredProvider as never)
+      ?? await restoreConnectedStarknetWallet().catch(() => null);
+    if (restoredAddress) {
+      await ensureWalletChain(preferredProvider as never, deployment);
+      return preferredProvider;
+    }
+  }
   for (const { id, provider } of orderedProviders) {
     try {
       await connectStarknetProvider(provider as never, id);
@@ -378,6 +387,13 @@ export async function ensureWalletChain(
   const switched = await requestWalletChainId(provider);
   if (normalizeRuntimeChainId(switched) === expected) return;
   validateWalletChainMatch(deployment.chain_id, switched, deployment.network);
+}
+
+/** reads the connected wallet network without requesting a network change. */
+export async function readStarknetWalletChainId(
+  provider: StarknetInjectedProvider
+) {
+  return normalizeRuntimeChainId(await requestWalletChainId(provider));
 }
 
 export function validateWalletChainMatch(

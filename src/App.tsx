@@ -3,7 +3,7 @@ import "./globals.css";
 import "./finalui/styles.css";
 import type { WalletOrder, WithdrawableNote } from "@zylith/sdk";
 import { configureAssetDecimals, formatPrice, toAtomicStr } from "./domain/assets";
-import { connectedStarknetAddress, restoreConnectedStarknetWallet, subscribeWalletRuntime, walletRuntime } from "./domain/browserWallet";
+import { applyStarknetAccountsChanged, connectedStarknetAddress, restoreConnectedStarknetWallet, selectedStarknetProvider, subscribeStarknetProviderEvents, subscribeWalletRuntime, walletRuntime } from "./domain/browserWallet";
 import { defaultPair, enabledPairs, exchange, useDeploymentState } from "./domain/deployment";
 import { type OrderRow, orderRows } from "./domain/orders";
 import type { PendingDeposit, WalletBalance } from "./domain/shieldedBalances";
@@ -16,7 +16,10 @@ import { OrdersPage } from "./finalui/pages/OrdersPage";
 import { DepositSlide, WalletSlide, WithdrawSlide } from "./components/WalletSlides";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import { sessionSet } from "./domain/safeSessionStorage";
+import { normalizeFeltForComparison } from "./domain/felt";
 import { useWalletState } from "./hooks/useWalletState";
+import { readStarknetWalletChainId } from "./wallet/starknetProvider";
+import { requirePrivateStrk20Support } from "./domain/starknetWalletCapabilities";
 
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const REFERENCE_PRICE_POLL_MS = 5_000;
@@ -200,35 +203,127 @@ export default function App() {
 
   useEffect(() => {
     let restoreInFlight = false;
+    let retryTimer: number | null = null;
+    let retryIndex = 0;
+    const retryDelays = [250, 750, 2_000, 5_000] as const;
     const reconcile = (next: string | null) =>
       setStarknetAddress((previous) => {
         if (previous === next) return previous;
         if (previous) walletRuntime()?.lock();
         return next;
       });
-    const restore = () => {
+    const scheduleRetry = () => {
+      if (retryTimer !== null || retryIndex >= retryDelays.length) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void restore();
+      }, retryDelays[retryIndex++]!);
+    };
+    const restore = async () => {
       if (restoreInFlight) return;
       restoreInFlight = true;
       const revision = walletSelectionRevision.current;
-      void restoreConnectedStarknetWallet()
-        .then((next) => {
-          if (revision === walletSelectionRevision.current) reconcile(next);
-        })
-        .catch(() => {
-          if (revision === walletSelectionRevision.current) reconcile(null);
-        })
-        .finally(() => { restoreInFlight = false; });
+      let restored = false;
+      try {
+        const next = await restoreConnectedStarknetWallet();
+        if (next && revision === walletSelectionRevision.current) {
+          const provider = selectedStarknetProvider();
+          if (!provider) throw new Error("The selected Starknet wallet is unavailable.");
+          await requirePrivateStrk20Support(provider);
+          reconcile(next);
+          restored = true;
+        }
+      } catch {
+        // silent restore never opens wallet ui; bounded retries handle late injection.
+      } finally {
+        restoreInFlight = false;
+      }
+      if (!restored) scheduleRetry();
     };
-    restore();
-    const timer = window.setInterval(restore, 1_500);
-    window.addEventListener("focus", restore);
-    window.addEventListener("starknet#initialized", restore);
+    const retryFromEvent = () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      retryTimer = null;
+      retryIndex = 0;
+      void restore();
+    };
+    void restore();
+    window.addEventListener("focus", retryFromEvent);
+    window.addEventListener("starknet#initialized", retryFromEvent);
     return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", restore);
-      window.removeEventListener("starknet#initialized", restore);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      window.removeEventListener("focus", retryFromEvent);
+      window.removeEventListener("starknet#initialized", retryFromEvent);
     };
   }, []);
+
+  const silentUnlockAttemptRef = useRef<string | null>(null);
+  const [silentUnlockRetry, setSilentUnlockRetry] = useState(0);
+  useEffect(() => {
+    if (!starknetAddress || walletReady || runtimeStatus !== "ready") return;
+    const runtime = walletRuntime();
+    if (!runtime || runtime.vaultAuthMode?.(starknetAddress) !== "device-session") return;
+    const attemptKey = starknetAddress.toLowerCase();
+    if (silentUnlockAttemptRef.current === attemptKey) return;
+    silentUnlockAttemptRef.current = attemptKey;
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    void runtime.unlockWithDeviceSession(starknetAddress)
+      .catch(() => false)
+      .then((opened) => {
+        if (opened || cancelled) return;
+        retryTimer = window.setTimeout(() => {
+          if (silentUnlockAttemptRef.current === attemptKey) {
+            silentUnlockAttemptRef.current = null;
+          }
+          setSilentUnlockRetry((value) => value + 1);
+        }, 3_000);
+      });
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [runtimeStatus, silentUnlockRetry, starknetAddress, walletReady]);
+  useEffect(() => {
+    if (!starknetAddress) silentUnlockAttemptRef.current = null;
+  }, [starknetAddress]);
+
+  useEffect(() => {
+    if (!walletReady || !deployment) return;
+    let cancelled = false;
+    const provider = selectedStarknetProvider();
+    if (!provider) return;
+    const verifyNetwork = async () => {
+      const chainId = await readStarknetWalletChainId(provider as never).catch(() => null);
+      if (
+        !cancelled
+        && chainId
+        && normalizeFeltForComparison(chainId)
+          !== normalizeFeltForComparison(deployment.chain_id)
+      ) {
+        walletRuntime()?.lock();
+      }
+    };
+    const reconcileAccount = (accounts: unknown) => {
+      const next = applyStarknetAccountsChanged(accounts);
+      if (next !== starknetAddress) updateStarknetAddress(next);
+      void verifyNetwork();
+    };
+    const reconcileNetwork = () => {
+      void verifyNetwork();
+    };
+    const unsubscribeProviderEvents = subscribeStarknetProviderEvents(
+      provider,
+      reconcileAccount,
+      reconcileNetwork,
+    );
+    void verifyNetwork();
+    window.addEventListener("focus", verifyNetwork);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", verifyNetwork);
+      unsubscribeProviderEvents();
+    };
+  }, [deployment, starknetAddress, updateStarknetAddress, walletReady]);
 
   // orders
   const [submitting, setSubmitting] = useState(false);

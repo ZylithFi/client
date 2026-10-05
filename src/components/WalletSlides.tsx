@@ -19,9 +19,13 @@ import {
   discoverStarknetWalletsAsync,
   discoverStarknetWallets,
   fmtAddr,
+  selectedStarknetProvider,
   walletRuntimeLoadError,
   walletRuntime,
 } from "../domain/browserWallet";
+import { loadDeployment } from "../domain/deployment";
+import { fundingRailTokenAddress } from "../domain/fundingRail";
+import { requirePrivateStrk20Support } from "../domain/starknetWalletCapabilities";
 import {
   runPrimaryActionOnEnter,
   shouldRunPrimaryActionForEnter,
@@ -129,11 +133,15 @@ async function ensureTradingAuthorized(
   if (runtime.isReady(starknetAddress)) return runtime;
   onStage?.("Authorizing trading");
   const mode = runtime.vaultAuthMode?.(starknetAddress) ?? "none";
-  let ok =
-    mode === "wallet-signature"
-      ? await runtime.unlockWithWalletSignature(starknetAddress)
-      : false;
-  if (!ok && mode === "none") {
+  const hasSignatureVault = runtime.hasVault?.(starknetAddress)
+    ?? mode === "wallet-signature";
+  let ok = mode === "device-session"
+    ? await runtime.unlockWithDeviceSession(starknetAddress)
+    : false;
+  if (!ok && hasSignatureVault) {
+    ok = await runtime.unlockWithWalletSignature(starknetAddress);
+  }
+  if (!ok && !hasSignatureVault) {
     ok = await runtime.createWalletWithWalletSignature(starknetAddress);
   }
   if (!ok || !runtime.isReady(starknetAddress)) {
@@ -358,8 +366,8 @@ const EXIT_STAGE_LABELS: Record<NonNullable<WithdrawableNote["exit_stage"]>, str
   requested: "Submitted",
   proving: "Preparing",
   maturing: "Processing",
-  finalized: "Completing",
-  claiming: "Completing",
+  finalized: "Ready",
+  claiming: "Receiving",
   failed: "Failed",
 };
 
@@ -403,7 +411,7 @@ export function WalletSlide({
   const w = walletRuntime();
   const connectedVaultAuthMode = w?.vaultAuthMode?.(starknetAddress) ??
     (starknetAddress && hasVault ? "wallet-signature" : "none");
-  const connectedHasVault = connectedVaultAuthMode === "wallet-signature";
+  const connectedHasVault = connectedVaultAuthMode !== "none";
   useSlideDialog(open, onClose, panelRef);
 
   async function refreshWalletOptions({
@@ -482,6 +490,7 @@ export function WalletSlide({
     setConnectingWalletId(wallet.id);
     setError("");
     try {
+      await requirePrivateStrk20Support(wallet.provider);
       const addr = await connectStarknetProvider(wallet.provider, wallet.id);
       if (
         authorizationGenerationRef.current !== connectionGeneration
@@ -541,7 +550,9 @@ export function WalletSlide({
       return;
     }
     const addressVaultAuthMode = w.vaultAuthMode?.(address) ?? "none";
-    const addressHasVault = addressVaultAuthMode === "wallet-signature";
+    const addressHasVault = addressVaultAuthMode !== "none";
+    const addressHasSignatureVault = w.hasVault?.(address)
+      ?? addressVaultAuthMode === "wallet-signature";
     const attemptKey = `${address.toLowerCase()}:${
       addressHasVault ? addressVaultAuthMode : "new"
     }`;
@@ -554,9 +565,13 @@ export function WalletSlide({
     let completed = false;
     try {
       let authorized = false;
-      if (addressHasVault) {
+      if (addressVaultAuthMode === "device-session") {
+        authorized = await w.unlockWithDeviceSession(address);
+      }
+      if (!authorized && addressHasSignatureVault) {
         authorized = await w.unlockWithWalletSignature(address);
-      } else {
+      }
+      if (!authorized && !addressHasSignatureVault) {
         authorized = await w.createWalletWithWalletSignature(address);
       }
       if (!authorized || !w.isReady(address)) {
@@ -796,6 +811,7 @@ export function DepositSlide({
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   const [fundingStage, setFundingStage] = useState("");
+  const [shieldedBalance, setShieldedBalance] = useState<string | null>(null);
   const wasOpenRef = useRef(false);
   const depositStartedAtRef = useRef(0);
   const operationInFlightRef = useRef(false);
@@ -838,6 +854,23 @@ export function DepositSlide({
     }
     wasOpenRef.current = open;
   }, [open, defaultAsset, allAssets]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setShieldedBalance(null);
+    if (!open || !starknetAddress) return () => { cancelled = true; };
+    const provider = selectedStarknetProvider();
+    if (!provider) return () => { cancelled = true; };
+    void Promise.all([
+      loadDeployment(),
+      import("../integrations/starknetWalletPrivacy"),
+    ]).then(async ([manifest, privacy]) => {
+      const tokenAddress = fundingRailTokenAddress(manifest, asset);
+      const balance = await privacy.walletPrivateBalance(provider as never, tokenAddress);
+      if (!cancelled) setShieldedBalance(balance.toString());
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [asset, open, starknetAddress]);
 
   function changeAsset(a: string) {
     setAsset(a);
@@ -972,7 +1005,10 @@ export function DepositSlide({
           </div>
         </div>
         <div className="funding-helper">
-          Deposits stay private and are available after confirmation.
+          {shieldedBalance === null
+            ? "Your wallet will use shielded funds when available."
+            : `Shielded in wallet: ${safeFromAtomicStr(shieldedBalance, asset)} ${asset}.`}
+          {" "}If needed, the wallet shields only the shortfall before depositing.
         </div>
         {error && (
           <div
@@ -1108,6 +1144,22 @@ export function WithdrawSlide({
       setWorking(false);
     }
   }
+
+  async function handleReceive(note: WithdrawableNote) {
+    if (operationInFlightRef.current || !starknetAddress) return;
+    operationInFlightRef.current = true;
+    setWorking(true);
+    setError("");
+    try {
+      const authorizedRuntime = await ensureTradingAuthorized(starknetAddress);
+      await authorizedRuntime.claimWithdrawal(note.note_commitment);
+    } catch (e) {
+      setError(userFacingErrorMessage(e));
+    } finally {
+      operationInFlightRef.current = false;
+      setWorking(false);
+    }
+  }
   const privateSessionReady = Boolean(starknetAddress && walletReady);
   const withdrawEnabled = Boolean(!working && (!starknetAddress || !privateSessionReady || (withdrawalAvailable && selectedWithdrawNote)));
 
@@ -1205,6 +1257,16 @@ export function WithdrawSlide({
               <div key={note.note_commitment} className="withdraw-progress-row">
                 <strong>{safeFromAtomicStr(note.amount, asset)} {asset}</strong>
                 <span>{EXIT_STAGE_LABELS[note.exit_stage!]}</span>
+                {note.exit_stage === "finalized" && (
+                  <button
+                    type="button"
+                    className="slide-inline-action"
+                    disabled={working}
+                    onClick={() => void handleReceive(note)}
+                  >
+                    Receive privately
+                  </button>
+                )}
               </div>
             ))}
           </div>

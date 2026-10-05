@@ -95,7 +95,6 @@ export type DeploymentConfig = {
     network: string;
     chain_id: string;
     gas_fee_asset_id: string;
-    connected_wallet_fee_reserve_amount: string;
     objective_numeraire_asset_id: string;
     assets: MarketAssetConfig[];
     markets: RegistryMarketConfig[];
@@ -106,7 +105,6 @@ export type DeploymentConfig = {
       privacy_pool?: string;
       privacy_pool_class_hash?: string;
       bridge_adapter?: string;
-      discovery_url?: string;
       proving_url?: string;
       proving_ohttp_policy?: "disabled" | "best_effort" | "required";
       paymaster_address?: string;
@@ -246,7 +244,6 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
     || normalizeConfiguredFelt(rail.bridge_adapter) !== normalizeConfiguredFelt(contracts.privacy_deposit_bridge)
     || !normalizeConfiguredFelt(rail.paymaster_address)
     || !normalizeConfiguredFelt(rail.proof_signer_class_hash)
-    || !validServiceUrl(rail.discovery_url)
     || !validServiceUrl(rail.proving_url)
     || !validServiceUrl(rail.paymaster_url)
     || rail.sdk_package !== "@starkware-libs/starknet-privacy-sdk"
@@ -315,7 +312,6 @@ export function assertBrowserNetworkPolicy(
   const rail = deployment.funding.starknet_privacy;
   const endpoints = [
     deployment.rpc_url,
-    rail?.discovery_url,
     rail?.proving_url,
     rail?.paymaster_url,
   ];
@@ -397,9 +393,6 @@ function assertMarketRegistry(registry: DeploymentConfig["market_registry"], net
   }
   if (!assets.get(registry.gas_fee_asset_id)?.enabled || !assets.get(registry.objective_numeraire_asset_id)?.enabled) {
     throw new Error("Deployment manifest market registry has invalid gas or numeraire assets");
-  }
-  if (!validU128Decimal(registry.connected_wallet_fee_reserve_amount, true)) {
-    throw new Error("Deployment manifest market registry has an invalid wallet fee reserve");
   }
   for (const market of registry.markets) {
     const base = assets.get(market.base_asset_id);

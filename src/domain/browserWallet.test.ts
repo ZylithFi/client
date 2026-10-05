@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  applyStarknetAccountsChanged,
   clearSelectedStarknetProvider,
   connectStarknetProvider,
   connectedStarknetAddress,
@@ -9,6 +10,7 @@ import {
   restoreConnectedStarknetWallet,
   selectedStarknetProvider,
   setWalletRuntime,
+  subscribeStarknetProviderEvents,
   subscribeWalletRuntime,
 } from "./browserWallet";
 
@@ -101,6 +103,18 @@ describe("browser wallet selection", () => {
     expect(disconnect).toHaveBeenCalledTimes(1);
     expect(selectedStarknetProvider()).toBeNull();
     expect(connectedStarknetAddress()).toBeNull();
+  });
+
+  it("uses account-change payloads and forgets a revoked wallet permission", async () => {
+    const wallet = provider("0xabc");
+    await connectStarknetProvider(wallet as never, wallet.id);
+
+    expect(applyStarknetAccountsChanged(["0xdef"])).toBe("0xdef");
+    expect(window.sessionStorage.getItem(connectedAddressKey)).toBe("0xdef");
+
+    expect(applyStarknetAccountsChanged([])).toBeNull();
+    expect(selectedStarknetProvider()).toBeNull();
+    expect(window.localStorage.getItem(selectedWalletKey)).toBeNull();
   });
 
   it("does not treat a stored address as an active wallet session", async () => {
@@ -244,9 +258,22 @@ describe("browser wallet selection", () => {
 
     await expect(connectStarknetProvider(wallet as never, wallet.id)).resolves.toBe("0xabc");
     expect(window.sessionStorage.getItem(selectedWalletKey)).toBe("ready");
+    expect(window.localStorage.getItem(selectedWalletKey)).toBe("ready");
 
     await expect(connectStarknetProvider(wallet as never, "selected")).resolves.toBe("0xabc");
     expect(window.sessionStorage.getItem(selectedWalletKey)).toBe("ready");
+  });
+
+  it("restores the selected wallet after session storage is cleared", async () => {
+    const wallet = provider("0x456");
+    wallet.id = "ready";
+    wallet.name = "Ready";
+    (window as typeof window & { starknet_ready?: unknown }).starknet_ready = wallet;
+    window.localStorage.setItem(selectedWalletKey, wallet.id);
+    window.sessionStorage.clear();
+
+    await expect(restoreConnectedStarknetWallet()).resolves.toBe("0x456");
+    expect(selectedStarknetProvider()).toBe(wallet);
   });
 
   it("restores an already-authorized wallet session without opening a connect prompt", async () => {
@@ -489,5 +516,38 @@ describe("browser wallet selection", () => {
     unsubscribe();
     setWalletRuntime(null);
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores provider-specific unsupported event names and removes supported listeners", () => {
+    const accountListener = vi.fn();
+    const networkListener = vi.fn();
+    const subscribed = new Map<string, (value: unknown) => void>();
+    const wallet = {
+      on: vi.fn((event: string, listener: (value: unknown) => void) => {
+        if (event === "accountChanged" || event === "chainChanged") {
+          throw new Error(`Unknwown event: ${event}`);
+        }
+        subscribed.set(event, listener);
+      }),
+      off: vi.fn((event: string) => {
+        if (!subscribed.has(event)) throw new Error(`unsupported event: ${event}`);
+        subscribed.delete(event);
+      }),
+    };
+
+    const unsubscribe = subscribeStarknetProviderEvents(
+      wallet,
+      accountListener,
+      networkListener,
+    );
+
+    expect([...subscribed.keys()]).toEqual(["accountsChanged", "networkChanged"]);
+    subscribed.get("accountsChanged")?.(["0x123"]);
+    subscribed.get("networkChanged")?.("0x534e5f5345504f4c4941");
+    expect(accountListener).toHaveBeenCalledWith(["0x123"]);
+    expect(networkListener).toHaveBeenCalledWith("0x534e5f5345504f4c4941");
+
+    expect(() => unsubscribe()).not.toThrow();
+    expect(subscribed.size).toBe(0);
   });
 });

@@ -37,3 +37,19 @@ export function localRemove(key: string): void {
     // local storage cleanup is best-effort.
   }
 }
+
+export function localGetNullable(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function localSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // persisted wallet selection is convenience-only; storage may be blocked.
+  }
+}

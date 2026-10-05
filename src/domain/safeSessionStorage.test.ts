@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  localGetNullable,
   localRemove,
+  localSet,
   sessionGet,
   sessionGetNullable,
   sessionRemove,
@@ -56,5 +58,21 @@ describe("safe session storage", () => {
     expect(() => localRemove("zylith.test.local")).not.toThrow();
 
     removeSpy.mockRestore();
+  });
+
+  it("reads and writes persistent convenience values", () => {
+    const storage = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+        removeItem: (key: string) => storage.delete(key),
+      },
+    });
+    localSet("zylith.test.local", "stored");
+    expect(localGetNullable("zylith.test.local")).toBe("stored");
+    localRemove("zylith.test.local");
+    expect(localGetNullable("zylith.test.local")).toBeNull();
   });
 });

@@ -9,7 +9,6 @@ export type DepositFundingRail = {
   kind: "starknet_privacy";
   privacyPool?: string;
   bridgeAdapter?: string;
-  discoveryUrl?: string;
   provingUrl?: string;
   provingOhttpPolicy?: OhttpPolicy;
   paymasterAddress?: string;
@@ -31,7 +30,6 @@ type FundingRailValidationOptions = {
 
 export function selectedDepositFundingRail(
   deployment: FundingDeploymentConfig,
-  options: FundingRailValidationOptions = {},
 ): DepositFundingRail {
   const primary = deployment.funding?.primary;
   if (primary !== "starknet_privacy") {
@@ -41,7 +39,6 @@ export function selectedDepositFundingRail(
     kind: "starknet_privacy",
     privacyPool: deployment.funding?.starknet_privacy?.privacy_pool,
     bridgeAdapter: deployment.funding?.starknet_privacy?.bridge_adapter,
-    discoveryUrl: deployment.funding?.starknet_privacy?.discovery_url,
     provingUrl: deployment.funding?.starknet_privacy?.proving_url,
     provingOhttpPolicy:
       deployment.funding?.starknet_privacy?.proving_ohttp_policy,
@@ -56,14 +53,24 @@ export function selectedDepositFundingRail(
   };
   if (
     configuredFelt(selected.privacyPool) &&
-    configuredFelt(selected.bridgeAdapter) &&
-    selected.discoveryUrl &&
+    configuredFelt(selected.bridgeAdapter)
+  ) {
+    return selected;
+  }
+  throw new Error("Private deposit funding is not fully configured");
+}
+
+export function selectedResidualRecoveryFundingRail(
+  deployment: FundingDeploymentConfig,
+  options: FundingRailValidationOptions = {},
+): DepositFundingRail {
+  const selected = selectedDepositFundingRail(deployment);
+  if (
     selected.provingUrl &&
     validOhttpPolicy(selected.provingOhttpPolicy) &&
     configuredFelt(selected.paymasterAddress) &&
     selected.paymasterUrl &&
     configuredFelt(selected.privacyProofSignerClassHash) &&
-    configuredServiceUrl(selected.discoveryUrl, options) &&
     configuredServiceUrl(selected.provingUrl, options) &&
     configuredServiceUrl(selected.paymasterUrl, options)
   ) {
@@ -93,23 +100,13 @@ export function fundingRailTokenAddress(
 
 export function strk20WithdrawalEnabledForDeployment(
   deployment: FundingDeploymentConfig,
-  options: FundingRailValidationOptions = {},
 ) {
   if (deployment.funding?.primary !== "starknet_privacy") return false;
   const rail = deployment.funding.starknet_privacy;
   if (!rail) return false;
   return Boolean(
     configuredFelt(rail.bridge_adapter) &&
-    configuredFelt(rail.privacy_pool) &&
-      rail.discovery_url &&
-      rail.proving_url &&
-      validOhttpPolicy(rail.proving_ohttp_policy) &&
-      configuredFelt(rail.paymaster_address) &&
-      rail.paymaster_url &&
-      configuredFelt(rail.proof_signer_class_hash) &&
-      configuredServiceUrl(rail.discovery_url, options) &&
-      configuredServiceUrl(rail.proving_url, options) &&
-      configuredServiceUrl(rail.paymaster_url, options)
+    configuredFelt(rail.privacy_pool)
   );
 }
 

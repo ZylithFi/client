@@ -17,7 +17,6 @@ function finalized(manifest: typeof example) {
     privacy_pool: "0x1234",
     privacy_pool_class_hash: "0x1234",
     bridge_adapter: manifest.contracts.privacy_deposit_bridge,
-    discovery_url: "/starknet-privacy-discovery",
     proving_url: "/starknet-privacy-prover",
     proving_ohttp_policy: "best_effort",
     paymaster_address: "0x1234",
@@ -106,10 +105,6 @@ describe("deployment manifest", () => {
   });
 
   it("rejects oversized registry collections and arithmetic outside u128", () => {
-    const oversizedAmount = finalized(JSON.parse(JSON.stringify(example)));
-    oversizedAmount.market_registry.connected_wallet_fee_reserve_amount = (1n << 128n).toString();
-    expect(() => assertDeploymentManifest(oversizedAmount)).toThrow(/wallet fee reserve/);
-
     const tooManyMarkets = finalized(JSON.parse(JSON.stringify(example)));
     while (tooManyMarkets.market_registry.markets.length <= 8) {
       tooManyMarkets.market_registry.markets.push(structuredClone(tooManyMarkets.market_registry.markets[0]));
@@ -134,7 +129,6 @@ describe("deployment manifest", () => {
   it("keeps every production browser endpoint inside the deployed content-security policy", () => {
     const manifest = finalized(JSON.parse(JSON.stringify(example)));
     manifest.rpc_url = "https://api.zylith.fi/starknet-rpc";
-    manifest.funding.starknet_privacy.discovery_url = "/starknet-privacy-discovery";
     manifest.funding.starknet_privacy.proving_url = "https://api.zylith.fi/starknet-privacy-prover";
     manifest.funding.starknet_privacy.paymaster_url = "/paymaster/execute-outside";
     expect(() => assertBrowserNetworkPolicy(manifest, "https://app.zylith.fi/trade")).not.toThrow();

@@ -1,4 +1,7 @@
 import {
+  localGetNullable,
+  localRemove,
+  localSet,
   sessionGetNullable,
   sessionRemove,
   sessionSet,
@@ -69,6 +72,48 @@ type StarknetProviderWithMeta = StarknetProvider & {
 type DisconnectableStarknetProvider = StarknetProvider & {
   disconnect?: () => Promise<unknown> | unknown;
 };
+
+type EventedStarknetProvider = {
+  on?: (event: string, listener: (value: unknown) => void) => void;
+  off?: (event: string, listener: (value: unknown) => void) => void;
+  removeListener?: (event: string, listener: (value: unknown) => void) => void;
+};
+
+export function subscribeStarknetProviderEvents(
+  rawProvider: object,
+  accountListener: (value: unknown) => void,
+  networkListener: (value: unknown) => void,
+) {
+  const provider = rawProvider as EventedStarknetProvider;
+  const subscribed: Array<[string, (value: unknown) => void]> = [];
+  const subscribe = (event: string, listener: (value: unknown) => void) => {
+    if (typeof provider.on !== "function") return;
+    try {
+      provider.on(event, listener);
+      subscribed.push([event, listener]);
+    } catch {
+      // Injected wallets expose different event subsets.
+    }
+  };
+
+  for (const event of ["accountsChanged", "accountChanged"]) {
+    subscribe(event, accountListener);
+  }
+  for (const event of ["networkChanged", "chainChanged"]) {
+    subscribe(event, networkListener);
+  }
+
+  return () => {
+    for (const [event, listener] of subscribed) {
+      try {
+        provider.off?.(event, listener);
+      } catch {}
+      try {
+        provider.removeListener?.(event, listener);
+      } catch {}
+    }
+  };
+}
 
 const SELECTED_STARKNET_WALLET_STORAGE_KEY = "zylith:selected-starknet-wallet";
 const CONNECTED_STARKNET_ADDRESS_STORAGE_KEY = "zylith:connected-starknet-address";
@@ -309,13 +354,18 @@ export function injectedStarknet(): StarknetProvider | null {
 
 export function selectedStarknetProvider(): StarknetProvider | null {
   if (selectedProvider) return selectedProvider;
-  const storedId = sessionGetNullable(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  const storedId = persistedWalletId();
   const wallets = discoverStarknetWallets();
   const wallet = wallets.find(option => option.id === storedId) ?? null;
   if (wallet) {
     selectedProvider = wallet.provider;
   }
   return wallet?.provider ?? null;
+}
+
+function persistedWalletId() {
+  return localGetNullable(SELECTED_STARKNET_WALLET_STORAGE_KEY)
+    ?? sessionGetNullable(SELECTED_STARKNET_WALLET_STORAGE_KEY);
 }
 
 const MAX_PROVIDER_VALUE_DEPTH = 8;
@@ -381,6 +431,7 @@ function rememberSelectedProvider(
   selectedProvider = provider;
   if (address) selectedAddress = address;
   if (walletId && walletId !== "selected") {
+    localSet(SELECTED_STARKNET_WALLET_STORAGE_KEY, walletId);
     sessionSet(SELECTED_STARKNET_WALLET_STORAGE_KEY, walletId);
   }
   if (address) sessionSet(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY, address);
@@ -395,9 +446,20 @@ export function connectedStarknetAddress(): string | null {
     ?? null;
 }
 
+export function applyStarknetAccountsChanged(value: unknown): string | null {
+  const address = addressFromUnknown(value);
+  if (!address) {
+    clearSelectedStarknetProvider();
+    return null;
+  }
+  selectedAddress = address;
+  sessionSet(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY, address);
+  return address;
+}
+
 export async function restoreConnectedStarknetWallet(): Promise<string | null> {
   const revision = selectedProviderRevision;
-  const storedId = sessionGetNullable(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  const storedId = persistedWalletId();
   if (!storedId) return connectedStarknetAddress();
 
   let provider = selectedStarknetProvider();
@@ -455,6 +517,8 @@ export function clearSelectedStarknetProvider({
   selectedAddress = null;
   sessionRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
   sessionRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
+  localRemove(SELECTED_STARKNET_WALLET_STORAGE_KEY);
+  localRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
 }
 
 export function disconnectStarknetProvider() {

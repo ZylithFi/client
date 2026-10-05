@@ -3,6 +3,7 @@ import shipped from "../../public/deployment.example.json";
 import {
   fundingRailTokenAddress,
   selectedDepositFundingRail,
+  selectedResidualRecoveryFundingRail,
   strk20WithdrawalEnabledForDeployment,
   type FundingDeploymentConfig,
 } from "./fundingRail";
@@ -13,7 +14,6 @@ function deployment(): FundingDeploymentConfig {
     ...value.funding.starknet_privacy,
     privacy_pool: "0x123",
     bridge_adapter: "0x456",
-    discovery_url: "https://discovery.example",
     proving_url: "https://prover.example",
     proving_ohttp_policy: "best_effort",
     paymaster_address: "0x789",
@@ -39,7 +39,7 @@ describe("fundingRail", () => {
     (policy) => {
       const value = deployment();
       value.funding.starknet_privacy!.proving_ohttp_policy = policy;
-      expect(selectedDepositFundingRail(value)).toMatchObject({
+      expect(selectedResidualRecoveryFundingRail(value)).toMatchObject({
         kind: "starknet_privacy",
         provingOhttpPolicy: policy,
       });
@@ -50,20 +50,21 @@ describe("fundingRail", () => {
   it("rejects missing policy and incomplete funding services", () => {
     const missingPolicy = deployment();
     delete missingPolicy.funding.starknet_privacy!.proving_ohttp_policy;
-    expect(() => selectedDepositFundingRail(missingPolicy)).toThrow("not fully configured");
+    expect(selectedDepositFundingRail(missingPolicy)).toBeTruthy();
+    expect(() => selectedResidualRecoveryFundingRail(missingPolicy)).toThrow("not fully configured");
 
     const insecure = deployment();
     insecure.funding.starknet_privacy!.proving_url = "http://198.51.100.1";
-    expect(() => selectedDepositFundingRail(insecure)).toThrow("not fully configured");
-    expect(strk20WithdrawalEnabledForDeployment(insecure)).toBe(false);
+    expect(selectedDepositFundingRail(insecure)).toBeTruthy();
+    expect(() => selectedResidualRecoveryFundingRail(insecure)).toThrow("not fully configured");
+    expect(strk20WithdrawalEnabledForDeployment(insecure)).toBe(true);
   });
 
   it("allows local urls only when explicitly requested", () => {
     const value = deployment();
-    value.funding.starknet_privacy!.discovery_url = "http://localhost:8080";
     value.funding.starknet_privacy!.proving_url = "http://127.0.0.1:3000";
     value.funding.starknet_privacy!.paymaster_url = "http://[::1]:8787";
-    expect(() => selectedDepositFundingRail(value, { allowLocalServiceUrls: false })).toThrow();
-    expect(selectedDepositFundingRail(value, { allowLocalServiceUrls: true })).toBeTruthy();
+    expect(() => selectedResidualRecoveryFundingRail(value, { allowLocalServiceUrls: false })).toThrow();
+    expect(selectedResidualRecoveryFundingRail(value, { allowLocalServiceUrls: true })).toBeTruthy();
   });
 });

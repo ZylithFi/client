@@ -709,7 +709,9 @@ pub struct ExitClaimInput {
     pub token_address: String,
     pub amount: String,
     pub exit_commitment: String,
+    pub claim_account: String,
     pub open_note_id: String,
+    pub claim_recipient: String,
 }
 
 /// signs the privacy pool claim of a finalized withdrawal's exit.
@@ -733,7 +735,9 @@ pub fn zylith_wallet_sign_strk20_exit_claim(input_json: &str) -> Result<String, 
             token_address: &input.token_address,
             amount: &input.amount,
             exit_commitment: &input.exit_commitment,
+            claim_account: &input.claim_account,
             open_note_id: &input.open_note_id,
+            claim_recipient: &input.claim_recipient,
         },
     )
     .map_err(js_error)?;
@@ -1172,38 +1176,74 @@ mod tests {
     fn the_exit_claim_is_signed_by_its_one_time_authority() {
         let seed_hex = "55".repeat(32);
         let note = deposit(&seed_hex, "STRK", 7, 3);
-        let message = |exchange_address| Strk20ExitClaimMessage {
-            chain_id: "0x534e5f5345504f4c4941",
-            bridge_address: "0x1",
-            privacy_pool_address: "0x2",
-            exchange_address,
-            asset_id: "STRK",
-            token_address: "0x4",
-            amount: "7",
-            exit_commitment: "0x5",
-            open_note_id: "0x6",
+        let message = |exchange_address, claim_account, open_note_id, claim_recipient| {
+            Strk20ExitClaimMessage {
+                chain_id: "0x534e5f5345504f4c4941",
+                bridge_address: "0x1",
+                privacy_pool_address: "0x2",
+                exchange_address,
+                asset_id: "STRK",
+                token_address: "0x4",
+                amount: "7",
+                exit_commitment: "0x5",
+                claim_account,
+                open_note_id,
+                claim_recipient,
+            }
         };
         let signed = call(
             zylith_wallet_sign_strk20_exit_claim,
             json!({
                 "seed_hex": seed_hex, "chain_id": "0x534e5f5345504f4c4941", "bridge_address": "0x1", "privacy_pool_address": "0x2",
-                "exchange_address": "0x3", "asset_id": "STRK", "token_address": "0x4", "amount": "7", "exit_commitment": "0x5", "open_note_id": "0x6",
+                "exchange_address": "0x3", "asset_id": "STRK", "token_address": "0x4", "amount": "7", "exit_commitment": "0x5", "claim_account": "0x6", "open_note_id": "0x8", "claim_recipient": "0x7",
             }),
         );
         let signature = Signature {
             r: felt(signed["signature_r"].as_str().unwrap()).unwrap(),
             s: felt(signed["signature_s"].as_str().unwrap()).unwrap(),
         };
-        let hash = |exchange| {
-            felt(&zylith_core::strk20_exit_claim_message_hash(message(exchange)).unwrap()).unwrap()
+        let hash = |exchange, claim_account, open_note_id, claim_recipient| {
+            felt(
+                &zylith_core::strk20_exit_claim_message_hash(message(
+                    exchange,
+                    claim_account,
+                    open_note_id,
+                    claim_recipient,
+                ))
+                .unwrap(),
+            )
+            .unwrap()
         };
         let exit_authority = public_key(
             &wallet_keys(&seed_hex)
                 .unwrap()
                 .exit_key(Felt::from(3_u8), Felt::from(5_u8)),
         );
-        assert!(verify_message(&exit_authority, &hash("0x3"), &signature));
-        assert!(!verify_message(&exit_authority, &hash("0x33"), &signature));
+        assert!(verify_message(
+            &exit_authority,
+            &hash("0x3", "0x6", "0x8", "0x7"),
+            &signature
+        ));
+        assert!(!verify_message(
+            &exit_authority,
+            &hash("0x33", "0x6", "0x8", "0x7"),
+            &signature
+        ));
+        assert!(!verify_message(
+            &exit_authority,
+            &hash("0x3", "0x66", "0x8", "0x7"),
+            &signature
+        ));
+        assert!(!verify_message(
+            &exit_authority,
+            &hash("0x3", "0x6", "0x8", "0x77"),
+            &signature
+        ));
+        assert!(!verify_message(
+            &exit_authority,
+            &hash("0x3", "0x6", "0x88", "0x7"),
+            &signature
+        ));
         assert_ne!(exit_authority, note.withdraw_authority);
         let config: WalletPublicConfig =
             serde_json::from_str(&zylith_wallet_derive_public_config(&seed_hex).unwrap()).unwrap();

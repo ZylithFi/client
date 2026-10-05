@@ -21,9 +21,9 @@ import type {
   WalletOrder,
   WithdrawableNote,
 } from "@zylith/sdk";
-import type { PrivateRegistry } from "@starkware-libs/starknet-privacy-sdk";
 import { ExchangeHttpError, ExchangeRejectedError, readSdkJsonResponse, transitionWindows } from "@zylith/sdk";
 import { notifyWalletRuntimeChanged, selectedStarknetProvider, setWalletRuntime } from "./domain/browserWallet";
+import { fromAtomicStr } from "./domain/assets";
 import {
   BACKUP_URL,
   type DeploymentConfig,
@@ -42,6 +42,7 @@ import { normalizeFeltForComparison, normalizeStrictFelt, requiredNonZeroFelt, r
 import {
   fundingRailTokenAddress,
   selectedDepositFundingRail,
+  selectedResidualRecoveryFundingRail,
   strk20WithdrawalEnabledForDeployment,
 } from "./domain/fundingRail";
 import { setPrivacyFundingStage } from "./domain/privacyFundingStage";
@@ -51,6 +52,11 @@ import type { PendingDeposit, WalletBalance } from "./domain/shieldedBalances";
 import { padRecoverySnapshotPayload } from "./domain/sizeClassPadding";
 import { orderQuoteValue } from "./domain/tradeIntent";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
+import {
+  createIndexedDbWalletDeviceKeyStore,
+  createWalletDeviceSessionManager,
+  type WalletDeviceSessionMetadata,
+} from "./domain/walletDeviceSession";
 import {
   type EncryptedLocalStore,
   type VaultRecord,
@@ -67,8 +73,7 @@ import {
   walletSignatureVaultId,
   walletSignatureVaultMetadataMatches,
 } from "./domain/walletLocalCrypto";
-import type { SerializedStarknetPrivacyRegistry } from "./integrations/starknetPrivacyRegistry";
-import { proofSubmissionStarted } from "./integrations/starknetPrivacyErrors";
+import { isUserRejected, proofSubmissionStarted } from "./integrations/starknetPrivacyErrors";
 import {
   type TransactionReceiptStatus,
   buildZylithWalletAuthTypedData,
@@ -76,6 +81,7 @@ import {
   ensureWalletChain,
   executeStarknetWalletCall,
   fetchTransactionReceiptStatus,
+  readStarknetWalletChainId,
   requestStarknetWalletTypedSignature,
   selectInjectedStarknetProvider,
   starknetCall,
@@ -368,9 +374,10 @@ class RecoveryStateConflictError extends Error {
 
 export type WalletRuntime = TraderWalletRuntime & {
   hasVault: (starknetAddress?: string | null) => boolean;
-  vaultAuthMode: (starknetAddress?: string | null) => "none" | "wallet-signature";
+  vaultAuthMode: (starknetAddress?: string | null) => "none" | "device-session" | "wallet-signature";
   isReady: (starknetAddress?: string | null) => boolean;
   createWalletWithWalletSignature: (starknetAddress: string) => Promise<boolean>;
+  unlockWithDeviceSession: (starknetAddress: string) => Promise<boolean>;
   unlockWithWalletSignature: (starknetAddress: string) => Promise<boolean>;
   getPublicConfig: () => WalletPublicConfig | null;
   lock: () => void;
@@ -379,6 +386,7 @@ export type WalletRuntime = TraderWalletRuntime & {
   withdrawalAvailable: () => boolean;
   submitDepositViaWallet: (asset: string, amountAtoms: string) => Promise<{ transaction_hash: string; note_commitment: string }>;
   withdraw: (noteCommitment: string) => Promise<{ nullifier: string }>;
+  claimWithdrawal: (noteCommitment: string) => Promise<{ transaction_hash: string | null }>;
   prepareResidualRecovery: (orderId: string) => Promise<ResidualRecoveryPreparation>;
   submitResidualRecovery: (orderId: string) => Promise<ResidualRecoverySubmission>;
   freezeResidualRecoveryCapacity: (orderId: string) => Promise<{ transaction_hash: string | null; already_final: boolean }>;
@@ -390,7 +398,6 @@ const WALLET_WASM_MODULE_URL = "/wallet/zylith_wallet_wasm.js";
 const VAULT_KEY = "zylith.wallet.vault.v1";
 const STATE_PREFIX = "zylith.wallet.state.v2:";
 const STATE_QUARANTINE_PREFIX = "zylith.wallet.state-quarantine.v1:";
-const PRIVACY_REGISTRY_PREFIX = "zylith.wallet.starknet-privacy-registry.v1:";
 const WALLET_VAULT_REQUEST_TIMEOUT_MS = 10_000;
 /** active-work refresh cadence; idle wallets emit no synthetic private traffic. */
 const REFRESH_CADENCE_MS = 10_000;
@@ -905,7 +912,7 @@ function isStoredNote(value: unknown): value is WalletNote {
     ) return false;
     if (
       value.exit.stage === "claiming"
-      && (!value.exit.open_note_id || !value.exit.claim_transaction_hash)
+      && !value.exit.claim_transaction_hash
     ) return false;
   }
   if (value.output !== undefined && (
@@ -1193,10 +1200,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   let activeWalletAddress: string | null = null;
   let generation = 0;
   let saveChain: Promise<void> = Promise.resolve();
-  let registrySaveChain: Promise<void> = Promise.resolve();
   let snapshotSaveChain: Promise<boolean> = Promise.resolve(false);
-  const runPrivacyRegistryOperation = createSerialOperationQueue();
+  const deviceSession = createWalletDeviceSessionManager({
+    storage: localStorage,
+    keyStore: createIndexedDbWalletDeviceKeyStore(),
+  });
   let timer: number | null = null;
+  let deviceSessionExpiryTimer: number | null = null;
   let workerRunning = false;
   let statusChunkCursor = 0;
   let refreshInFlight: Promise<void> | null = null;
@@ -1288,36 +1298,6 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     await save;
   }
 
-  async function loadPrivacyRegistry(): Promise<PrivateRegistry | undefined> {
-    const { seedHex: seed, publicConfig: config } = unlocked();
-    const raw = localStorage.getItem(`${PRIVACY_REGISTRY_PREFIX}${scope}`);
-    if (raw === null) return undefined;
-    try {
-      const stored = JSON.parse(raw) as EncryptedLocalStore;
-      const serialized = await decryptLocalStore<SerializedStarknetPrivacyRegistry>(stored, seed, config.account_id, "starknet-privacy-registry");
-      const { deserializeStarknetPrivacyRegistry } = await import("./integrations/starknetPrivacyRegistry");
-      return deserializeStarknetPrivacyRegistry(serialized);
-    } catch (error) {
-      throw new Error("The encrypted privacy-funding state is damaged. Restore it before moving funds.", { cause: error });
-    }
-  }
-
-  async function savePrivacyRegistry(registry: PrivateRegistry) {
-    const { seedHex: seed, publicConfig: config } = unlocked();
-    const sessionGeneration = generation;
-    const targetScope = scope;
-    const { serializeStarknetPrivacyRegistry } = await import("./integrations/starknetPrivacyRegistry");
-    const snapshot = serializeStarknetPrivacyRegistry(registry);
-    const save = registrySaveChain.catch(() => undefined).then(async () => {
-      const encrypted = await encryptLocalStore(snapshot, seed, config.account_id, "starknet-privacy-registry");
-      ensureCurrent(sessionGeneration);
-      if (scope !== targetScope) throw new Error("Wallet session changed. Retry.");
-      localStorage.setItem(`${PRIVACY_REGISTRY_PREFIX}${targetScope}`, JSON.stringify(encrypted));
-    });
-    registrySaveChain = save.catch(() => undefined);
-    await save;
-  }
-
   // session
 
   async function hydrate(nextSeedHex: string, walletAddress: string, sessionGeneration: number) {
@@ -1344,7 +1324,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       notifyWalletRuntimeChanged();
       return true;
     } catch (error) {
-      if (generation === sessionGeneration) lock();
+      if (generation === sessionGeneration) clearSession(false);
       throw error;
     }
   }
@@ -1353,14 +1333,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (sessionGeneration !== generation) throw new Error("Wallet session changed. Retry.");
   }
 
-  function lock() {
+  function clearSession(revokeDeviceSession: boolean) {
+    const walletAddress = activeWalletAddress;
     generation += 1;
     workerRunning = false;
     if (timer !== null) window.clearTimeout(timer);
+    if (deviceSessionExpiryTimer !== null) window.clearTimeout(deviceSessionExpiryTimer);
     timer = null;
+    deviceSessionExpiryTimer = null;
     refreshInFlight = null;
     saveChain = Promise.resolve();
-    registrySaveChain = Promise.resolve();
     snapshotSaveChain = Promise.resolve(false);
     seedHex = null;
     publicConfig = null;
@@ -1385,6 +1367,13 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     recoveryHeadSequence = 0;
     statusChunkCursor = 0;
     notifyWalletRuntimeChanged();
+    if (revokeDeviceSession && walletAddress) {
+      void deviceSession.revoke(walletAddress);
+    }
+  }
+
+  function lock() {
+    clearSession(true);
   }
 
   function startWorker() {
@@ -1412,18 +1401,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   function refreshDelay() {
     const jitter = crypto.getRandomValues(new Uint32Array(1))[0] % (2 * REFRESH_JITTER_MS + 1);
     const regularDelay = REFRESH_CADENCE_MS - REFRESH_JITTER_MS + jitter;
-    const otherPendingWork = followedOrders().length > 0
-      || state.orders.some((order) => order.state !== "failed" && order.closed_seq_authenticated !== true)
-      || followedExits().length > 0
-      || state.notes.some((note) => note.deposit && !note.deposit.failed && !note.deposit.confirmed)
-      || state.notes.some((note) => note.exit?.stage === "claiming");
-    if (otherPendingWork) return regularDelay;
-    const nextClaimAt = state.notes.reduce<number | null>((earliest, note) => {
-      if (note.exit?.stage !== "finalized") return earliest;
-      const retryAt = note.exit.claim_retry_at_ms ?? 0;
-      return earliest === null ? retryAt : Math.min(earliest, retryAt);
-    }, null);
-    return nextClaimAt === null ? regularDelay : Math.max(regularDelay, nextClaimAt - Date.now());
+    return regularDelay;
   }
 
   function hasPendingWork() {
@@ -1431,7 +1409,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       || state.orders.some((order) => order.state !== "failed" && order.closed_seq_authenticated !== true)
       || followedExits().length > 0
       || state.notes.some((note) => note.deposit && !note.deposit.failed && !note.deposit.confirmed)
-      || state.notes.some((note) => note.exit?.stage === "finalized" || note.exit?.stage === "claiming");
+      || state.notes.some((note) => note.exit?.stage === "claiming");
   }
 
   // wallet-signature vault
@@ -1535,7 +1513,75 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     ensureCurrent(sessionGeneration);
     localStorage.setItem(vaultStorageKey(vault.wallet_address), JSON.stringify(vault));
-    return hydrate(normalizeSeed(nextSeedHex), context.walletAddress, sessionGeneration);
+    const normalizedSeed = normalizeSeed(nextSeedHex);
+    const opened = await hydrate(normalizedSeed, context.walletAddress, sessionGeneration);
+    if (!opened) return false;
+    try {
+      await deviceSession.seal(normalizedSeed, {
+        walletAddress: context.walletAddress,
+        chainId: context.chainId,
+        deploymentId: context.deploymentId,
+        origin: context.origin,
+      });
+      scheduleDeviceSessionExpiry(context.walletAddress);
+    } catch (error) {
+      if (generation === sessionGeneration) clearSession(false);
+      throw new Error("This browser could not securely remember the private trading session.", { cause: error });
+    }
+    return true;
+  }
+
+  async function deviceSessionMetadata(
+    starknetAddress: string,
+  ): Promise<WalletDeviceSessionMetadata | null> {
+    const provider = selectedStarknetProvider();
+    if (!provider) return null;
+    const walletAddress = normalizeFeltForComparison(starknetAddress);
+    const connected = connectedProviderAddress(provider as never);
+    if (!connected || normalizeFeltForComparison(connected) !== walletAddress) return null;
+    const manifest = await loadDeployment();
+    const expectedChainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
+    const actualChainId = await readStarknetWalletChainId(provider as never).catch(() => null);
+    if (!actualChainId || normalizeFeltForComparison(actualChainId) !== normalizeFeltForComparison(expectedChainId)) {
+      return null;
+    }
+    return {
+      walletAddress,
+      chainId: expectedChainId,
+      deploymentId: await walletAuthDeploymentId(manifest, 2),
+      origin: window.location?.origin || "zylith://local",
+    };
+  }
+
+  function unlockWithDeviceSession(starknetAddress: string) {
+    return vaultOperations.run(`device:${normalizeFeltForComparison(starknetAddress)}`, async () => {
+      const sessionGeneration = generation;
+      if (seedHex) {
+        return activeWalletAddress === normalizeFeltForComparison(starknetAddress);
+      }
+      const metadata = await deviceSessionMetadata(starknetAddress);
+      ensureCurrent(sessionGeneration);
+      if (!metadata) return false;
+      const storedSeed = await deviceSession.open(metadata);
+      ensureCurrent(sessionGeneration);
+      if (!storedSeed) return false;
+      const opened = await hydrate(normalizeSeed(storedSeed), metadata.walletAddress, sessionGeneration);
+      if (opened) scheduleDeviceSessionExpiry(metadata.walletAddress);
+      return opened;
+    });
+  }
+
+  function scheduleDeviceSessionExpiry(walletAddress: string) {
+    if (deviceSessionExpiryTimer !== null) window.clearTimeout(deviceSessionExpiryTimer);
+    const expiresAt = deviceSession.expiresAt(walletAddress);
+    if (!expiresAt) return;
+    const remaining = expiresAt - Date.now();
+    deviceSessionExpiryTimer = window.setTimeout(() => {
+      deviceSessionExpiryTimer = null;
+      if (activeWalletAddress !== normalizeFeltForComparison(walletAddress)) return;
+      if (expiresAt <= Date.now()) lock();
+      else scheduleDeviceSessionExpiry(walletAddress);
+    }, Math.max(0, Math.min(remaining, 2_147_000_000)));
   }
 
   function createWalletWithWalletSignature(starknetAddress: string) {
@@ -1794,13 +1840,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const amount = BigInt(amountAtoms);
     if (amount <= 0n) throw new Error("Deposit amount must be greater than zero");
     const rail = selectedDepositFundingRail(manifest);
-    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
     const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
     const tokenAddress = fundingRailTokenAddress(manifest, asset);
-    const feeTokenAddress = fundingRailTokenAddress(
-      manifest,
-      manifest.market_registry.gas_fee_asset_id,
-    );
     setPrivacyFundingStage("Connecting Starknet wallet and checking network");
     const provider = await selectInjectedStarknetProvider();
     ensureCurrent(sessionGeneration);
@@ -1862,46 +1903,42 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     depositInFlight = requestId;
     let submitted = false;
+    let walletSubmissionStarted = false;
+    let walletSubmissionMayHaveLanded = (_error: unknown) => true;
     try {
-      const { submitPrivacyBridgeDeposit } = await import("./integrations/starknetPrivacyFunding");
-      const result = await runPrivacyRegistryOperation(async () => {
-        ensureCurrent(sessionGeneration);
-        const sdkRegistry = await loadPrivacyRegistry();
-        const submittedDeposit = await submitPrivacyBridgeDeposit({
-          provider: provider as never,
-          seedHex: seed,
-          chainId: requiredString(manifest.chain_id, "chain_id"),
-          rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
-          privacyPoolAddress,
-          bridgeAddress,
-          tokenAddress,
-          feeTokenAddress,
-          connectedWalletFeeReserveAmount: BigInt(
-            manifest.market_registry.connected_wallet_fee_reserve_amount,
-          ),
-          discoveryUrl: serviceUrl(rail.discoveryUrl, "/starknet-privacy-discovery"),
-          provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
-          provingOhttpPolicy: rail.provingOhttpPolicy,
-          paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
-          paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
-          privacyProofSignerClassHash: rail.privacyProofSignerClassHash,
-          minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
-          sdkRegistry,
-          plan: { amount, encodedArgs: plan.encoded_args },
-        });
-        ensureCurrent(sessionGeneration);
-        note.deposit!.transaction_hash = submittedDeposit.transactionHash;
-        submitted = true;
-        await saveState();
-        await savePrivacyRegistry(submittedDeposit.sdkRegistry);
-        return submittedDeposit;
+      const [
+        walletPrivacy,
+        { privacyBridgeDepositFlatCalldata },
+      ] = await Promise.all([
+        import("./integrations/starknetWalletPrivacy"),
+        import("./integrations/starknetPrivacyFunding"),
+      ]);
+      walletSubmissionMayHaveLanded = walletPrivacy.walletPrivateSubmissionMayHaveLanded;
+      const result = await walletPrivacy.fundZylithFromWallet({
+        provider: provider as never,
+        tokenAddress,
+        amount,
+        amountLabel: `${fromAtomicStr(amount.toString(), asset)} ${asset}`,
+        bridgeAddress,
+        bridgeCalldata: privacyBridgeDepositFlatCalldata({
+          amount,
+          encodedArgs: plan.encoded_args,
+        }),
+        onStage: setPrivacyFundingStage,
+        onPrivateDepositSubmissionStarted: () => {
+          walletSubmissionStarted = true;
+        },
       });
       ensureCurrent(sessionGeneration);
+      note.deposit!.transaction_hash = result.transactionHash;
+      submitted = true;
+      await saveState();
       return { transaction_hash: result.transactionHash, note_commitment: note.commitment };
     } catch (error) {
-      // once the relay call begins, a missing or malformed acknowledgement cannot prove the
+      // once the wallet submission begins, a missing or malformed acknowledgement cannot prove the
       // transaction did not land. keep the deterministic note until chain recovery resolves it.
-      const ambiguous = submitted || proofSubmissionStarted(error);
+      const ambiguous = submitted
+        || (walletSubmissionStarted && walletSubmissionMayHaveLanded(error));
       if (!ambiguous) state.notes = state.notes.filter((candidate) => candidate !== note);
       await saveState();
       throw error;
@@ -2864,7 +2901,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       };
     }
     persisted.request_submitted_at_ms = undefined;
-    const rail = selectedDepositFundingRail(manifest);
+    const rail = selectedResidualRecoveryFundingRail(manifest);
     const provider = await selectInjectedStarknetProvider();
     ensureCurrent(sessionGeneration);
     const { submitResidualRecovery: submit } = await import("./integrations/starknetPrivacyFunding");
@@ -3000,12 +3037,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const pending = await pendingResidualExit(prepared.nullifier);
     ensureCurrent(sessionGeneration);
     assertPendingResidualMatches(prepared, pending);
-    const rail = selectedDepositFundingRail(manifest);
-    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
-    const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
-    const chainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
     const outputAsset = order.side === "Sell" ? order.quote_asset : order.base_asset;
-    const { submitPrivacyOpenNoteWithdrawal } = await import("./integrations/starknetPrivacyFunding");
 
     const claim = async (
       asset: string,
@@ -3019,45 +3051,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const alreadyClaimed = await claimedOpenNoteId(exitCommitment);
       ensureCurrent(sessionGeneration);
       if (alreadyClaimed) return null;
-      const tokenAddress = fundingRailTokenAddress(manifest, asset);
-      const result = await runPrivacyRegistryOperation(async () => {
-        ensureCurrent(sessionGeneration);
-        const submittedClaim = await submitPrivacyOpenNoteWithdrawal({
-          seedHex: seed,
-          chainId,
-          rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
-          privacyPoolAddress,
-          bridgeAddress,
-          tokenAddress,
-          discoveryUrl: serviceUrl(rail.discoveryUrl, "/starknet-privacy-discovery"),
-          provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
-          provingOhttpPolicy: rail.provingOhttpPolicy,
-          paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
-          paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
-          privacyProofSignerClassHash: rail.privacyProofSignerClassHash,
-          minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
-          sdkRegistry: await loadPrivacyRegistry(),
-          exitCommitment,
-          signExitClaim: (openNoteId) =>
-            call(core.zylith_wallet_sign_strk20_exit_claim, {
-              seed_hex: seed,
-              chain_id: chainId,
-              bridge_address: bridgeAddress,
-              privacy_pool_address: privacyPoolAddress,
-              exchange_address: chainContext(),
-              asset_id: assetId,
-              token_address: tokenAddress,
-              amount,
-              exit_commitment: exitCommitment,
-              open_note_id: openNoteId,
-            }),
-        });
-        ensureCurrent(sessionGeneration);
-        await onSubmitted(submittedClaim);
-        await savePrivacyRegistry(submittedClaim.sdkRegistry);
-        return submittedClaim;
+      const result = await submitExitClaimToWallet({
+        seed,
+        manifest,
+        asset,
+        assetId,
+        amount,
+        exitCommitment,
+        sessionGeneration,
       });
       ensureCurrent(sessionGeneration);
+      await onSubmitted(result);
       return result;
     };
 
@@ -3560,37 +3564,45 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           }
         }
       }
-      if ((note.exit!.claim_retry_at_ms ?? 0) <= Date.now()) startClaim(note);
     }
     return changed;
   }
 
-  /** a claim proves in the privacy pool for minutes, so it runs beside the refresh loop. */
-  function startClaim(note: WalletNote) {
-    if (claimsInFlight.has(note.commitment)) return;
-    claimsInFlight.add(note.commitment);
+  /** moves a matured exit into the connected wallet's shielded balance. */
+  async function claimWithdrawal(noteCommitment: string) {
+    const operationId = normalizeFeltForComparison(noteCommitment);
+    if (claimsInFlight.has(operationId)) {
+      throw new Error("This private withdrawal is already being received.");
+    }
+    const note = noteByCommitment(noteCommitment);
+    if (!note?.exit || note.spent) throw new Error("This withdrawal is no longer available.");
+    if (note.exit.stage === "claiming") {
+      return { transaction_hash: note.exit.claim_transaction_hash ?? null };
+    }
+    if (note.exit.stage !== "finalized") {
+      throw new Error("This withdrawal is not ready to receive yet.");
+    }
+    claimsInFlight.add(operationId);
     const sessionGeneration = generation;
-    void claimExit(note, sessionGeneration)
-      .catch(async (error: unknown) => {
-        if (sessionGeneration !== generation) return;
+    try {
+      return { transaction_hash: await claimExit(note, sessionGeneration) };
+    } catch (error) {
+      if (sessionGeneration === generation) {
         const current = noteByCommitment(note.commitment);
-        if (current?.exit?.stage !== "finalized") return;
-        current.exit = claimRetryState(current.exit, error, Date.now());
-        await saveState();
-      })
-      .finally(() => {
-        if (generation === sessionGeneration) claimsInFlight.delete(note.commitment);
-      });
+        if (current?.exit?.stage === "finalized") {
+          current.exit = claimRetryState(current.exit, error, Date.now());
+          await saveState();
+        }
+      }
+      throw error;
+    } finally {
+      if (generation === sessionGeneration) claimsInFlight.delete(operationId);
+    }
   }
 
   /** claims a finalized exit into the privacy pool as an open note the wallet owns. */
   async function claimExit(note: WalletNote, sessionGeneration: number) {
     const { seedHex: seed, deployment: manifest } = unlocked();
-    const rail = selectedDepositFundingRail(manifest);
-    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
-    const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
-    const tokenAddress = fundingRailTokenAddress(manifest, note.asset);
-    const chainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
     const exit = note.exit!;
     const alreadyClaimed = await claimedOpenNoteId(exit.exit_commitment);
     ensureCurrent(sessionGeneration);
@@ -3606,57 +3618,105 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       void pushRecoverySnapshot(true).catch(() => false);
       return null;
     }
-    const { submitPrivacyOpenNoteWithdrawal } = await import("./integrations/starknetPrivacyFunding");
-    const result = await runPrivacyRegistryOperation(async () => {
-      ensureCurrent(sessionGeneration);
-      const submittedClaim = await submitPrivacyOpenNoteWithdrawal({
-        seedHex: seed,
-        chainId,
-        rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
-        privacyPoolAddress,
-        bridgeAddress,
-        tokenAddress,
-        discoveryUrl: serviceUrl(rail.discoveryUrl, "/starknet-privacy-discovery"),
-        provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
-        provingOhttpPolicy: rail.provingOhttpPolicy,
-        paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
-        paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
-        privacyProofSignerClassHash: rail.privacyProofSignerClassHash,
-        minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
-        sdkRegistry: await loadPrivacyRegistry(),
-        exitCommitment: exit.exit_commitment,
-        signExitClaim: (openNoteId) =>
-          call(core.zylith_wallet_sign_strk20_exit_claim, {
-            seed_hex: seed,
+    const result = await submitExitClaimToWallet({
+      seed,
+      manifest,
+      asset: note.asset,
+      assetId: note.asset,
+      amount: note.fields.amount,
+      exitCommitment: exit.exit_commitment,
+      sessionGeneration,
+    });
+    ensureCurrent(sessionGeneration);
+    note.exit = {
+      ...exit,
+      stage: "claiming",
+      open_note_id: undefined,
+      claim_transaction_hash: result.transactionHash,
+      claim_submitted_at_ms: Date.now(),
+      claim_retry_at_ms: undefined,
+      failure: undefined,
+    };
+    await saveState();
+    void pushRecoverySnapshot(true).catch(() => false);
+    return result.transactionHash;
+  }
+
+  async function submitExitClaimToWallet(input: {
+    seed: string;
+    manifest: DeploymentConfig;
+    asset: string;
+    assetId: string;
+    amount: string;
+    exitCommitment: string;
+    sessionGeneration: number;
+  }) {
+    const rail = selectedDepositFundingRail(input.manifest);
+    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
+    const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
+    const paymasterAddress = requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address");
+    const paymasterUrl = requiredString(rail.paymasterUrl, "privacy_paymaster_url");
+    const tokenAddress = fundingRailTokenAddress(input.manifest, input.asset);
+    const chainId = requiredNonZeroFelt(input.manifest.chain_id, "chain_id");
+    const provider = await selectInjectedStarknetProvider();
+    ensureCurrent(input.sessionGeneration);
+    const walletAddress = connectedProviderAddress(provider as never);
+    if (!walletAddress || normalizeFeltForComparison(walletAddress) !== activeWalletAddress) {
+      throw new Error("Connected Starknet wallet changed during the private withdrawal.");
+    }
+    const [
+      { claimZylithExitToWallet },
+      {
+        privacyBridgeStrk20ExitAuthorizationCall,
+        privacyBridgeStrk20ExitClaimFlatCalldata,
+      },
+    ] = await Promise.all([
+      import("./integrations/starknetWalletPrivacy"),
+      import("./integrations/starknetPrivacyFunding"),
+    ]);
+    const result = await claimZylithExitToWallet({
+      provider: provider as never,
+      walletAddress,
+      chainId,
+      paymasterAddress,
+      paymasterUrl,
+      privacyPoolAddress,
+      tokenAddress,
+      bridgeAddress,
+      bridgeCalldata: privacyBridgeStrk20ExitClaimFlatCalldata({
+        exitCommitment: input.exitCommitment,
+        openNoteId: "${openNoteIds[0]}",
+        claimRecipient: walletAddress,
+      }),
+      buildAuthorizationCall: (openNoteId) => {
+        const signature = call<{ signature_r: string; signature_s: string }>(
+          core.zylith_wallet_sign_strk20_exit_claim,
+          {
+            seed_hex: input.seed,
             chain_id: chainId,
             bridge_address: bridgeAddress,
             privacy_pool_address: privacyPoolAddress,
             exchange_address: chainContext(),
-            asset_id: note.asset,
+            asset_id: input.assetId,
             token_address: tokenAddress,
-            amount: note.fields.amount,
-            exit_commitment: exit.exit_commitment,
+            amount: input.amount,
+            exit_commitment: input.exitCommitment,
+            claim_account: paymasterAddress,
             open_note_id: openNoteId,
-          }),
-      });
-      ensureCurrent(sessionGeneration);
-      note.exit = {
-        ...exit,
-        stage: "claiming",
-        open_note_id: submittedClaim.openNoteId,
-        claim_transaction_hash: submittedClaim.transactionHash,
-        claim_submitted_at_ms: Date.now(),
-        claim_retry_at_ms: undefined,
-        failure: undefined,
-      };
-      await saveState();
-      void pushRecoverySnapshot(true).catch(() => false);
-      await savePrivacyRegistry(submittedClaim.sdkRegistry);
-      return submittedClaim;
+            claim_recipient: walletAddress,
+          },
+        );
+        return privacyBridgeStrk20ExitAuthorizationCall({
+          bridgeAddress,
+          exitCommitment: input.exitCommitment,
+          openNoteId,
+          claimRecipient: walletAddress,
+          signature,
+        });
+      },
     });
-    ensureCurrent(sessionGeneration);
-    void pushRecoverySnapshot(true).catch(() => false);
-    return result.transactionHash;
+    ensureCurrent(input.sessionGeneration);
+    return result;
   }
 
   async function settleClaim(note: WalletNote) {
@@ -3754,7 +3814,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   return {
     hasVault,
-    vaultAuthMode: (starknetAddress) => (hasVault(starknetAddress) ? "wallet-signature" : "none"),
+    vaultAuthMode: (starknetAddress) => {
+      if (starknetAddress && deviceSession.hasRecord(starknetAddress)) return "device-session";
+      return hasVault(starknetAddress) ? "wallet-signature" : "none";
+    },
     isReady: (starknetAddress) => Boolean(
       seedHex
       && publicConfig
@@ -3762,6 +3825,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         || activeWalletAddress === normalizeFeltForComparison(starknetAddress)),
     ),
     createWalletWithWalletSignature,
+    unlockWithDeviceSession,
     unlockWithWalletSignature,
     getPublicConfig: () => publicConfig,
     lock,
@@ -3783,6 +3847,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     finalizeResidualRecovery: (orderId) => runResidualOperation(orderId, () => finalizeResidualRecovery(orderId)),
     claimResidualRecovery: (orderId) => runResidualOperation(orderId, () => claimResidualRecovery(orderId)),
     withdraw,
+    claimWithdrawal,
     refresh,
   };
 }

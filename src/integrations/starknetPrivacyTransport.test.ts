@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   paymasterExecuteUrl,
-  paymasterPrivacySignerRelayUrl,
   serviceBaseUrl,
-  transactionHashFromResult,
 } from "./starknetPrivacyTransport";
 
 describe("starknet privacy transport urls", () => {
@@ -25,31 +23,5 @@ describe("starknet privacy transport urls", () => {
     expect(paymasterExecuteUrl(" https://paymaster.example.com/execute-outside ")).toBe(
       "https://paymaster.example.com/execute-outside"
     );
-  });
-
-  it("builds privacy-signer relay urls from either base or execute endpoint", () => {
-    expect(paymasterPrivacySignerRelayUrl("https://paymaster.example.com")).toBe(
-      "https://paymaster.example.com/privacy-signer/relay"
-    );
-    expect(paymasterPrivacySignerRelayUrl("https://paymaster.example.com/execute-outside")).toBe(
-      "https://paymaster.example.com/privacy-signer/relay"
-    );
-  });
-});
-
-describe("transactionHashFromResult", () => {
-  it("extracts wallet and relay transaction hashes", () => {
-    expect(transactionHashFromResult("0xabc")).toBe("0xabc");
-    expect(transactionHashFromResult({ transaction_hash: "0xabc" })).toBe("0xabc");
-    expect(transactionHashFromResult({ transactionHash: "0xdef" })).toBe("0xdef");
-    expect(transactionHashFromResult({ hash: "0x123" })).toBe("0x123");
-  });
-
-  it("returns null for missing or empty hashes", () => {
-    expect(transactionHashFromResult(null)).toBeNull();
-    expect(transactionHashFromResult({ transaction_hash: "" })).toBeNull();
-    expect(transactionHashFromResult({ transaction_hash: "0x0" })).toBeNull();
-    expect(transactionHashFromResult({ transaction_hash: "not-a-felt" })).toBeNull();
-    expect(transactionHashFromResult({ transaction_hash: 123 })).toBeNull();
   });
 });

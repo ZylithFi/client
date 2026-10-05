@@ -168,6 +168,88 @@ describe("DepositSlide", () => {
     expect(onOpenWallet).not.toHaveBeenCalled();
   });
 
+  it("silently unlocks a remembered device session before depositing", async () => {
+    let ready = false;
+    const unlockWithDeviceSession = vi.fn(async () => {
+      ready = true;
+      return true;
+    });
+    const unlockWithWalletSignature = vi.fn();
+    const submitDepositViaWallet = vi.fn().mockResolvedValue(undefined);
+    setWalletRuntime({
+      isReady: () => ready,
+      hasVault: () => true,
+      vaultAuthMode: () => "device-session",
+      unlockWithDeviceSession,
+      unlockWithWalletSignature,
+      submitDepositViaWallet,
+    } as never);
+    render(
+      <DepositSlide
+        open
+        onClose={vi.fn()}
+        defaultAsset="STRK"
+        allAssets={["STRK", "USDC"]}
+        starknetAddress="0xabc"
+        walletReady={false}
+        onOpenWallet={vi.fn()}
+        setSlideAsset={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("0"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    await waitFor(() => {
+      expect(unlockWithDeviceSession).toHaveBeenCalledWith("0xabc");
+      expect(unlockWithWalletSignature).not.toHaveBeenCalled();
+      expect(submitDepositViaWallet).toHaveBeenCalled();
+    });
+  });
+
+  it("falls back to wallet reauthorization when the device session cannot open", async () => {
+    let ready = false;
+    const unlockWithDeviceSession = vi.fn().mockResolvedValue(false);
+    const unlockWithWalletSignature = vi.fn(async () => {
+      ready = true;
+      return true;
+    });
+    const submitDepositViaWallet = vi.fn().mockResolvedValue(undefined);
+    setWalletRuntime({
+      isReady: () => ready,
+      hasVault: () => true,
+      vaultAuthMode: () => "device-session",
+      unlockWithDeviceSession,
+      unlockWithWalletSignature,
+      submitDepositViaWallet,
+    } as never);
+    render(
+      <DepositSlide
+        open
+        onClose={vi.fn()}
+        defaultAsset="STRK"
+        allAssets={["STRK", "USDC"]}
+        starknetAddress="0xabc"
+        walletReady={false}
+        onOpenWallet={vi.fn()}
+        setSlideAsset={vi.fn()}
+      />
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("0"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    await waitFor(() => {
+      expect(unlockWithDeviceSession).toHaveBeenCalledWith("0xabc");
+      expect(unlockWithWalletSignature).toHaveBeenCalledWith("0xabc");
+      expect(submitDepositViaWallet).toHaveBeenCalled();
+    });
+  });
+
   it("opens wallet setup from the deposit amount input when no Starknet wallet is connected", async () => {
     const onOpenWallet = vi.fn();
     let ready = false;
@@ -290,6 +372,43 @@ describe("DepositSlide", () => {
 });
 
 describe("WithdrawSlide", () => {
+  it("requires an explicit action before receiving a matured exit privately", async () => {
+    const claimWithdrawal = vi.fn().mockResolvedValue({ transaction_hash: "0x1" });
+    setWalletRuntime({
+      isReady: () => true,
+      withdrawalAvailable: () => true,
+      getWithdrawableNotes: () => [
+        {
+          note_commitment: "0xnote",
+          source: "output",
+          asset: "STRK",
+          amount: "1000000000000000000",
+          locked: true,
+          spent: false,
+          exit_stage: "finalized",
+        },
+      ],
+      claimWithdrawal,
+    } as never);
+
+    render(
+      <WithdrawSlide
+        open
+        onClose={vi.fn()}
+        defaultAsset="STRK"
+        allAssets={["STRK"]}
+        starknetAddress="0xabc"
+        walletReady
+        onOpenWallet={vi.fn()}
+        setSlideAsset={vi.fn()}
+      />
+    );
+
+    expect(claimWithdrawal).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Receive privately" }));
+    await waitFor(() => expect(claimWithdrawal).toHaveBeenCalledWith("0xnote"));
+  });
+
   it("never substitutes a different note if the displayed note becomes unavailable", async () => {
     let notes = [{
       note_commitment: "0xfirst",
@@ -647,7 +766,11 @@ describe("WalletSlide", () => {
       id: "ready",
       name: "Ready",
       request: vi.fn(async ({ type }: { type?: string }) =>
-        type === "wallet_requestAccounts" ? [{ address: "0xabc" }] : null
+        type === "wallet_supportedWalletApi"
+          ? ["0.10.4"]
+          : type === "wallet_requestAccounts"
+            ? [{ address: "0xabc" }]
+            : null
       ),
       account: { address: "0xabc" },
     };
