@@ -376,6 +376,24 @@ class RecoveryStateConflictError extends Error {
   }
 }
 
+export function recoverySnapshotStateForScope(payload: unknown, targetScope: string): WalletState | null {
+  if (
+    !isRecord(payload)
+    || payload.version !== 2
+    || typeof payload.scope !== "string"
+    || !("state" in payload)
+  ) {
+    throw new RecoveryStateConflictError(
+      "The recovery service returned a malformed snapshot payload.",
+    );
+  }
+  // recovery history is seed-scoped, while wallet state is deployment-scoped. a redeployment
+  // therefore leaves valid older snapshots in the same authenticated history. They remain the
+  // append-only history head but must never be merged into the current exchange's local state.
+  if (payload.scope !== targetScope) return null;
+  return requireWalletState(payload.state);
+}
+
 export type WalletRuntime = TraderWalletRuntime & {
   hasVault: (starknetAddress?: string | null) => boolean;
   vaultAuthMode: (starknetAddress?: string | null) => "none" | "device-session" | "wallet-signature";
@@ -1666,6 +1684,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     const recoveredState = structuredClone(state);
     let changed = false;
+    let applicableSnapshots = 0;
     for (const snapshot of snapshots) {
       let payload: { version?: number; scope?: string; state?: unknown };
       try {
@@ -1680,17 +1699,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       }
       ensureCurrent(sessionGeneration);
       if (scope !== targetScope) throw new Error("Wallet session changed. Retry.");
-      if (payload.version !== 2 || payload.scope !== targetScope || !payload.state) {
-        throw new RecoveryStateConflictError("The recovery service returned a snapshot for another wallet scope or version.");
-      }
       try {
-        const snapshotState = requireWalletState(payload.state);
+        const snapshotState = recoverySnapshotStateForScope(payload, targetScope);
+        if (snapshotState === null) continue;
+        applicableSnapshots += 1;
         changed = mergeState(recoveredState, snapshotState) || changed;
       } catch (error) {
         throw new RecoveryStateConflictError(error);
       }
     }
-    if (snapshots.length > 0 && stateWritesBlocked) {
+    if (applicableSnapshots > 0 && stateWritesBlocked) {
       state = recoveredState;
       stateWritesBlocked = false;
       try {
@@ -1705,7 +1723,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     recoveryHeadArtifactId = snapshots.at(-1)?.artifact_id ?? null;
     recoveryHeadSequence = snapshots.at(-1)?.sequence ?? 0;
-    return snapshots.length > 0;
+    return applicableSnapshots > 0;
   }
 
   function pushRecoverySnapshot(force = false) {

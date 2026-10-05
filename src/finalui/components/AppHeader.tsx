@@ -24,10 +24,8 @@ export function AppHeader({
   onNavigate: (page: AppPage) => void;
   onWallet: () => void;
 }) {
-  const walletLabel = starknetAddress
-    ? walletReady
-      ? fmtAddr(starknetAddress)
-      : "Authorize trading"
+  const walletLabel = starknetAddress && walletReady
+    ? fmtAddr(starknetAddress)
     : "Connect wallet";
 
   return (

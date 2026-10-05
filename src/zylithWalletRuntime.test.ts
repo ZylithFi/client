@@ -13,6 +13,7 @@ import {
   parseOnchainPairConfig,
   parseFundingCommitmentRegistration,
   quarantineDamagedWalletState,
+  recoverySnapshotStateForScope,
   requireRecoveryArtifactHistory,
   requireWalletSignatureVaultBundle,
   requireWalletState,
@@ -225,6 +226,26 @@ describe("recovery snapshot history", () => {
     expect(() => requireRecoveryArtifactHistory({
       artifacts: [recoveryArtifact("1", 1, "e".repeat(64))],
     }, accountId)).toThrow(/malformed snapshot/i);
+  });
+
+  it("ignores authenticated snapshots from an earlier deployment scope", () => {
+    expect(recoverySnapshotStateForScope({
+      version: 2,
+      scope: "account:old-exchange",
+      state: { obsolete: true },
+    }, "account:new-exchange")).toBeNull();
+  });
+
+  it("still rejects malformed snapshots and malformed state for the active scope", () => {
+    expect(() => recoverySnapshotStateForScope({
+      version: 2,
+      state: { version: 2, notes: [], orders: [], scanned_seq: 0 },
+    }, "account:new-exchange")).toThrow(/conflicts with this wallet/i);
+    expect(() => recoverySnapshotStateForScope({
+      version: 2,
+      scope: "account:new-exchange",
+      state: { obsolete: true },
+    }, "account:new-exchange")).toThrow();
   });
 });
 

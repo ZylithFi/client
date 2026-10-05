@@ -129,7 +129,7 @@ async function ensureTradingAuthorized(
     );
   }
   if (runtime.isReady(starknetAddress)) return runtime;
-  onStage?.("Authorizing trading");
+  onStage?.("Connecting wallet");
   const mode = runtime.vaultAuthMode?.(starknetAddress) ?? "none";
   const hasSignatureVault = runtime.hasVault?.(starknetAddress)
     ?? mode === "wallet-signature";
@@ -757,10 +757,10 @@ export function WalletSlide({
             }}
           >
             {working
-              ? "Authorizing…"
+              ? "Connecting…"
               : error
-              ? "Retry authorization"
-              : "Authorize trading"}
+              ? "Retry connection"
+              : "Connect wallet"}
           </button>
         )}
 
@@ -901,7 +901,7 @@ export function DepositSlide({
     setWorking(true);
     setError("");
     setFundingStage(
-      walletReady && w?.isReady(starknetAddress) ? "Preparing deposit" : "Authorizing trading"
+      walletReady && w?.isReady(starknetAddress) ? "Preparing deposit" : "Connecting wallet"
     );
     const updateStage = (stage: string) => {
       if (openGenerationRef.current === openGeneration) setFundingStage(stage);
