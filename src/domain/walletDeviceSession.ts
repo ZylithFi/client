@@ -174,7 +174,14 @@ export function createWalletDeviceSessionManager(
         await revoke(normalized.walletAddress);
         return null;
       }
-      const key = await options.keyStore.get(record.key_id).catch(() => null);
+      let key: CryptoKey | null;
+      try {
+        key = await options.keyStore.get(record.key_id);
+      } catch {
+        // a transient key-store failure (a blocked or busy database) is not proof the key is
+        // gone. keep the session so the next attempt can open it.
+        return null;
+      }
       if (!key || key.extractable || key.algorithm.name !== "AES-GCM") {
         await revoke(normalized.walletAddress);
         return null;

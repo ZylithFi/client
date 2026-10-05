@@ -10,6 +10,9 @@ export const CONNECTED_WALLET_FUNDING_TRANSFER_FAILED_MESSAGE =
 export const STARKNET_FEE_BALANCE_MESSAGE =
   "Connected wallet does not have enough balance for Starknet network fees.";
 
+export const SHIELDED_FEE_BALANCE_MESSAGE =
+  "Your shielded balance does not cover this private transaction fee.";
+
 export const CONNECTED_WALLET_NOT_ACTIVATED_ERROR =
   "Connected Starknet wallet is not activated yet. Complete one outgoing Starknet transaction in the wallet, then retry the deposit.";
 
@@ -28,6 +31,13 @@ export function privateDepositFundingFailureMessage(message: string): string | n
     /transaction failed|unknown token/i.test(message)
   ) {
     return CONNECTED_WALLET_FUNDING_TRANSFER_FAILED_MESSAGE;
+  }
+  if (
+    /INSUFFICIENT_PRIVATE_BALANCE|insufficient[_ ]private[_ ]balance|shielded balance.*(?:fee|short|insufficient)|private (?:STRK )?balance.*(?:fee|cover)/i.test(
+      message,
+    )
+  ) {
+    return SHIELDED_FEE_BALANCE_MESSAGE;
   }
   if (/max fee|fee.*exceed|insufficient.*fee|not enough.*fee|actual fee/i.test(message)) {
     return STARKNET_FEE_BALANCE_MESSAGE;

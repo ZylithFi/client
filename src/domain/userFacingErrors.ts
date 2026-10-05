@@ -131,6 +131,9 @@ function privateDepositErrorMessage(message: string): string | null {
   ) {
     return "Private deposit service is unavailable. Please retry later.";
   }
+  if (/Connected Starknet wallet changed during the private withdrawal/i.test(message)) {
+    return "Connected wallet changed during withdrawal. Reconnect the wallet you started with and retry.";
+  }
   if (/Connected Starknet wallet changed/i.test(message)) {
     return "Connected wallet changed during deposit. Reconnect the wallet you started with and retry.";
   }
@@ -244,7 +247,7 @@ export function userFacingErrorMessage(
       message
     )
   ) {
-    return "Zylith contracts are unavailable on the selected wallet network. Switch to Starknet Sepolia and retry.";
+    return "Zylith contracts are unavailable on the selected wallet network. Switch to the network configured by Zylith and retry.";
   }
   if (/wrong starknet network/i.test(message)) {
     return capitalizeFirst(message);

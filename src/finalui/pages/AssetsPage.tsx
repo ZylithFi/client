@@ -39,6 +39,7 @@ function displayTimestamp(value: number | null) {
 
 export function AssetsPage({
   allAssets,
+  defaultDepositAsset,
   balances,
   pendingDeposits,
   withdrawals,
@@ -50,6 +51,7 @@ export function AssetsPage({
   onWithdraw,
 }: {
   allAssets: string[];
+  defaultDepositAsset: string;
   balances: WalletBalance[];
   pendingDeposits: PendingDeposit[];
   withdrawals: WithdrawableNote[];
@@ -122,7 +124,7 @@ export function AssetsPage({
       asset: note.asset,
       type: "Withdrawal" as const,
       amount,
-      status: note.spent ? "Completed" as const : note.exit_stage === "failed" ? "Failed" as const : "Pending" as const,
+      status: note.exit_stage === "failed" ? "Failed" as const : note.spent ? "Completed" as const : "Pending" as const,
       timestamp,
       time: displayTimestamp(timestamp),
       ...transferValue(note.asset, amount),
@@ -164,14 +166,15 @@ export function AssetsPage({
 
   const transferSortProps = { activeKey: transferSortKey, direction: transferSortDirection, onSort: handleTransferSort };
 
-  function openTransfer(mode: "deposit" | "withdraw", asset = assets[0]) {
-    if (!asset) return;
+  function openTransfer(mode: "deposit" | "withdraw", asset?: string) {
+    const selectedAsset = asset ?? (mode === "deposit" ? defaultDepositAsset : assets[0]);
+    if (!selectedAsset) return;
     if (!walletReady) {
       onConnectWallet();
       return;
     }
-    if (mode === "deposit") onDeposit(asset);
-    else onWithdraw(asset);
+    if (mode === "deposit") onDeposit(selectedAsset);
+    else onWithdraw(selectedAsset);
   }
 
   if (!walletReady) {

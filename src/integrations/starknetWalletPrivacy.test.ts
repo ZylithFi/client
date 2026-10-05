@@ -9,7 +9,7 @@ import { requirePrivateStrk20Support } from "../domain/starknetWalletCapabilitie
 
 function providerWithResponses(responses: unknown[]) {
   responses.unshift(["0.10.4"]);
-  const request = vi.fn(async () => {
+  const request = vi.fn(async (_request: { type: string; params: unknown }) => {
     if (responses.length === 0) throw new Error("unexpected wallet request");
     const response = responses.shift();
     if (response instanceof Error) throw response;
@@ -47,13 +47,12 @@ describe("starknet wallet privacy", () => {
       type: "wallet_strk20Balances",
       params: {
         tokens: ["0x1"],
-        valid_until: expect.any(Number),
         api_version: "0.10.4",
       },
     });
   });
 
-  it("omits balance-consent expiry for the older 0.10.3 wallet api", async () => {
+  it("sends only standard balance parameters to a 0.10.3 wallet", async () => {
     const responses: unknown[] = [["0.10.3"], [{ token: "0x1", balance: "0x2a" }]];
     const request = vi.fn(async () => responses.shift());
 
@@ -61,6 +60,18 @@ describe("starknet wallet privacy", () => {
     expect(request).toHaveBeenLastCalledWith({
       type: "wallet_strk20Balances",
       params: { tokens: ["0x1"], api_version: "0.10.3" },
+    });
+  });
+
+  it("does not send non-standard consent fields to a 0.10.4 wallet", async () => {
+    const { provider, request } = providerWithResponses([
+      [{ token: "0x1", balance: "0x2a" }],
+    ]);
+
+    await expect(walletPrivateBalance(provider, "0x1")).resolves.toBe(42n);
+    expect(request).toHaveBeenLastCalledWith({
+      type: "wallet_strk20Balances",
+      params: { tokens: ["0x1"], api_version: "0.10.4" },
     });
   });
 
@@ -97,10 +108,86 @@ describe("starknet wallet privacy", () => {
         api_version: "0.10.4",
         actions: [
           { type: "withdraw", token: "0x1", amount: "0x32", recipient: "0x2" },
-          { type: "invoke", contract: "0x2", calldata: ["1", "0x3"] },
+          { type: "invoke", contract: "0x2", calldata: ["0x1", "0x3"] },
         ],
       },
     });
+  });
+
+  it("does not misclassify a registered wallet after a non-standard balance request", async () => {
+    const request = vi.fn(async (walletRequest: { type: string; params: unknown }) => {
+      if (walletRequest.type === "wallet_supportedWalletApi") return ["0.10.4"];
+      if (walletRequest.type === "wallet_strk20Balances") {
+        const params = walletRequest.params as Record<string, unknown>;
+        if ("valid_until" in params) throw new Error("An error occurred (NOT_REGISTERED)");
+        return [
+          { token: "0x1", balance: "0x64" },
+          { token: "0xfee", balance: "0xa" },
+        ];
+      }
+      if (walletRequest.type === "wallet_strk20InvokeTransaction") {
+        const actions = (walletRequest.params as {
+          actions: Array<{ type: string }>;
+        }).actions;
+        if (actions[0]?.type === "deposit") {
+          throw new Error("An error occurred (NOT_REGISTERED)");
+        }
+        return { transaction_hash: "0xabc" };
+      }
+      throw new Error("unexpected wallet request");
+    });
+
+    await expect(fundZylithFromWallet({
+      provider: { request },
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 5n,
+      amount: 50n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+    })).resolves.toEqual({ transactionHash: "0xabc", shieldTransactionHash: null });
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[1]![0]).toEqual({
+      type: "wallet_strk20Balances",
+      params: { tokens: ["0x1", "0xfee"], api_version: "0.10.4" },
+    });
+  });
+
+  it("fails before funding if the connected wallet context changed", async () => {
+    const { provider, request } = providerWithResponses([[
+      { token: "0x1", balance: "0x64" },
+      { token: "0xfee", balance: "0xa" },
+    ]]);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 5n,
+      amount: 50n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      assertWalletContext: () => { throw new Error("wallet changed"); },
+    })).rejects.toThrow("wallet changed");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a deposit plus fee that exceeds the private amount range", async () => {
+    const { provider, request } = providerWithResponses([
+      [{ token: "0x1", balance: "0x0" }],
+    ]);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0x1",
+      feeAmount: 1n,
+      amount: (1n << 128n) - 1n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+    })).rejects.toThrow(/outside the supported range/i);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("shields only the shortfall before requesting the private Zylith deposit", async () => {
@@ -146,7 +233,7 @@ describe("starknet wallet privacy", () => {
         api_version: "0.10.4",
         actions: [
           { type: "deposit", token: "0x1", amount: "0x50" },
-          { type: "deposit", token: "0xfee", amount: "0xf" },
+          { type: "deposit", token: "0xfee", amount: "0xa" },
         ],
       },
     });
@@ -169,7 +256,154 @@ describe("starknet wallet privacy", () => {
     ]);
   });
 
-  it("accounts for shielding, funding, and future-claim fees when STRK is deposited", async () => {
+  it("continues once every balance required by the funding action is available", async () => {
+    const { provider, request } = providerWithResponses([
+      [
+        { token: "0x1", balance: "0x0" },
+        { token: "0xfee", balance: "0x0" },
+      ],
+      { transaction_hash: "0xaaa" },
+      [
+        { token: "0x1", balance: "0x64" },
+        { token: "0xfee", balance: "0x7" },
+      ],
+      { transaction_hash: "0xbbb" },
+    ]);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 5n,
+      amount: 100n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      pollDelayMs: 0,
+      maxBalancePolls: 1,
+    })).resolves.toEqual({ transactionHash: "0xbbb", shieldTransactionHash: "0xaaa" });
+    expect(request).toHaveBeenNthCalledWith(5, {
+      type: "wallet_strk20InvokeTransaction",
+      params: {
+        api_version: "0.10.4",
+        actions: [
+          { type: "withdraw", token: "0x1", amount: "0x64", recipient: "0x2" },
+          { type: "invoke", contract: "0x2", calldata: ["0x3"] },
+        ],
+      },
+    });
+  });
+
+  it("tops up the fee token when the wallet charges more than the pool fee", async () => {
+    const { provider, request } = providerWithResponses([
+      [
+        { token: "0x1", balance: "0x0" },
+        { token: "0xfee", balance: "0x0" },
+      ],
+      { transaction_hash: "0xaaa" },
+      [
+        { token: "0x1", balance: "0x64" },
+        { token: "0xfee", balance: "0x4" },
+      ],
+      { transaction_hash: "0xaab" },
+      [
+        { token: "0x1", balance: "0x64" },
+        { token: "0xfee", balance: "0x6" },
+      ],
+      { transaction_hash: "0xbbb" },
+    ]);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 5n,
+      amount: 100n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      transactionStatus: async () => "confirmed",
+      pollDelayMs: 0,
+      maxBalancePolls: 1,
+    })).resolves.toEqual({ transactionHash: "0xbbb", shieldTransactionHash: "0xaaa" });
+    expect(request).toHaveBeenNthCalledWith(5, {
+      type: "wallet_strk20InvokeTransaction",
+      params: {
+        api_version: "0.10.4",
+        actions: [{ type: "deposit", token: "0xfee", amount: "0x8" }],
+      },
+    });
+  });
+
+  it("tops up the deposit token when the wallet charges its fee in that token", async () => {
+    const { provider, request } = providerWithResponses([
+      [
+        { token: "0x1", balance: "0x0" },
+        { token: "0xfee", balance: "0x0" },
+      ],
+      { transaction_hash: "0xaaa" },
+      [
+        { token: "0x1", balance: "0x62" },
+        { token: "0xfee", balance: "0xa" },
+      ],
+      { transaction_hash: "0xaab" },
+      [
+        { token: "0x1", balance: "0x66" },
+        { token: "0xfee", balance: "0xa" },
+      ],
+      { transaction_hash: "0xbbb" },
+    ]);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 5n,
+      amount: 100n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      transactionStatus: async () => "confirmed",
+      pollDelayMs: 0,
+      maxBalancePolls: 1,
+    })).resolves.toEqual({ transactionHash: "0xbbb", shieldTransactionHash: "0xaaa" });
+    expect(request).toHaveBeenNthCalledWith(5, {
+      type: "wallet_strk20InvokeTransaction",
+      params: {
+        api_version: "0.10.4",
+        actions: [{ type: "deposit", token: "0x1", amount: "0x6" }],
+      },
+    });
+  });
+
+  it("stops waiting when the shielding transaction failed on chain", async () => {
+    const { provider } = providerWithResponses([
+      [
+        { token: "0x1", balance: "0x0" },
+        { token: "0xfee", balance: "0x0" },
+      ],
+      { transaction_hash: "0xaaa" },
+      [
+        { token: "0x1", balance: "0x0" },
+        { token: "0xfee", balance: "0x0" },
+      ],
+    ]);
+    const transactionStatus = vi.fn(async (hash: string) =>
+      hash === "0xaaa" ? "failed" as const : "pending" as const);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 5n,
+      amount: 100n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      transactionStatus,
+      pollDelayMs: 0,
+      maxBalancePolls: 50,
+    })).rejects.toThrow(/shielding transaction failed/i);
+    expect(transactionStatus).toHaveBeenCalledWith("0xaaa");
+  });
+
+  it("accounts for shielding and funding fees when STRK is deposited", async () => {
     const { provider, request } = providerWithResponses([
       [{ token: "0x1", balance: "0x0" }],
       { transaction_hash: "0xaaa" },
@@ -192,7 +426,7 @@ describe("starknet wallet privacy", () => {
       type: "wallet_strk20InvokeTransaction",
       params: {
         api_version: "0.10.4",
-        actions: [{ type: "deposit", token: "0x1", amount: "0x73" }],
+        actions: [{ type: "deposit", token: "0x1", amount: "0x6e" }],
       },
     });
   });
@@ -254,8 +488,8 @@ describe("starknet wallet privacy", () => {
             type: "invoke",
             contract: "0x2",
             calldata: [
-              "0", "2", "0x44", "${openNoteIds[0]}",
-              "0", "0", "0", "0", "0",
+              "0x0", "0x2", "0x44", "${openNoteIds[0]}",
+              "0x0", "0x0", "0x0", "0x0", "0x0",
             ],
           },
         ],

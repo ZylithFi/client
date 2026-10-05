@@ -78,7 +78,7 @@ import {
   walletSignatureVaultId,
   walletSignatureVaultMetadataMatches,
 } from "./domain/walletLocalCrypto";
-import { isUserRejected, proofSubmissionStarted } from "./integrations/starknetPrivacyErrors";
+import { proofSubmissionStarted } from "./integrations/starknetPrivacyErrors";
 import {
   type TransactionReceiptStatus,
   buildZylithWalletAuthTypedData,
@@ -1533,9 +1533,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         origin: context.origin,
       });
       scheduleDeviceSessionExpiry(context.walletAddress);
-    } catch (error) {
-      if (generation === sessionGeneration) clearSession(false);
-      throw new Error("This browser could not securely remember the private trading session.", { cause: error });
+    } catch {
+      // remembering the session is a convenience. without device-key storage the wallet stays
+      // usable and simply asks for a signature again after a reload.
     }
     return true;
   }
@@ -1857,7 +1857,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       manifest.market_registry.gas_fee_asset_id,
     );
     setPrivacyFundingStage("Connecting Starknet wallet and checking network");
-    const provider = await selectInjectedStarknetProvider();
+    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
     ensureCurrent(sessionGeneration);
     const plan = call<{
       note_commitment: string;
@@ -1948,6 +1948,22 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           encodedArgs: plan.encoded_args,
         }),
         onStage: setPrivacyFundingStage,
+        transactionStatus: async (hash) => {
+          const status = await fetchTransactionReceiptStatus(hash, manifest);
+          if (status?.failed) return "failed";
+          if (status?.confirmed) return "confirmed";
+          return "pending";
+        },
+        assertWalletContext: () => {
+          ensureCurrent(sessionGeneration);
+          const currentAddress = connectedStarknetAddress();
+          if (
+            !currentAddress
+            || normalizeFeltForComparison(currentAddress) !== activeWalletAddress
+          ) {
+            throw new Error("Connected Starknet wallet changed during the deposit.");
+          }
+        },
         onPrivateDepositSubmissionStarted: () => {
           walletSubmissionStarted = true;
         },
@@ -2925,7 +2941,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     persisted.request_submitted_at_ms = undefined;
     const rail = selectedResidualRecoveryFundingRail(manifest);
-    const provider = await selectInjectedStarknetProvider();
+    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
     ensureCurrent(sessionGeneration);
     const { submitResidualRecovery: submit } = await import("./integrations/starknetPrivacyFunding");
     let result: { transactionHash: string };
@@ -3023,7 +3039,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       prepared.finalization_submitted_at_ms = undefined;
       await saveState();
     }
-    const provider = await selectInjectedStarknetProvider();
+    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
     ensureCurrent(sessionGeneration);
     const result = await executeStarknetWalletCall(provider, {
       contractAddress: manifest.contracts.exchange,
@@ -3199,7 +3215,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       order.residual_capacity_freeze = undefined;
       await saveState();
     }
-    const provider = await selectInjectedStarknetProvider();
+    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
     ensureCurrent(sessionGeneration);
     const result = await executeStarknetWalletCall(provider, {
       contractAddress: manifest.contracts.exchange,
@@ -3692,7 +3708,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       [],
     );
     const feeAmount = BigInt(requiredNonZeroFelt(feeResult[0], "privacy_pool_fee"));
-    const provider = await selectInjectedStarknetProvider();
+    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
     ensureCurrent(input.sessionGeneration);
     const walletAddress = connectedStarknetAddress();
     if (!walletAddress || normalizeFeltForComparison(walletAddress) !== activeWalletAddress) {
@@ -3723,6 +3739,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         exitCommitment: input.exitCommitment,
         openNoteId: "${openNoteIds[0]}",
       }),
+      assertWalletContext: () => {
+        ensureCurrent(input.sessionGeneration);
+        const currentAddress = connectedStarknetAddress();
+        if (
+          !currentAddress
+          || normalizeFeltForComparison(currentAddress) !== activeWalletAddress
+        ) {
+          throw new Error("Connected Starknet wallet changed during the private withdrawal.");
+        }
+      },
       buildAuthorizationCall: (openNoteId) => {
         const signature = call<{ signature_r: string; signature_s: string }>(
           core.zylith_wallet_sign_strk20_exit_claim,

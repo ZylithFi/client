@@ -32,6 +32,33 @@ button { background: transparent; border: 0; color: inherit; font: inherit; curs
 input { font: inherit; color: inherit; background: transparent; border: 0; outline: 0; }
 :is(button, input, select):focus-visible { outline: 1px solid var(--z-accent-text); outline-offset: 2px; }
 
+.app-load-failure {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 16px;
+  padding: 24px;
+  background: var(--z-app-void);
+  color: var(--z-text-strong);
+  font-family: var(--z-font-display);
+  text-align: center;
+}
+.app-load-failure p { margin: 0; color: var(--z-text-body); font-size: 15px; line-height: 1.5; }
+.app-load-failure button {
+  min-width: 112px;
+  height: 38px;
+  padding: 0 18px;
+  background: var(--z-accent-dim);
+  box-shadow: inset 0 0 0 1px var(--z-border-md);
+  color: var(--z-text-strong);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.app-load-failure button:hover { box-shadow: inset 0 0 0 1px var(--z-border-lit); }
+
 .wallet-connected-box {
   padding: 8px 10px 10px;
   margin-bottom: 4px;

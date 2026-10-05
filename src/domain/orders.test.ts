@@ -43,6 +43,10 @@ describe("order rows", () => {
     expect(isOpenOrder(row)).toBe(true);
     expect(isOpenOrder({ state: "expired" })).toBe(false);
     expect(orderRows([{ ...order, pair: "ETH/USDC" }], [pair])).toEqual([]);
+    const [oversizedFunding] = orderRows([{ ...order, funding_amount: "50000000000000000000" }], [pair]);
+    expect(oversizedFunding?.orderValue).toBe("10 STRK");
+    const [buy] = orderRows([{ ...order, side: "Buy", funding_asset: "USDC", funding_amount: "900000" }], [pair]);
+    expect(buy?.orderValue).toBe("0.5 USDC");
   });
 
   it("collapses internal admission states into user-facing statuses", () => {

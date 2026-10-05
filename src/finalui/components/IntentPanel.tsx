@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import type {
-  PairConfig,
-  ReferencePriceSnapshot,
-  TicketSubmitIntent,
+import {
+  orderQuoteValue,
+  type PairConfig,
+  type ReferencePriceSnapshot,
+  type TicketSubmitIntent,
 } from "../../domain/tradeIntent";
 import { safeFromAtomicStr, toAtomicStr } from "../../domain/assets";
 import type { WalletBalance } from "../../domain/shieldedBalances";
@@ -100,12 +101,27 @@ export function IntentPanel({
       }
     }
   }
+  let orderQuoteAtoms: bigint | null = null;
+  if (pair && orderBaseAtoms !== null && /^\d+$/.test(referencePrice?.midpointPrice ?? "")) {
+    try {
+      orderQuoteAtoms = orderQuoteValue(orderBaseAtoms.toString(), referencePrice!.midpointPrice, pair);
+    } catch {
+      orderQuoteAtoms = null;
+    }
+  }
+  const meetsMinimum = Boolean(
+    pair &&
+      orderBaseAtoms !== null &&
+      orderBaseAtoms >= BigInt(pair.min_order_amount) &&
+      orderQuoteAtoms !== null &&
+      orderQuoteAtoms >= BigInt(pair.min_order_quote_amount)
+  );
   const belowMinimum = Boolean(
     pair &&
       amountAtoms !== null &&
       amountAtoms > 0n &&
       orderBaseAtoms !== null &&
-      orderBaseAtoms < BigInt(pair.min_order_amount)
+      !meetsMinimum
   );
   const available =
     walletReady && fundingBalance
@@ -123,8 +139,7 @@ export function IntentPanel({
       amountAtoms !== null &&
       amountAtoms > 0n &&
       amountAtoms <= availableAtoms &&
-      orderBaseAtoms !== null &&
-      orderBaseAtoms >= BigInt(pair.min_order_amount) &&
+      meetsMinimum &&
       limitPrice > 0
   );
 

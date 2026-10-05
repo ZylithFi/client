@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { RuntimeHttpStatusError } from "./runtimeHttp";
 import { userFacingErrorMessage } from "./userFacingErrors";
 
 describe("userFacingErrorMessage", () => {
+  it("describes wallet changes for the operation that was interrupted", () => {
+    expect(userFacingErrorMessage(
+      new Error("Connected Starknet wallet changed during the private withdrawal."),
+    )).toBe("Connected wallet changed during withdrawal. Reconnect the wallet you started with and retry.");
+    expect(userFacingErrorMessage(
+      new Error("Connected Starknet wallet changed during the deposit."),
+    )).toBe("Connected wallet changed during deposit. Reconnect the wallet you started with and retry.");
+  });
+
   it("hides private deposit deployment internals", () => {
     const message = userFacingErrorMessage(
       new Error("Starknet Privacy funding is not fully configured")
@@ -136,6 +144,17 @@ describe("userFacingErrorMessage", () => {
     expect(message).toBe(
       "This deposit would leave no fee-token balance for the wallet fee. Try a slightly smaller amount."
     );
+  });
+
+  it("distinguishes insufficient shielded balance from public network fees", () => {
+    const message = userFacingErrorMessage(
+      new Error("An error occurred (INSUFFICIENT_PRIVATE_BALANCE)"),
+    );
+
+    expect(message).toBe(
+      "Your shielded balance does not cover this private transaction fee.",
+    );
+    expect(message).not.toMatch(/Starknet network fees|connected wallet/i);
   });
 
   it("explains counterfactual connected-wallet accounts before private deposits", () => {

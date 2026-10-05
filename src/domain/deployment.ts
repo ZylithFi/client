@@ -568,6 +568,20 @@ export function defaultPair(deployment: DeploymentConfig | null): PairConfig | n
   return pairs.find((pair) => pair.pair_id === "STRK/USDC") ?? pairs[0] ?? null;
 }
 
+/** the registry-selected fee asset is the default funding asset when it is fundable. */
+export function defaultDepositAsset(deployment: DeploymentConfig | null): string {
+  if (!deployment) return "";
+  const assets = deployment.market_registry.assets;
+  const preferred = assets.find(
+    (asset) => asset.asset_id === deployment.market_registry.gas_fee_asset_id
+      && asset.enabled
+      && asset.funding_enabled,
+  );
+  return preferred?.asset_id
+    ?? assets.find((asset) => asset.enabled && asset.funding_enabled)?.asset_id
+    ?? "";
+}
+
 export function useDeploymentState(): { deployment: DeploymentConfig | null; error: string | null } {
   const [state, setState] = useState<{ deployment: DeploymentConfig | null; error: string | null }>({ deployment: null, error: null });
   useEffect(() => {

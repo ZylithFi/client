@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertBrowserNetworkPolicy, assertDeploymentManifest, assertPinnedExecutionKeys, defaultPair, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
+import { assertBrowserNetworkPolicy, assertDeploymentManifest, assertPinnedExecutionKeys, defaultDepositAsset, defaultPair, enabledPairs, pinnedRegistryFingerprints, verifyMarketRegistryHash } from "./deployment";
 import shipped from "../../public/deployment.example.json";
 
 const example = JSON.parse(JSON.stringify(shipped));
@@ -55,6 +55,13 @@ describe("deployment manifest", () => {
     deployed.market_registry.markets.reverse();
     expect(defaultPair(deployed)?.pair_id).toBe("STRK/USDC");
     expect(enabledPairs(deployed)[0]?.pair_id).toBe("STRK/USDC");
+  });
+
+  it("selects STRK as the deposit default from the registry fee asset", () => {
+    const deployed = finalized(JSON.parse(JSON.stringify(example)));
+    expect(defaultDepositAsset(deployed)).toBe("STRK");
+    deployed.market_registry.assets.reverse();
+    expect(defaultDepositAsset(deployed)).toBe("STRK");
   });
 
   it("keeps synthetic residuals eligible for external multihop execution", () => {

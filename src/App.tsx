@@ -4,7 +4,7 @@ import "./finalui/styles.css";
 import type { WalletOrder, WithdrawableNote } from "@zylith/sdk";
 import { configureAssetDecimals, formatPrice, toAtomicStr } from "./domain/assets";
 import { applyStarknetAccountsChanged, connectedStarknetAddress, restoreConnectedStarknetWallet, selectedStarknetProvider, subscribeStarknetProviderEvents, subscribeWalletRuntime, walletRuntime } from "./domain/browserWallet";
-import { defaultPair, enabledPairs, exchange, useDeploymentState } from "./domain/deployment";
+import { defaultDepositAsset, defaultPair, enabledPairs, exchange, useDeploymentState } from "./domain/deployment";
 import { type OrderRow, orderRows } from "./domain/orders";
 import type { PendingDeposit, WalletBalance } from "./domain/shieldedBalances";
 import { ticketReferenceIsFresh, type ReferencePriceSnapshot, type TicketSubmitIntent } from "./domain/tradeIntent";
@@ -70,6 +70,7 @@ export default function App() {
     const fundable = new Set(deployment?.market_registry.assets.filter((asset) => asset.enabled && asset.funding_enabled).map((asset) => asset.asset_id));
     return allAssets.filter((asset) => fundable.has(asset));
   }, [allAssets, deployment]);
+  const preferredDepositAsset = useMemo(() => defaultDepositAsset(deployment), [deployment]);
   useEffect(() => configureAssetDecimals(deployment), [deployment]);
 
   const [tab, setTab] = useState<AppTab>(() => takerTabFromPath(window.location.pathname));
@@ -184,8 +185,10 @@ export default function App() {
   const [openSlide, setOpenSlide] = useState<"wallet" | "deposit" | "withdraw" | null>(null);
   const [slideAsset, setSlideAsset] = useState("");
   useEffect(() => {
-    if (!allAssets.includes(slideAsset)) setSlideAsset(allAssets[0] ?? "");
-  }, [allAssets, slideAsset]);
+    if (!allAssets.includes(slideAsset)) {
+      setSlideAsset(preferredDepositAsset || allAssets[0] || "");
+    }
+  }, [allAssets, preferredDepositAsset, slideAsset]);
   const [starknetAddress, setStarknetAddress] = useState<string | null>(() => connectedStarknetAddress());
   const walletSelectionRevision = useRef(0);
   const updateStarknetAddress = useCallback((next: string | null) => {
@@ -279,11 +282,14 @@ export default function App() {
   }, [starknetAddress, walletReady]);
 
   useEffect(() => {
-    if (!starknetAddress || !deployment) return;
+    if (!deployment) return;
     let cancelled = false;
+    // a locked wallet clears the address but keeps the chosen provider: keep listening so an
+    // unlock in the extension restores the session without a reload or a window focus.
     const provider = selectedStarknetProvider();
     if (!provider) return;
     const verifyNetwork = async () => {
+      if (!starknetAddress) return;
       const chainId = await readStarknetWalletChainId(provider as never).catch(() => null);
       if (
         !cancelled
@@ -402,6 +408,7 @@ export default function App() {
         {tab === "assets" && (
           <AssetsPage
             allAssets={allAssets}
+            defaultDepositAsset={preferredDepositAsset}
             balances={view.balances}
             pendingDeposits={view.pendingDeposits}
             withdrawals={view.withdrawables}

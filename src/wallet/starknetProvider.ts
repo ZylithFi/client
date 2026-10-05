@@ -71,12 +71,6 @@ export async function executeStarknetWalletCall(
   );
 }
 
-type WalletRequestInvokeCall = {
-  contract_address: string;
-  entry_point: string;
-  calldata: string[];
-};
-
 export type StarknetInjectedProvider = {
   id?: string;
   name?: string;
@@ -331,46 +325,41 @@ export function connectedProviderAddress(provider: StarknetInjectedProvider) {
   );
 }
 
-export async function selectInjectedStarknetProvider() {
-  const preferredProvider = selectedStarknetProvider();
-  const discovered = discoverStarknetWallets();
+/**
+ * the wallet the user connected, and only that wallet. another installed wallet is never
+ * prompted or selected here: doing so would link a second account to this session.
+ */
+export async function selectInjectedStarknetProvider(expectedAddress?: string | null) {
+  const provider = selectedStarknetProvider();
+  if (!provider) {
+    throw new Error("Connect a Starknet wallet before submitting this transaction");
+  }
   const deployment = await loadDeployment();
-  const preferredWallet = preferredProvider
-    ? discovered.find(({ provider }) => provider === preferredProvider) ?? null
-    : null;
-  const orderedProviders = preferredProvider
-    ? [
-        { id: preferredWallet?.id, provider: preferredProvider },
-        ...discovered.filter(({ provider }) => provider !== preferredProvider),
-      ]
-    : discovered;
-  if (preferredProvider) {
-    const restoredAddress = connectedProviderAddress(preferredProvider as never)
-      ?? await restoreConnectedStarknetWallet().catch(() => null);
-    if (restoredAddress) {
-      await ensureWalletChain(preferredProvider as never, deployment);
-      return preferredProvider;
-    }
+  // re-read the wallet account silently before every state-changing action; provider events can
+  // arrive late, so the cached address alone is not an authorization boundary.
+  let address = await restoreConnectedStarknetWallet().catch(() => null);
+  if (!address) {
+    const walletId = discoverStarknetWallets().find((option) => option.provider === provider)?.id;
+    address = await connectStarknetProvider(provider as never, walletId);
   }
-  for (const { id, provider } of orderedProviders) {
-    try {
-      await connectStarknetProvider(provider as never, id);
-    } catch (error) {
-      if (isUserRejectedWalletError(error)) throw error;
-      continue;
-    }
-    const account = safeWalletValue(provider, "account");
-    if (
-      typeof safeWalletValue(account, "execute") === "function"
-      || typeof safeWalletValue(provider, "request") === "function"
-    ) {
-      await ensureWalletChain(provider, deployment);
-      return provider;
-    }
+  if (!address) {
+    throw new Error("Unlock your Starknet wallet and retry.");
   }
-  throw new Error(
-    "Connect a Starknet wallet before submitting this transaction"
-  );
+  if (
+    expectedAddress
+    && normalizeFeltForComparison(address) !== normalizeFeltForComparison(expectedAddress)
+  ) {
+    throw new Error("Connected Starknet wallet changed. Reconnect the wallet you authorized and retry.");
+  }
+  const account = safeWalletValue(provider, "account");
+  if (
+    typeof safeWalletValue(account, "execute") !== "function"
+    && typeof safeWalletValue(provider, "request") !== "function"
+  ) {
+    throw new Error("Selected Starknet wallet cannot submit this transaction");
+  }
+  await ensureWalletChain(provider as never, deployment);
+  return provider;
 }
 
 export async function ensureWalletChain(
@@ -413,6 +402,8 @@ export function validateWalletChainMatch(
   const networkName =
     deploymentNetwork === "sepolia"
       ? "Starknet Sepolia"
+      : deploymentNetwork === "mainnet"
+        ? "Starknet Mainnet"
       : deploymentNetwork || "the configured Starknet network";
   throw new Error(
     `Wrong Starknet network. Switch to ${networkName} in your wallet and retry.`

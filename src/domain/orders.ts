@@ -1,6 +1,7 @@
 import type { OrderState, WalletOrder } from "@zylith/sdk";
 import { formatPrice, fromAtomicStr } from "./assets";
 import type { PairConfig } from "./deployment";
+import { orderQuoteValue } from "./tradeIntent";
 
 /** an order as the tables show it, in human units. */
 export type OrderRow = {
@@ -63,7 +64,12 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[], assetUnitP
       const average =
         filledBase > 0n ? formatPrice(((BigInt(order.filled_quote) * BigInt(pair.price_base_scale)) / filledBase).toString(), pair) : "Not filled";
       const proceedsAsset = order.side === "Sell" ? pair.quote_asset_id : pair.base_asset_id;
-      const orderValueAmount = fromAtomicStr(order.funding_amount, order.funding_asset);
+      // the funding notes can exceed the order (their change is refunded), so the order's value is
+      // what it commits: its base for a sell, its quote at the limit for a buy.
+      const committedAtoms = order.side === "Sell"
+        ? order.amount
+        : orderQuoteValue(order.amount, order.limit_price, pair).toString();
+      const orderValueAmount = fromAtomicStr(committedAtoms, order.funding_asset);
       const unitPrice = assetUnitPrices[order.funding_asset];
       const orderValueNumeric = unitPrice === undefined ? null : Number(orderValueAmount.replaceAll(",", "")) * unitPrice;
       return [

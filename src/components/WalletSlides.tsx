@@ -1000,7 +1000,7 @@ export function DepositSlide({
           </div>
         </div>
         <div className="funding-helper">
-          Your wallet uses shielded funds when available and shields only the shortfall when needed.
+          Deposits stay private and are available after confirmation.
         </div>
         {error && (
           <div
