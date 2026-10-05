@@ -22,7 +22,12 @@ import type {
   WithdrawableNote,
 } from "@zylith/sdk";
 import { ExchangeHttpError, ExchangeRejectedError, readSdkJsonResponse, transitionWindows } from "@zylith/sdk";
-import { notifyWalletRuntimeChanged, selectedStarknetProvider, setWalletRuntime } from "./domain/browserWallet";
+import {
+  connectedStarknetAddress,
+  notifyWalletRuntimeChanged,
+  selectedStarknetProvider,
+  setWalletRuntime,
+} from "./domain/browserWallet";
 import { fromAtomicStr } from "./domain/assets";
 import {
   BACKUP_URL,
@@ -77,7 +82,6 @@ import { isUserRejected, proofSubmissionStarted } from "./integrations/starknetP
 import {
   type TransactionReceiptStatus,
   buildZylithWalletAuthTypedData,
-  connectedProviderAddress,
   ensureWalletChain,
   executeStarknetWalletCall,
   fetchTransactionReceiptStatus,
@@ -381,6 +385,7 @@ export type WalletRuntime = TraderWalletRuntime & {
   unlockWithWalletSignature: (starknetAddress: string) => Promise<boolean>;
   getPublicConfig: () => WalletPublicConfig | null;
   lock: () => void;
+  suspend: () => void;
   getPendingDeposits: () => PendingDeposit[];
   getWithdrawableNotes: () => WithdrawableNote[];
   withdrawalAvailable: () => boolean;
@@ -1376,6 +1381,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     clearSession(true);
   }
 
+  function suspend() {
+    clearSession(false);
+  }
+
   function startWorker() {
     workerRunning = true;
     if (hasPendingWork()) kick();
@@ -1446,7 +1455,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const provider = selectedStarknetProvider();
     if (!provider) throw new Error("Connect a Starknet wallet first");
     const walletAddress = normalizeFeltForComparison(starknetAddress);
-    const connected = connectedProviderAddress(provider as never);
+    const connected = connectedStarknetAddress();
     if (connected && normalizeFeltForComparison(connected) !== walletAddress) {
       throw new Error("Connected Starknet wallet changed during private trading authorization");
     }
@@ -1537,7 +1546,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const provider = selectedStarknetProvider();
     if (!provider) return null;
     const walletAddress = normalizeFeltForComparison(starknetAddress);
-    const connected = connectedProviderAddress(provider as never);
+    const connected = connectedStarknetAddress();
     if (!connected || normalizeFeltForComparison(connected) !== walletAddress) return null;
     const manifest = await loadDeployment();
     const expectedChainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
@@ -1841,7 +1850,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (amount <= 0n) throw new Error("Deposit amount must be greater than zero");
     const rail = selectedDepositFundingRail(manifest);
     const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
+    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
     const tokenAddress = fundingRailTokenAddress(manifest, asset);
+    const feeTokenAddress = fundingRailTokenAddress(
+      manifest,
+      manifest.market_registry.gas_fee_asset_id,
+    );
     setPrivacyFundingStage("Connecting Starknet wallet and checking network");
     const provider = await selectInjectedStarknetProvider();
     ensureCurrent(sessionGeneration);
@@ -1914,9 +1928,18 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         import("./integrations/starknetPrivacyFunding"),
       ]);
       walletSubmissionMayHaveLanded = walletPrivacy.walletPrivateSubmissionMayHaveLanded;
+      const feeResult = await starknetCall(
+        manifest.rpc_url,
+        privacyPoolAddress,
+        "get_fee_amount",
+        [],
+      );
+      const feeAmount = BigInt(requiredNonZeroFelt(feeResult[0], "privacy_pool_fee"));
       const result = await walletPrivacy.fundZylithFromWallet({
         provider: provider as never,
         tokenAddress,
+        feeTokenAddress,
+        feeAmount,
         amount,
         amountLabel: `${fromAtomicStr(amount.toString(), asset)} ${asset}`,
         bridgeAddress,
@@ -3657,10 +3680,21 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const paymasterAddress = requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address");
     const paymasterUrl = requiredString(rail.paymasterUrl, "privacy_paymaster_url");
     const tokenAddress = fundingRailTokenAddress(input.manifest, input.asset);
+    const feeTokenAddress = fundingRailTokenAddress(
+      input.manifest,
+      input.manifest.market_registry.gas_fee_asset_id,
+    );
     const chainId = requiredNonZeroFelt(input.manifest.chain_id, "chain_id");
+    const feeResult = await starknetCall(
+      input.manifest.rpc_url,
+      privacyPoolAddress,
+      "get_fee_amount",
+      [],
+    );
+    const feeAmount = BigInt(requiredNonZeroFelt(feeResult[0], "privacy_pool_fee"));
     const provider = await selectInjectedStarknetProvider();
     ensureCurrent(input.sessionGeneration);
-    const walletAddress = connectedProviderAddress(provider as never);
+    const walletAddress = connectedStarknetAddress();
     if (!walletAddress || normalizeFeltForComparison(walletAddress) !== activeWalletAddress) {
       throw new Error("Connected Starknet wallet changed during the private withdrawal.");
     }
@@ -3682,11 +3716,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       paymasterUrl,
       privacyPoolAddress,
       tokenAddress,
+      feeTokenAddress,
+      feeAmount,
       bridgeAddress,
       bridgeCalldata: privacyBridgeStrk20ExitClaimFlatCalldata({
         exitCommitment: input.exitCommitment,
         openNoteId: "${openNoteIds[0]}",
-        claimRecipient: walletAddress,
       }),
       buildAuthorizationCall: (openNoteId) => {
         const signature = call<{ signature_r: string; signature_s: string }>(
@@ -3703,14 +3738,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
             exit_commitment: input.exitCommitment,
             claim_account: paymasterAddress,
             open_note_id: openNoteId,
-            claim_recipient: walletAddress,
           },
         );
         return privacyBridgeStrk20ExitAuthorizationCall({
           bridgeAddress,
           exitCommitment: input.exitCommitment,
           openNoteId,
-          claimRecipient: walletAddress,
           signature,
         });
       },
@@ -3829,6 +3862,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     unlockWithWalletSignature,
     getPublicConfig: () => publicConfig,
     lock,
+    suspend,
     getBalances,
     getPendingDeposits,
     getWithdrawableNotes,

@@ -19,7 +19,6 @@ import { sessionSet } from "./domain/safeSessionStorage";
 import { normalizeFeltForComparison } from "./domain/felt";
 import { useWalletState } from "./hooks/useWalletState";
 import { readStarknetWalletChainId } from "./wallet/starknetProvider";
-import { requirePrivateStrk20Support } from "./domain/starknetWalletCapabilities";
 
 const LAST_TAKER_ROUTE_KEY = "zylith.nav.last_taker_route";
 const REFERENCE_PRICE_POLL_MS = 5_000;
@@ -193,7 +192,7 @@ export default function App() {
     walletSelectionRevision.current += 1;
     setStarknetAddress((previous) => {
       if (previous === next) return previous;
-      if (previous) walletRuntime()?.lock();
+      if (previous) walletRuntime()?.suspend?.();
       return next;
     });
   }, []);
@@ -209,7 +208,7 @@ export default function App() {
     const reconcile = (next: string | null) =>
       setStarknetAddress((previous) => {
         if (previous === next) return previous;
-        if (previous) walletRuntime()?.lock();
+        if (previous) walletRuntime()?.suspend?.();
         return next;
       });
     const scheduleRetry = () => {
@@ -227,9 +226,6 @@ export default function App() {
       try {
         const next = await restoreConnectedStarknetWallet();
         if (next && revision === walletSelectionRevision.current) {
-          const provider = selectedStarknetProvider();
-          if (!provider) throw new Error("The selected Starknet wallet is unavailable.");
-          await requirePrivateStrk20Support(provider);
           reconcile(next);
           restored = true;
         }
@@ -257,7 +253,7 @@ export default function App() {
   }, []);
 
   const silentUnlockAttemptRef = useRef<string | null>(null);
-  const [silentUnlockRetry, setSilentUnlockRetry] = useState(0);
+  const [silentUnlockEvent, setSilentUnlockEvent] = useState(0);
   useEffect(() => {
     if (!starknetAddress || walletReady || runtimeStatus !== "ready") return;
     const runtime = walletRuntime();
@@ -265,30 +261,25 @@ export default function App() {
     const attemptKey = starknetAddress.toLowerCase();
     if (silentUnlockAttemptRef.current === attemptKey) return;
     silentUnlockAttemptRef.current = attemptKey;
-    let cancelled = false;
-    let retryTimer: number | null = null;
     void runtime.unlockWithDeviceSession(starknetAddress)
       .catch(() => false)
-      .then((opened) => {
-        if (opened || cancelled) return;
-        retryTimer = window.setTimeout(() => {
-          if (silentUnlockAttemptRef.current === attemptKey) {
-            silentUnlockAttemptRef.current = null;
-          }
-          setSilentUnlockRetry((value) => value + 1);
-        }, 3_000);
-      });
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-    };
-  }, [runtimeStatus, silentUnlockRetry, starknetAddress, walletReady]);
+      .then(() => undefined);
+  }, [runtimeStatus, silentUnlockEvent, starknetAddress, walletReady]);
   useEffect(() => {
     if (!starknetAddress) silentUnlockAttemptRef.current = null;
   }, [starknetAddress]);
+  useEffect(() => {
+    const retrySilentUnlock = () => {
+      if (!starknetAddress || walletReady) return;
+      silentUnlockAttemptRef.current = null;
+      setSilentUnlockEvent((value) => value + 1);
+    };
+    window.addEventListener("focus", retrySilentUnlock);
+    return () => window.removeEventListener("focus", retrySilentUnlock);
+  }, [starknetAddress, walletReady]);
 
   useEffect(() => {
-    if (!walletReady || !deployment) return;
+    if (!starknetAddress || !deployment) return;
     let cancelled = false;
     const provider = selectedStarknetProvider();
     if (!provider) return;
@@ -300,15 +291,19 @@ export default function App() {
         && normalizeFeltForComparison(chainId)
           !== normalizeFeltForComparison(deployment.chain_id)
       ) {
-        walletRuntime()?.lock();
+        walletRuntime()?.suspend?.();
       }
     };
     const reconcileAccount = (accounts: unknown) => {
       const next = applyStarknetAccountsChanged(accounts);
       if (next !== starknetAddress) updateStarknetAddress(next);
+      silentUnlockAttemptRef.current = null;
+      setSilentUnlockEvent((value) => value + 1);
       void verifyNetwork();
     };
     const reconcileNetwork = () => {
+      silentUnlockAttemptRef.current = null;
+      setSilentUnlockEvent((value) => value + 1);
       void verifyNetwork();
     };
     const unsubscribeProviderEvents = subscribeStarknetProviderEvents(
@@ -323,7 +318,7 @@ export default function App() {
       window.removeEventListener("focus", verifyNetwork);
       unsubscribeProviderEvents();
     };
-  }, [deployment, starknetAddress, updateStarknetAddress, walletReady]);
+  }, [deployment, starknetAddress, updateStarknetAddress]);
 
   // orders
   const [submitting, setSubmitting] = useState(false);
@@ -403,13 +398,14 @@ export default function App() {
             onViewOrders={() => changeTab("orders")}
           />
         )}
-        {tab === "orders" && <OrdersPage orders={rows} error={submitError} onCancel={handleCancel} walletReady={walletReady} onConnectWallet={() => setOpenSlide("wallet")} />}
+        {tab === "orders" && <OrdersPage orders={rows} error={submitError} onCancel={handleCancel} walletConnected={Boolean(starknetAddress)} walletReady={walletReady} onConnectWallet={() => setOpenSlide("wallet")} />}
         {tab === "assets" && (
           <AssetsPage
             allAssets={allAssets}
             balances={view.balances}
             pendingDeposits={view.pendingDeposits}
             withdrawals={view.withdrawables}
+            walletConnected={Boolean(starknetAddress)}
             walletReady={walletReady}
             assetUnitPrices={assetUnitPrices}
             onDeposit={(asset) => {

@@ -45,7 +45,22 @@ describe("starknet wallet privacy", () => {
     await expect(walletPrivateBalance(provider, "0x1")).resolves.toBe(42n);
     expect(request).toHaveBeenLastCalledWith({
       type: "wallet_strk20Balances",
-      params: { tokens: ["0x1"], api_version: "0.10.4" },
+      params: {
+        tokens: ["0x1"],
+        valid_until: expect.any(Number),
+        api_version: "0.10.4",
+      },
+    });
+  });
+
+  it("omits balance-consent expiry for the older 0.10.3 wallet api", async () => {
+    const responses: unknown[] = [["0.10.3"], [{ token: "0x1", balance: "0x2a" }]];
+    const request = vi.fn(async () => responses.shift());
+
+    await expect(walletPrivateBalance({ request }, "0x1")).resolves.toBe(42n);
+    expect(request).toHaveBeenLastCalledWith({
+      type: "wallet_strk20Balances",
+      params: { tokens: ["0x1"], api_version: "0.10.3" },
     });
   });
 
@@ -58,7 +73,10 @@ describe("starknet wallet privacy", () => {
 
   it("uses one private wallet approval when enough balance is already shielded", async () => {
     const { provider, request } = providerWithResponses([
-      [{ token: "0x1", balance: "0x64" }],
+      [
+        { token: "0x1", balance: "0x64" },
+        { token: "0xfee", balance: "0xa" },
+      ],
       { transaction_hash: "0xabc" },
     ]);
 
@@ -66,6 +84,8 @@ describe("starknet wallet privacy", () => {
       fundZylithFromWallet({
         provider,
         tokenAddress: "0x1",
+        feeTokenAddress: "0xfee",
+        feeAmount: 5n,
         amount: 50n,
         bridgeAddress: "0x2",
         bridgeCalldata: ["1", "0x3"],
@@ -86,10 +106,19 @@ describe("starknet wallet privacy", () => {
   it("shields only the shortfall before requesting the private Zylith deposit", async () => {
     const stages: string[] = [];
     const { provider, request } = providerWithResponses([
-      [{ token: "0x1", balance: "0x14" }],
+      [
+        { token: "0x1", balance: "0x14" },
+        { token: "0xfee", balance: "0x0" },
+      ],
       { transaction_hash: "0xaaa" },
-      [{ token: "0x1", balance: "0x14" }],
-      [{ token: "0x1", balance: "0x64" }],
+      [
+        { token: "0x1", balance: "0x14" },
+        { token: "0xfee", balance: "0x0" },
+      ],
+      [
+        { token: "0x1", balance: "0x64" },
+        { token: "0xfee", balance: "0xa" },
+      ],
       { transaction_hash: "0xbbb" },
     ]);
 
@@ -97,6 +126,8 @@ describe("starknet wallet privacy", () => {
       fundZylithFromWallet({
         provider,
         tokenAddress: "0x1",
+        feeTokenAddress: "0xfee",
+        feeAmount: 5n,
         amount: 100n,
         amountLabel: "100 USDC",
         bridgeAddress: "0x2",
@@ -113,7 +144,10 @@ describe("starknet wallet privacy", () => {
       type: "wallet_strk20InvokeTransaction",
       params: {
         api_version: "0.10.4",
-        actions: [{ type: "deposit", token: "0x1", amount: "0x50" }],
+        actions: [
+          { type: "deposit", token: "0x1", amount: "0x50" },
+          { type: "deposit", token: "0xfee", amount: "0xf" },
+        ],
       },
     });
     expect(request).toHaveBeenNthCalledWith(6, {
@@ -135,17 +169,47 @@ describe("starknet wallet privacy", () => {
     ]);
   });
 
+  it("accounts for shielding, funding, and future-claim fees when STRK is deposited", async () => {
+    const { provider, request } = providerWithResponses([
+      [{ token: "0x1", balance: "0x0" }],
+      { transaction_hash: "0xaaa" },
+      [{ token: "0x1", balance: "0x6e" }],
+      { transaction_hash: "0xbbb" },
+    ]);
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      feeTokenAddress: "0x1",
+      feeAmount: 5n,
+      amount: 100n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      pollDelayMs: 0,
+      maxBalancePolls: 1,
+    })).resolves.toEqual({ transactionHash: "0xbbb", shieldTransactionHash: "0xaaa" });
+    expect(request).toHaveBeenNthCalledWith(3, {
+      type: "wallet_strk20InvokeTransaction",
+      params: {
+        api_version: "0.10.4",
+        actions: [{ type: "deposit", token: "0x1", amount: "0x73" }],
+      },
+    });
+  });
+
   it("claims a finalized exit into an open note owned by the connected wallet", async () => {
     const { provider, request } = providerWithResponses([
+      [{ token: "0xfee", balance: "0x4" }],
       {
         call: {
           contract_address: "0x123",
           entry_point: "apply_actions",
           calldata: [
-            "0x2",
+            "0x3",
+            "0x2", "0x77", "0xfee", "0x4",
             "0x7", "0xa", "0xb", "0xc", "0x1", "0x55",
-            "0xa", "0x2", "0xa",
-            "0x0", "0x3", "0x44", "0x55", "0x99",
+            "0xa", "0x2", "0x9",
+            "0x0", "0x2", "0x44", "0x55",
             "0x0", "0x0", "0x0", "0x0", "0x0",
           ],
         },
@@ -156,7 +220,7 @@ describe("starknet wallet privacy", () => {
     const buildAuthorizationCall = vi.fn((openNoteId: string) => ({
       contractAddress: "0x2",
       entrypoint: "authorize_strk20_exit_claim",
-      calldata: ["0x44", openNoteId, "0x99", "0xaa", "0xbb"],
+      calldata: ["0x44", openNoteId, "0xaa", "0xbb"],
     }));
 
     await expect(
@@ -168,9 +232,11 @@ describe("starknet wallet privacy", () => {
         paymasterUrl: "https://paymaster.example/execute-outside",
         privacyPoolAddress: "0x123",
         tokenAddress: "0x1",
+        feeTokenAddress: "0xfee",
+        feeAmount: 4n,
         bridgeAddress: "0x2",
         bridgeCalldata: [
-          "0", "3", "0x44", "${openNoteIds[0]}", "0x99",
+          "0", "2", "0x44", "${openNoteIds[0]}",
           "0", "0", "0", "0", "0",
         ],
         buildAuthorizationCall,
@@ -182,12 +248,13 @@ describe("starknet wallet privacy", () => {
       params: {
         api_version: "0.10.4",
         actions: [
+          { type: "withdraw", token: "0xfee", amount: "0x4", recipient: "0x77" },
           { type: "transfer", token: "0x1", amount: "OPEN", recipient: "0x99" },
           {
             type: "invoke",
             contract: "0x2",
             calldata: [
-              "0", "3", "0x44", "${openNoteIds[0]}", "0x99",
+              "0", "2", "0x44", "${openNoteIds[0]}",
               "0", "0", "0", "0", "0",
             ],
           },
@@ -197,7 +264,7 @@ describe("starknet wallet privacy", () => {
     });
     expect(buildAuthorizationCall).toHaveBeenCalledWith("0x55");
     expect(submitPreparedCall).toHaveBeenCalledWith(expect.objectContaining({
-      signerAddress: "0x99",
+      signerAddress: "0x55",
       paymasterAddress: "0x77",
       callAndProof: expect.objectContaining({
         call: expect.objectContaining({ contractAddress: "0x123" }),
@@ -209,15 +276,18 @@ describe("starknet wallet privacy", () => {
   });
 
   it("rejects a prepared claim whose private output and bridge claim disagree", async () => {
-    const { provider } = providerWithResponses([{
+    const { provider } = providerWithResponses([[
+      { token: "0xfee", balance: "0x4" },
+    ], {
       call: {
         contract_address: "0x123",
         entry_point: "apply_actions",
         calldata: [
-          "0x2",
+          "0x3",
+          "0x2", "0x77", "0xfee", "0x4",
           "0x7", "0xa", "0xb", "0xc", "0x1", "0x55",
-          "0xa", "0x2", "0xa",
-          "0x0", "0x3", "0x44", "0x56", "0x99",
+          "0xa", "0x2", "0x9",
+          "0x0", "0x2", "0x44", "0x56",
           "0x0", "0x0", "0x0", "0x0", "0x0",
         ],
       },
@@ -233,15 +303,42 @@ describe("starknet wallet privacy", () => {
       paymasterUrl: "https://paymaster.example/execute-outside",
       privacyPoolAddress: "0x123",
       tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 4n,
       bridgeAddress: "0x2",
       bridgeCalldata: [
-        "0", "3", "0x44", "${openNoteIds[0]}", "0x99",
+        "0", "2", "0x44", "${openNoteIds[0]}",
         "0", "0", "0", "0", "0",
       ],
       buildAuthorizationCall,
       submitPreparedCall: vi.fn(),
     })).rejects.toThrow(/malformed private claim/i);
     expect(buildAuthorizationCall).not.toHaveBeenCalled();
+  });
+
+  it("fails before proof generation when the private fee balance is insufficient", async () => {
+    const { provider, request } = providerWithResponses([
+      [{ token: "0xfee", balance: "0x3" }],
+    ]);
+
+    await expect(claimZylithExitToWallet({
+      provider,
+      walletAddress: "0x99",
+      chainId: "0x1",
+      paymasterAddress: "0x77",
+      paymasterUrl: "https://paymaster.example/execute-outside",
+      privacyPoolAddress: "0x123",
+      tokenAddress: "0x1",
+      feeTokenAddress: "0xfee",
+      feeAmount: 4n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0", "2", "0x44", "${openNoteIds[0]}", "0", "0", "0", "0", "0"],
+      buildAuthorizationCall: vi.fn(),
+      submitPreparedCall: vi.fn(),
+    })).rejects.toThrow(/private STRK balance does not cover/i);
+    expect(request).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "wallet_strk20PrepareInvoke",
+    }));
   });
 
   it("fails closed on malformed balances and transaction acknowledgements", async () => {
@@ -252,6 +349,8 @@ describe("starknet wallet privacy", () => {
       fundZylithFromWallet({
         provider: providerWithResponses([[{ token: "0x1", balance: "0x64" }], {}]).provider,
         tokenAddress: "0x1",
+        feeTokenAddress: "0x1",
+        feeAmount: 1n,
         amount: 1n,
         bridgeAddress: "0x2",
         bridgeCalldata: [],

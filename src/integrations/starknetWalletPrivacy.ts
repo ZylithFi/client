@@ -10,6 +10,8 @@ type WalletPrivacyOptions = {
 type FundZylithInput = WalletPrivacyOptions & {
   provider: WalletPrivacyProvider;
   tokenAddress: string;
+  feeTokenAddress: string;
+  feeAmount: bigint;
   amount: bigint;
   amountLabel?: string;
   bridgeAddress: string;
@@ -26,6 +28,8 @@ type ClaimZylithExitInput = {
   paymasterUrl: string;
   privacyPoolAddress: string;
   tokenAddress: string;
+  feeTokenAddress: string;
+  feeAmount: bigint;
   bridgeAddress: string;
   bridgeCalldata: string[];
   buildAuthorizationCall: (
@@ -56,9 +60,22 @@ export async function walletPrivateBalance(
   provider: WalletPrivacyProvider,
   tokenAddress: string,
 ): Promise<bigint> {
+  return (await walletPrivateBalances(provider, [tokenAddress])).get(
+    requiredFelt(tokenAddress, "balance token"),
+  ) ?? 0n;
+}
+
+async function walletPrivateBalances(
+  provider: WalletPrivacyProvider,
+  tokenAddresses: string[],
+): Promise<Map<string, bigint>> {
   const apiVersion = await requirePrivateStrk20Support(provider);
+  const tokens = [...new Set(tokenAddresses.map((token) => requiredFelt(token, "balance token")))];
   const result = await walletRequest(provider, "wallet_strk20Balances", {
-    tokens: [tokenAddress],
+    tokens,
+    ...(supportsBalanceAuthorizationExpiry(apiVersion)
+      ? { valid_until: Math.floor(Date.now() / 1_000) + 60 * 60 }
+      : {}),
     api_version: apiVersion,
   }).catch((error) => {
     if (/not[_ ]registered/i.test(errorMessage(error))) return [];
@@ -67,46 +84,76 @@ export async function walletPrivateBalance(
   if (!Array.isArray(result)) {
     throw new Error("The wallet returned a malformed private balance response.");
   }
-  const matches = result.filter((entry): entry is PrivateBalanceEntry => {
-    if (!isRecord(entry)) return false;
-    return sameFelt(entry.token, tokenAddress);
-  });
-  if (matches.length > 1) {
-    throw new Error("The wallet returned duplicate private balances for one token.");
+  const balances = new Map<string, bigint>();
+  for (const entry of result) {
+    if (!isRecord(entry)) {
+      throw new Error("The wallet returned a malformed private balance.");
+    }
+    const token = normalizedFelt(entry.token);
+    const balance = strictNonNegativeFelt(entry.balance);
+    if (!token || balance === null) {
+      throw new Error("The wallet returned a malformed private balance.");
+    }
+    if (!tokens.includes(token)) continue;
+    if (balances.has(token)) {
+      throw new Error("The wallet returned duplicate private balances for one token.");
+    }
+    balances.set(token, balance);
   }
-  if (matches.length === 0) return 0n;
-  const balance = strictNonNegativeFelt(matches[0].balance);
-  if (balance === null) {
-    throw new Error("The wallet returned a malformed private balance.");
+  for (const token of tokens) {
+    if (!balances.has(token)) balances.set(token, 0n);
   }
-  return balance;
+  return balances;
 }
 
 export async function fundZylithFromWallet(
   input: FundZylithInput,
 ): Promise<{ transactionHash: string; shieldTransactionHash: string | null }> {
   requirePositiveAmount(input.amount);
+  requirePositiveAmount(input.feeAmount);
   input.onStage?.("Preparing private balance");
-  const initialBalance = await walletPrivateBalance(
+  const depositToken = requiredFelt(input.tokenAddress, "deposit token");
+  const feeToken = requiredFelt(input.feeTokenAddress, "fee token");
+  const initialBalances = await walletPrivateBalances(
     input.provider,
-    input.tokenAddress,
+    [depositToken, feeToken],
   );
+  const requiredBalances = new Map<string, bigint>([[depositToken, input.amount]]);
+  requiredBalances.set(
+    feeToken,
+    // this funding action consumes one pool fee. retain another so the
+    // resulting private position can later be claimed without a subsidy.
+    (requiredBalances.get(feeToken) ?? 0n) + input.feeAmount * 2n,
+  );
+  const shieldAmounts = new Map<string, bigint>();
+  for (const [token, required] of requiredBalances) {
+    const balance = initialBalances.get(token) ?? 0n;
+    if (balance < required) shieldAmounts.set(token, required - balance);
+  }
+  if (shieldAmounts.size > 0) {
+    // the shielding transaction itself pays one pool fee. add it on top of
+    // the target balance so the wallet reaches `requiredBalances` after that
+    // fee is consumed, including when the deposited asset is STRK itself.
+    shieldAmounts.set(
+      feeToken,
+      (shieldAmounts.get(feeToken) ?? 0n) + input.feeAmount,
+    );
+  }
+  const shieldActions = [...shieldAmounts].map(([token, amount]) => ({
+    type: "deposit",
+    token,
+    amount: feltHex(amount),
+  }));
   let shieldTransactionHash: string | null = null;
-  if (initialBalance < input.amount) {
+  if (shieldActions.length > 0) {
     input.onStage?.(
       input.amountLabel
         ? `Shielding ${input.amountLabel}`
         : "Shielding funds in your wallet",
     );
-    shieldTransactionHash = await invokePrivateActions(input.provider, [
-      {
-        type: "deposit",
-        token: input.tokenAddress,
-        amount: feltHex(input.amount - initialBalance),
-      },
-    ]);
+    shieldTransactionHash = await invokePrivateActions(input.provider, shieldActions);
     input.onStage?.("Waiting for shielded balance");
-    await waitForPrivateBalance(input, input.amount);
+    await waitForPrivateBalances(input, requiredBalances);
   }
 
   input.onStage?.("Funding Zylith");
@@ -131,23 +178,35 @@ export async function fundZylithFromWallet(
 export async function claimZylithExitToWallet(
   input: ClaimZylithExitInput,
 ): Promise<{ transactionHash: string }> {
+  const feeBalance = await walletPrivateBalance(input.provider, input.feeTokenAddress);
+  if (feeBalance < input.feeAmount) {
+    throw new Error(
+      "Your private STRK balance does not cover the STRK20 withdrawal fee. Shield STRK in your wallet and retry.",
+    );
+  }
   const apiVersion = await requirePrivateStrk20Support(input.provider);
   const prepared = await walletRequest(
     input.provider,
     "wallet_strk20PrepareInvoke",
     {
       actions: [
-      {
-        type: "transfer",
-      token: input.tokenAddress,
-      amount: "OPEN",
-      recipient: input.walletAddress,
-    },
-    {
-      type: "invoke",
-      contract: input.bridgeAddress,
-        calldata: [...input.bridgeCalldata],
-      },
+        {
+          type: "withdraw",
+          token: input.feeTokenAddress,
+          amount: feltHex(input.feeAmount),
+          recipient: input.paymasterAddress,
+        },
+        {
+          type: "transfer",
+          token: input.tokenAddress,
+          amount: "OPEN",
+          recipient: input.walletAddress,
+        },
+        {
+          type: "invoke",
+          contract: input.bridgeAddress,
+          calldata: [...input.bridgeCalldata],
+        },
       ],
       simulate: false,
       api_version: apiVersion,
@@ -162,12 +221,15 @@ export async function claimZylithExitToWallet(
     input.tokenAddress,
     input.bridgeAddress,
     input.bridgeCalldata,
+    input.feeTokenAddress,
+    input.feeAmount,
+    input.paymasterAddress,
   );
   const authorizationCall = await input.buildAuthorizationCall(openNoteId);
   const submit = input.submitPreparedCall
     ?? (await import("./starknetPrivacyFunding")).submitProofBearingCall;
   const transactionHash = await submit({
-    signerAddress: input.walletAddress,
+    signerAddress: openNoteId,
     chainId: input.chainId,
     paymasterAddress: input.paymasterAddress,
     paymasterUrl: input.paymasterUrl,
@@ -182,6 +244,9 @@ function validatePreparedClaim(
   tokenAddress: string,
   bridgeAddress: string,
   requestedBridgeCalldata: string[],
+  feeTokenAddress: string,
+  feeAmount: bigint,
+  paymasterAddress: string,
 ) {
   const normalizedToken = requiredFelt(tokenAddress, "claim token");
   const normalizedBridge = requiredFelt(bridgeAddress, "claim bridge");
@@ -192,6 +257,7 @@ function validatePreparedClaim(
   let offset = 1;
   const openNotes: Array<{ token: string; noteId: string }> = [];
   const invokes: Array<{ variant: number; target: string; calldata: string[] }> = [];
+  const withdrawals: Array<{ recipient: string; token: string; amount: bigint }> = [];
   for (let index = 0; index < count; index += 1) {
     const variant = safeNumber(calldata[offset]);
     if (variant === null || variant > 11) throw malformedPreparedClaim();
@@ -200,7 +266,14 @@ function validatePreparedClaim(
       if (length === null) throw malformedPreparedClaim();
       offset += 3 + length;
     } else if (variant === 1) offset += 5;
-    else if (variant === 2 || variant === 3) throw malformedPreparedClaim();
+    else if (variant === 2) {
+      const recipient = calldata[offset + 1];
+      const token = calldata[offset + 2];
+      const amount = calldata[offset + 3];
+      if (!recipient || !token || !amount) throw malformedPreparedClaim();
+      withdrawals.push({ recipient, token, amount: BigInt(amount) });
+      offset += 4;
+    } else if (variant === 3) throw malformedPreparedClaim();
     else if (variant === 4) offset += 6;
     else if (variant === 5) offset += 7;
     else if (variant === 6) offset += 4;
@@ -232,6 +305,12 @@ function validatePreparedClaim(
     throw malformedPreparedClaim();
   }
   if (bridgeInvokes[0]!.variant !== 10) throw malformedPreparedClaim();
+  if (
+    withdrawals.length !== 1
+    || !sameFelt(withdrawals[0]!.recipient, paymasterAddress)
+    || !sameFelt(withdrawals[0]!.token, feeTokenAddress)
+    || withdrawals[0]!.amount !== feeAmount
+  ) throw malformedPreparedClaim();
   const openNote = openNotes[0]!;
   if (openNote.token !== normalizedToken || openNote.noteId === "0x0") {
     throw malformedPreparedClaim();
@@ -322,9 +401,9 @@ export function walletPrivateSubmissionMayHaveLanded(error: unknown) {
   );
 }
 
-async function waitForPrivateBalance(
+async function waitForPrivateBalances(
   input: FundZylithInput,
-  requiredBalance: bigint,
+  requiredBalances: Map<string, bigint>,
 ) {
   const polls = input.maxBalancePolls ?? DEFAULT_PRIVATE_BALANCE_POLLS;
   const delayMs = input.pollDelayMs ?? DEFAULT_PRIVATE_BALANCE_POLL_DELAY_MS;
@@ -335,10 +414,11 @@ async function waitForPrivateBalance(
     throw new Error("Private balance polling delay is invalid.");
   }
   for (let attempt = 0; attempt < polls; attempt += 1) {
-    if (
-      (await walletPrivateBalance(input.provider, input.tokenAddress)) >=
-      requiredBalance
-    ) {
+    const balances = await walletPrivateBalances(
+      input.provider,
+      [...requiredBalances.keys()],
+    );
+    if ([...requiredBalances].every(([token, required]) => (balances.get(token) ?? 0n) >= required)) {
       return;
     }
     if (attempt + 1 < polls && delayMs > 0) {
@@ -348,6 +428,11 @@ async function waitForPrivateBalance(
   throw new Error(
     "The shielded balance is not ready yet. Keep the wallet open and retry.",
   );
+}
+
+function supportsBalanceAuthorizationExpiry(apiVersion: string) {
+  const [major = 0, minor = 0, patch = 0] = apiVersion.split(".").map(Number);
+  return major > 0 || minor > 10 || (minor === 10 && patch >= 4);
 }
 
 async function invokePrivateActions(

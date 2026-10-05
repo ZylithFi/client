@@ -92,7 +92,7 @@ export function subscribeStarknetProviderEvents(
       provider.on(event, listener);
       subscribed.push([event, listener]);
     } catch {
-      // Injected wallets expose different event subsets.
+      // injected wallets expose different event subsets.
     }
   };
 
@@ -102,6 +102,7 @@ export function subscribeStarknetProviderEvents(
   for (const event of ["networkChanged", "chainChanged"]) {
     subscribe(event, networkListener);
   }
+  subscribe("disconnect", () => accountListener([]));
 
   return () => {
     for (const [event, listener] of subscribed) {
@@ -439,17 +440,17 @@ function rememberSelectedProvider(
 }
 
 export function connectedStarknetAddress(): string | null {
-  const provider = selectedStarknetProvider();
-  if (!provider) return null;
-  return addressFromProviderResult(null, provider)
-    ?? selectedAddress
-    ?? null;
+  return selectedProvider ? selectedAddress : null;
 }
 
 export function applyStarknetAccountsChanged(value: unknown): string | null {
   const address = addressFromUnknown(value);
   if (!address) {
-    clearSelectedStarknetProvider();
+    // an empty account event may mean the wallet is locked, not that the user
+    // revoked the site's permission. keep the chosen provider so a later
+    // focus/account event can restore it silently.
+    selectedAddress = null;
+    sessionRemove(CONNECTED_STARKNET_ADDRESS_STORAGE_KEY);
     return null;
   }
   selectedAddress = address;
@@ -470,13 +471,6 @@ export async function restoreConnectedStarknetWallet(): Promise<string | null> {
     if (!wallet) return null;
     provider = wallet.provider;
     walletId = wallet.id;
-  }
-
-  const exposedAddress = addressFromProviderResult(null, provider);
-  if (exposedAddress) {
-    return rememberSelectedProvider(provider, walletId, exposedAddress, revision)
-      ? exposedAddress
-      : null;
   }
 
   if (providerRequest(provider)) {
@@ -501,8 +495,10 @@ export async function restoreConnectedStarknetWallet(): Promise<string | null> {
       }
     }
   }
-
-  return null;
+  const legacyAddress = addressFromProviderResult(null, provider);
+  return legacyAddress && rememberSelectedProvider(provider, walletId, legacyAddress, revision)
+    ? legacyAddress
+    : null;
 }
 
 export function clearSelectedStarknetProvider({

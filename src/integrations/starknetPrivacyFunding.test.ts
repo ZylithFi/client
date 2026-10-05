@@ -227,12 +227,11 @@ describe("privacyBridgeStrk20ExitClaimCalldata", () => {
     const calldata = privacyBridgeStrk20ExitClaimCalldata({
       exitCommitment: "0xexit",
       openNoteId: "0xopen",
-      claimRecipient: "0xrecipient",
     });
 
     expect(calldata).toEqual([
       [],
-      ["0xexit", "0xopen", "0xrecipient"],
+      ["0xexit", "0xopen"],
       [],
       [],
       [],
@@ -242,10 +241,9 @@ describe("privacyBridgeStrk20ExitClaimCalldata", () => {
     expect(privacyBridgeStrk20ExitClaimFlatCalldata({
       exitCommitment: "0xexit",
       openNoteId: "0xopen",
-      claimRecipient: "0xrecipient",
     })).toEqual([
       "0",
-      "3", "0xexit", "0xopen", "0xrecipient",
+      "2", "0xexit", "0xopen",
       "0",
       "0",
       "0",
@@ -256,12 +254,11 @@ describe("privacyBridgeStrk20ExitClaimCalldata", () => {
       bridgeAddress: "0xbridge",
       exitCommitment: "0xexit",
       openNoteId: "0xopen",
-      claimRecipient: "0xrecipient",
       signature: { signature_r: "0xr", signature_s: "0xs" },
     })).toEqual({
       contractAddress: "0xbridge",
       entrypoint: "authorize_strk20_exit_claim",
-      calldata: ["0xexit", "0xopen", "0xrecipient", "0xr", "0xs"],
+      calldata: ["0xexit", "0xopen", "0xr", "0xs"],
     });
   });
 });

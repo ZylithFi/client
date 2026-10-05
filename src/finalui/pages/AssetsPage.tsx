@@ -42,6 +42,7 @@ export function AssetsPage({
   balances,
   pendingDeposits,
   withdrawals,
+  walletConnected,
   walletReady,
   assetUnitPrices,
   onConnectWallet,
@@ -52,6 +53,7 @@ export function AssetsPage({
   balances: WalletBalance[];
   pendingDeposits: PendingDeposit[];
   withdrawals: WithdrawableNote[];
+  walletConnected: boolean;
   walletReady: boolean;
   assetUnitPrices: Record<string, number>;
   onConnectWallet: () => void;
@@ -173,18 +175,19 @@ export function AssetsPage({
   }
 
   if (!walletReady) {
+    const action = walletConnected ? "Unlock private balance" : "Connect wallet";
     return (
       <main className="page-content assets-page">
         <section className="page-hero">
           <div><h1>Assets</h1><p>Your balances and transfers inside Zylith.</p></div>
         </section>
         <section className="data-section asset-balance-section" aria-label="Private balances">
-          <div className="section-meta-row"><strong>Private balance</strong><span>Connect wallet</span></div>
-          <div className="account-empty-state"><strong>Connect wallet to view your private balances.</strong><button className="wallet-button" type="button" onClick={onConnectWallet}>Connect wallet</button></div>
+          <div className="section-meta-row"><strong>Private balance</strong><span>{action}</span></div>
+          <div className="account-empty-state"><strong>{walletConnected ? "Unlock your private balance to continue." : "Connect wallet to view your private balances."}</strong><button className="wallet-button" type="button" onClick={onConnectWallet}>{action}</button></div>
         </section>
         <section className="data-section transfer-section" aria-labelledby="transfer-history-title">
           <div className="section-title-row"><div><h2 id="transfer-history-title">Transfer history</h2></div></div>
-          <div className="account-empty-state compact"><strong>Connect wallet to view your transfer history.</strong></div>
+          <div className="account-empty-state compact"><strong>{walletConnected ? "Unlock your private balance to view transfer history." : "Connect wallet to view your transfer history."}</strong></div>
         </section>
       </main>
     );

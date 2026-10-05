@@ -23,8 +23,6 @@ import {
   walletRuntimeLoadError,
   walletRuntime,
 } from "../domain/browserWallet";
-import { loadDeployment } from "../domain/deployment";
-import { fundingRailTokenAddress } from "../domain/fundingRail";
 import { requirePrivateStrk20Support } from "../domain/starknetWalletCapabilities";
 import {
   runPrimaryActionOnEnter,
@@ -454,13 +452,11 @@ export function WalletSlide({
     setShowStarknetFirstHint(false);
     void refreshWalletOptions({ showLoading: true });
     const refresh = () => void refreshWalletOptions();
-    const timer = window.setInterval(refresh, 2000);
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("starknet#initialized", refresh);
     return () => {
       walletScannerActiveRef.current = false;
-      window.clearInterval(timer);
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
       window.removeEventListener("starknet#initialized", refresh);
@@ -490,7 +486,6 @@ export function WalletSlide({
     setConnectingWalletId(wallet.id);
     setError("");
     try {
-      await requirePrivateStrk20Support(wallet.provider);
       const addr = await connectStarknetProvider(wallet.provider, wallet.id);
       if (
         authorizationGenerationRef.current !== connectionGeneration
@@ -518,7 +513,7 @@ export function WalletSlide({
     authorizationGenerationRef.current += 1;
     setWorking(false);
     setConnectingWalletId(null);
-    walletRuntime()?.lock();
+    walletRuntime()?.suspend?.();
     clearSelectedStarknetProvider();
     onStarknetDisconnected();
     void refreshWalletOptions({ showLoading: true });
@@ -811,7 +806,7 @@ export function DepositSlide({
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   const [fundingStage, setFundingStage] = useState("");
-  const [shieldedBalance, setShieldedBalance] = useState<string | null>(null);
+  const [privateApiSupported, setPrivateApiSupported] = useState<boolean | null>(null);
   const wasOpenRef = useRef(false);
   const depositStartedAtRef = useRef(0);
   const operationInFlightRef = useRef(false);
@@ -857,20 +852,20 @@ export function DepositSlide({
 
   useEffect(() => {
     let cancelled = false;
-    setShieldedBalance(null);
+    setPrivateApiSupported(null);
     if (!open || !starknetAddress) return () => { cancelled = true; };
     const provider = selectedStarknetProvider();
     if (!provider) return () => { cancelled = true; };
-    void Promise.all([
-      loadDeployment(),
-      import("../integrations/starknetWalletPrivacy"),
-    ]).then(async ([manifest, privacy]) => {
-      const tokenAddress = fundingRailTokenAddress(manifest, asset);
-      const balance = await privacy.walletPrivateBalance(provider as never, tokenAddress);
-      if (!cancelled) setShieldedBalance(balance.toString());
-    }).catch(() => undefined);
+    void requirePrivateStrk20Support(provider).then(() => {
+      if (!cancelled) setPrivateApiSupported(true);
+    }).catch((capabilityError) => {
+      if (!cancelled) {
+        setPrivateApiSupported(false);
+        setError(userFacingErrorMessage(capabilityError));
+      }
+    });
     return () => { cancelled = true; };
-  }, [asset, open, starknetAddress]);
+  }, [open, starknetAddress]);
 
   function changeAsset(a: string) {
     setAsset(a);
@@ -932,7 +927,7 @@ export function DepositSlide({
     }
   }
   const depositEnabled = Boolean(
-    !working && (!starknetAddress || amount.trim())
+    !working && (!starknetAddress || (privateApiSupported !== false && amount.trim()))
   );
 
   return (
@@ -1005,10 +1000,7 @@ export function DepositSlide({
           </div>
         </div>
         <div className="funding-helper">
-          {shieldedBalance === null
-            ? "Your wallet will use shielded funds when available."
-            : `Shielded in wallet: ${safeFromAtomicStr(shieldedBalance, asset)} ${asset}.`}
-          {" "}If needed, the wallet shields only the shortfall before depositing.
+          Your wallet uses shielded funds when available and shields only the shortfall when needed.
         </div>
         {error && (
           <div
@@ -1069,6 +1061,7 @@ export function WithdrawSlide({
   const [selectedNote, setSelectedNote] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
+  const [privateApiSupported, setPrivateApiSupported] = useState<boolean | null>(null);
   const operationInFlightRef = useRef(false);
   const openRef = useRef(open);
   const openGenerationRef = useRef(0);
@@ -1089,6 +1082,23 @@ export function WithdrawSlide({
     }
   }, [open, defaultAsset]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setPrivateApiSupported(null);
+    if (!open || !starknetAddress) return () => { cancelled = true; };
+    const provider = selectedStarknetProvider();
+    if (!provider) return () => { cancelled = true; };
+    void requirePrivateStrk20Support(provider).then(() => {
+      if (!cancelled) setPrivateApiSupported(true);
+    }).catch((capabilityError) => {
+      if (!cancelled) {
+        setPrivateApiSupported(false);
+        setError(userFacingErrorMessage(capabilityError));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [open, starknetAddress]);
+
   function changeAsset(a: string) {
     setAsset(a);
     setSlideAsset(a);
@@ -1105,6 +1115,7 @@ export function WithdrawSlide({
     if (operationInFlightRef.current) return;
     const openGeneration = openGenerationRef.current;
     const requestedNoteCommitment = selectedWithdrawNote?.note_commitment ?? null;
+    const wasAuthorized = Boolean(w?.isReady(starknetAddress));
     if (!starknetAddress) {
       setError("");
       onOpenWallet();
@@ -1115,6 +1126,7 @@ export function WithdrawSlide({
     setError("");
     try {
       const authorizedRuntime = await ensureTradingAuthorized(starknetAddress);
+      if (!wasAuthorized) return;
       if (!authorizedRuntime.withdrawalAvailable()) {
         if (openGenerationRef.current === openGeneration) {
           setError("Withdrawals are not configured for this deployment.");
@@ -1161,7 +1173,12 @@ export function WithdrawSlide({
     }
   }
   const privateSessionReady = Boolean(starknetAddress && walletReady);
-  const withdrawEnabled = Boolean(!working && (!starknetAddress || !privateSessionReady || (withdrawalAvailable && selectedWithdrawNote)));
+  const withdrawEnabled = Boolean(
+    !working
+      && (!starknetAddress
+        || !privateSessionReady
+        || (privateApiSupported !== false && withdrawalAvailable && selectedWithdrawNote))
+  );
 
   return (
     <div
@@ -1248,7 +1265,7 @@ export function WithdrawSlide({
                 ? `Withdraw ${safeFromAtomicStr(selectedWithdrawNote.amount, asset)} ${asset}`
                 : privateSessionReady
                   ? "Withdraw"
-                  : "Authorize withdrawals"}
+                  : "Unlock private balance"}
         </button>
         {inProgress.length > 0 && (
           <div className="withdraw-progress-section">

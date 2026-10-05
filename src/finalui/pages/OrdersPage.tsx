@@ -15,12 +15,14 @@ function submittedAt(value: number) {
 
 export function OrdersPage({
   orders,
+  walletConnected,
   walletReady,
   error,
   onCancel,
   onConnectWallet,
 }: {
   orders: OrderRow[];
+  walletConnected: boolean;
   walletReady: boolean;
   error?: string | null;
   onCancel: (order: OrderRow) => Promise<void>;
@@ -107,6 +109,7 @@ export function OrdersPage({
   const sortableHeaderProps = { activeKey: sortKey, direction: sortDirection, onSort: handleSort };
 
   if (!walletReady) {
+    const action = walletConnected ? "Unlock private orders" : "Connect wallet";
     return (
       <main className="page-content orders-page">
         <section className="page-hero compact-hero">
@@ -116,7 +119,7 @@ export function OrdersPage({
           <div className="orders-page-toolbar">
             <div className="page-tabs" role="tablist" aria-label="Order lifecycle">{tabs.map((tab) => <button key={tab} type="button" role="tab" aria-selected={tab === "Open"} className={tab === "Open" ? "active" : ""} disabled>{tab}</button>)}</div>
           </div>
-          <div className="account-empty-state orders-empty-state"><strong>Connect wallet to view your orders.</strong><button className="wallet-button" type="button" onClick={onConnectWallet}>Connect wallet</button></div>
+          <div className="account-empty-state orders-empty-state"><strong>{walletConnected ? "Unlock your private orders to continue." : "Connect wallet to view your orders."}</strong><button className="wallet-button" type="button" onClick={onConnectWallet}>{action}</button></div>
         </section>
       </main>
     );

@@ -7,7 +7,11 @@ import {
   WithdrawSlide,
   privacyFundingStageLabel,
 } from "./WalletSlides";
-import { setWalletRuntime } from "../domain/browserWallet";
+import {
+  clearSelectedStarknetProvider,
+  connectStarknetProvider,
+  setWalletRuntime,
+} from "../domain/browserWallet";
 
 function DepositHarness() {
   const [asset, setAsset] = useState("STRK");
@@ -28,6 +32,7 @@ function DepositHarness() {
 afterEach(() => {
   (window as typeof window & { starknet_ready?: unknown }).starknet_ready =
     undefined;
+  clearSelectedStarknetProvider();
   setWalletRuntime(null);
 });
 
@@ -39,6 +44,25 @@ describe("DepositSlide", () => {
     expect(
       screen.getByRole("button", { name: "Deposit STRK" })
     ).toBeInTheDocument();
+  });
+
+  it("checks private-wallet support without blocking ordinary wallet connection", async () => {
+    const request = vi.fn(async ({ type }: { type: string }) => {
+      if (type === "wallet_requestAccounts") return [{ address: "0xabc" }];
+      if (type === "wallet_supportedWalletApi") return ["0.10.2"];
+      throw new Error("unexpected wallet request");
+    });
+    await connectStarknetProvider({ request } as never, "standard-wallet");
+
+    render(<DepositHarness />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(/does not support private strk20/i);
+      expect(screen.getByRole("button", { name: "Deposit STRK" })).toBeDisabled();
+    });
+    expect(request).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "wallet_strk20Balances",
+    }));
   });
 
   it("preserves the typed amount when switching the deposit asset", () => {
@@ -447,7 +471,7 @@ describe("WithdrawSlide", () => {
     expect(withdraw).not.toHaveBeenCalled();
   });
 
-  it("authorizes trading inline before withdrawal submission", async () => {
+  it("authorizes trading without starting an unseen withdrawal", async () => {
     const onOpenWallet = vi.fn();
     let ready = false;
     const unlockWithWalletSignature = vi.fn(async () => {
@@ -486,11 +510,11 @@ describe("WithdrawSlide", () => {
     );
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Authorize withdrawals" })
+      screen.getByRole("button", { name: "Unlock private balance" })
     );
     await waitFor(() => {
       expect(unlockWithWalletSignature).toHaveBeenCalledWith("0xabc");
-      expect(withdraw).toHaveBeenCalledWith("0xnote");
+      expect(withdraw).not.toHaveBeenCalled();
     });
     expect(onOpenWallet).not.toHaveBeenCalled();
   });
@@ -941,8 +965,9 @@ describe("WalletSlide", () => {
 
   it("locks private trading when changing or disconnecting the Starknet wallet", () => {
     const lock = vi.fn();
+    const suspend = vi.fn();
     const onStarknetDisconnected = vi.fn();
-    setWalletRuntime({ lock } as never);
+    setWalletRuntime({ lock, suspend } as never);
     render(
       <WalletSlide
         open
@@ -958,7 +983,8 @@ describe("WalletSlide", () => {
     fireEvent.click(screen.getByRole("button", { name: "Change wallet" }));
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
 
-    expect(lock).toHaveBeenCalledTimes(2);
+    expect(suspend).toHaveBeenCalledTimes(1);
+    expect(lock).toHaveBeenCalledTimes(1);
     expect(onStarknetDisconnected).toHaveBeenCalledTimes(2);
   });
 });

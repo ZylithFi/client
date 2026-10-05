@@ -202,11 +202,10 @@ export function privacyBridgeDepositFlatCalldata(
 export function privacyBridgeStrk20ExitClaimCalldata(input: {
   exitCommitment: string;
   openNoteId: string;
-  claimRecipient: string;
 }) {
   return [
     [],
-    [input.exitCommitment, input.openNoteId, input.claimRecipient],
+    [input.exitCommitment, input.openNoteId],
     [],
     [],
     [],
@@ -218,7 +217,6 @@ export function privacyBridgeStrk20ExitClaimCalldata(input: {
 export function privacyBridgeStrk20ExitClaimFlatCalldata(input: {
   exitCommitment: string;
   openNoteId: string;
-  claimRecipient: string;
 }) {
   return flattenCairoSpanCalldata(privacyBridgeStrk20ExitClaimCalldata(input));
 }
@@ -227,7 +225,6 @@ export function privacyBridgeStrk20ExitAuthorizationCall(input: {
   bridgeAddress: string;
   exitCommitment: string;
   openNoteId: string;
-  claimRecipient: string;
   signature: Strk20ExitClaimSignature;
 }) {
   return {
@@ -236,7 +233,6 @@ export function privacyBridgeStrk20ExitAuthorizationCall(input: {
     calldata: [
       input.exitCommitment,
       input.openNoteId,
-      input.claimRecipient,
       input.signature.signature_r,
       input.signature.signature_s,
     ],
