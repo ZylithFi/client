@@ -11,20 +11,45 @@ import {
 export const TRANSITION_WINDOW = 64;
 /** the indexer serves at most this many transitions per request. */
 const MAX_TRANSITION_RANGE = 256;
+const HPKE_PROFILE = "DHKEM(X25519,HKDF-SHA256)/HKDF-SHA256/ChaCha20Poly1305/base" as const;
+const X25519_FIELD_PRIME = `ed${"ff".repeat(30)}7f`;
+const X25519_LOW_ORDER_KEYS = new Set([
+  `01${"00".repeat(31)}`,
+  `ec${"ff".repeat(30)}7f`,
+  "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+  "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+]);
+const RESPONSE_ENVELOPE_VERSION = 3 as const;
+const RESPONSE_PLAINTEXT_BYTES = 16_384;
+const RESPONSE_CIPHERTEXT_BYTES = RESPONSE_PLAINTEXT_BYTES + 16;
+const RESPONSE_CIPHERTEXT_PATTERN = /^[0-9a-f]{32800}$/;
+const RESPONSE_KEY_INFO_DOMAIN = new TextEncoder().encode("zylith-response-key-hkdf-sha256-v3");
+const RESPONSE_AAD_DOMAIN = new TextEncoder().encode("zylith-response-aad-v3");
 
 export type ExecutionKeyRegistry = {
-  keys: Array<{ key_id: string; public_key: string }>;
+  keys: Array<{
+    key_id: string;
+    algorithm: typeof HPKE_PROFILE;
+    public_key: string;
+  }>;
 };
 
-/** a request sealed to every execution key; only the operator can open it. its kind is inside. */
+/** one fixed-size request sealed to the active execution key; its kind is inside. */
 export type SealedRequest = {
-  version: number;
+  version: 3;
+  key_id: string;
   digest: string;
-  shares: unknown[];
+  encapsulated_key: string;
+  ciphertext: string;
 };
 
-/** the operator's answer, sealed under the request's one-time response key. */
-export type SealedResponse = { nonce: string; ciphertext: string };
+/** the operator's answer, sealed under a fresh subkey of the request's response root key. */
+export type SealedResponse = {
+  version: typeof RESPONSE_ENVELOPE_VERSION;
+  salt: string;
+  nonce: string;
+  ciphertext: string;
+};
 
 export type ExchangeStatus = {
   exchange: string;
@@ -175,8 +200,10 @@ export class ZylithExchangeClient {
     this.timeoutMs = options.timeoutMs;
   }
 
-  executionKeys(options?: RequestOptions) {
-    return this.get<ExecutionKeyRegistry>(this.operatorUrl, "/api/public/execution-keys", options);
+  async executionKeys(options?: RequestOptions) {
+    return requireExecutionKeyRegistry(
+      await this.get<unknown>(this.operatorUrl, "/api/public/execution-keys", options),
+    );
   }
 
   exchangeStatus(options?: RequestOptions) {
@@ -210,10 +237,12 @@ export class ZylithExchangeClient {
   }
 
   /**
-   * every sealed request goes to one endpoint and is answered with http 200 and a padded body
-   * only its response key opens; a refusal arrives inside as `ok: false`.
+   * every sealed request goes to one endpoint and is answered with http 200 and a padded body;
+   * only a key derived from its per-request response root opens it, and a refusal arrives inside
+   * as `ok: false`.
    */
   private async sealedCall<T>(sealed: SealedRequest, responseKey: string, options?: RequestOptions): Promise<T> {
+    requireSealedRequest(sealed);
     const response = await this.request<SealedResponse>(this.operatorUrl, PRIVATE_PATH, options, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -299,20 +328,141 @@ export class ZylithExchangeClient {
 
 const PRIVATE_PATH = "/api/private/requests";
 
-/** opens an answer: aes-256-gcm under the response key, bound to the request's digest. */
+function exactObject(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === fields.length
+    && Object.keys(value).every((field) => fields.includes(field));
+}
+
+function requireExecutionKeyRegistry(value: unknown): ExecutionKeyRegistry {
+  if (!exactObject(value, ["keys"]) || !Array.isArray(value.keys) || value.keys.length !== 1) {
+    throw new Error("Operator returned a malformed execution-key registry");
+  }
+  const key = value.keys[0];
+  if (
+    !exactObject(key, ["key_id", "algorithm", "public_key"])
+    || typeof key.key_id !== "string"
+    || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(key.key_id)
+    || key.algorithm !== HPKE_PROFILE
+    || typeof key.public_key !== "string"
+    || !/^[0-9a-f]{64}$/.test(key.public_key)
+    || !usableX25519PublicKey(key.public_key)
+  ) throw new Error("Operator returned a malformed execution-key registry");
+  return value as ExecutionKeyRegistry;
+}
+
+function requireSealedRequest(value: unknown): asserts value is SealedRequest {
+  if (
+    !exactObject(value, ["version", "key_id", "digest", "encapsulated_key", "ciphertext"])
+    || value.version !== 3
+    || typeof value.key_id !== "string"
+    || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(value.key_id)
+    || typeof value.digest !== "string"
+    || !/^[0-9a-f]{64}$/.test(value.digest)
+    || typeof value.encapsulated_key !== "string"
+    || !/^[0-9a-f]{64}$/.test(value.encapsulated_key)
+    || !usableX25519PublicKey(value.encapsulated_key)
+    || typeof value.ciphertext !== "string"
+    || !/^[0-9a-f]{8224}$/.test(value.ciphertext)
+  ) throw new Error("Malformed sealed request");
+}
+
+function usableX25519PublicKey(publicKey: string) {
+  if (publicKey === "00".repeat(32) || X25519_LOW_ORDER_KEYS.has(publicKey)) return false;
+  const bytes = publicKey.match(/../g);
+  const prime = X25519_FIELD_PRIME.match(/../g);
+  if (!bytes || !prime || (Number.parseInt(bytes[31], 16) & 0x80) !== 0) return false;
+  for (let index = 31; index >= 0; index -= 1) {
+    const byte = Number.parseInt(bytes[index], 16);
+    const primeByte = Number.parseInt(prime[index], 16);
+    if (byte !== primeByte) return byte < primeByte;
+  }
+  return false;
+}
+
+function u32be(value: number): Uint8Array<ArrayBuffer> {
+  const encoded = new Uint8Array(4);
+  new DataView(encoded.buffer).setUint32(0, value, false);
+  return encoded;
+}
+
+/** count-and-length-prefixes binary fields exactly as the Rust protocol implementation does. */
+function frame(parts: readonly Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
+  const size = 4 + parts.reduce((total, part) => total + 4 + part.length, 0);
+  const encoded = new Uint8Array(size);
+  const view = new DataView(encoded.buffer);
+  view.setUint32(0, parts.length, false);
+  let offset = 4;
+  for (const part of parts) {
+    view.setUint32(offset, part.length, false);
+    offset += 4;
+    encoded.set(part, offset);
+    offset += part.length;
+  }
+  return encoded;
+}
+
+function requireSealedResponse(value: unknown): asserts value is SealedResponse {
+  if (
+    !exactObject(value, ["version", "salt", "nonce", "ciphertext"])
+    || value.version !== RESPONSE_ENVELOPE_VERSION
+    || typeof value.salt !== "string"
+    || !/^[0-9a-f]{64}$/.test(value.salt)
+    || typeof value.nonce !== "string"
+    || !/^[0-9a-f]{24}$/.test(value.nonce)
+    || typeof value.ciphertext !== "string"
+    || value.ciphertext.length !== RESPONSE_CIPHERTEXT_BYTES * 2
+    || !RESPONSE_CIPHERTEXT_PATTERN.test(value.ciphertext)
+  ) throw new Error("Malformed sealed response");
+}
+
+/** opens an answer under a fresh HKDF-derived AES-256-GCM subkey, bound to its request. */
 export async function openSealedResponse(responseKey: string, digest: string, sealed: SealedResponse): Promise<unknown> {
-  const key = await crypto.subtle.importKey("raw", hexBytes(responseKey, 32), "AES-GCM", false, ["decrypt"]);
+  requireSealedResponse(sealed);
+  if (!/^[0-9a-f]{64}$/.test(responseKey) || !/^[0-9a-f]{64}$/.test(digest)) {
+    throw new Error("Malformed sealed response");
+  }
+  const root = await crypto.subtle.importKey("raw", hexBytes(responseKey, 32), "HKDF", false, ["deriveKey"]);
+  const salt = hexBytes(sealed.salt, 32);
+  const digestBytes = hexBytes(digest, 32);
+  const version = u32be(RESPONSE_ENVELOPE_VERSION);
+  const size = u32be(RESPONSE_PLAINTEXT_BYTES);
+  const key = await crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt,
+      info: frame([RESPONSE_KEY_INFO_DOMAIN, version, size, digestBytes]),
+    },
+    root,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"],
+  );
   let plaintext: ArrayBuffer;
   try {
     plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: hexBytes(sealed.nonce, 12), additionalData: new TextEncoder().encode(digest) },
+      {
+        name: "AES-GCM",
+        iv: hexBytes(sealed.nonce, 12),
+        additionalData: frame([RESPONSE_AAD_DOMAIN, version, size, digestBytes, salt]),
+      },
       key,
       hexBytes(sealed.ciphertext),
     );
   } catch {
     throw new Error("The operator's answer does not open");
   }
-  return JSON.parse(new TextDecoder().decode(plaintext));
+  if (plaintext.byteLength !== RESPONSE_PLAINTEXT_BYTES) {
+    throw new Error("The operator's answer does not open");
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new Error("The operator's answer is malformed");
+  }
 }
 
 function hexBytes(hex: string, length?: number): Uint8Array<ArrayBuffer> {

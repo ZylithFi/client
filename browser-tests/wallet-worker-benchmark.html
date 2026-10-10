@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; worker-src 'self'; require-trusted-types-for 'script'; trusted-types zylith-wallet-worker"
+    />
+    <title>Zylith wallet worker browser gate</title>
+  </head>
+  <body>
+    <pre id="result">running</pre>
+    <script type="module" src="./wallet-worker-benchmark.ts"></script>
+  </body>
+</html>

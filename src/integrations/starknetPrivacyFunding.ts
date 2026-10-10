@@ -12,7 +12,6 @@ import {
   RpcProvider,
   Signer,
   constants,
-  ec,
   hash,
   stark,
   type Call,
@@ -60,7 +59,8 @@ export type Strk20ExitClaimSignature = {
 
 export type SubmitResidualRecoveryInput = {
   provider?: StarknetProviderLike;
-  seedHex: string;
+  proofSignerPrivateKey: string;
+  proofSignerSalt: string;
   chainId: string;
   rpcUrl: string;
   provingUrl: string;
@@ -71,6 +71,7 @@ export type SubmitResidualRecoveryInput = {
   minProvingDelayBlocks: number;
   proofProgramCall: Call;
   settlementCall: Call;
+  assertWalletContext?: () => void | Promise<void>;
 };
 
 export async function submitResidualRecovery(
@@ -79,10 +80,12 @@ export async function submitResidualRecovery(
   const rpcProvider = new RpcProvider({ nodeUrl: input.rpcUrl });
   const account = await createEmbeddedPrivacyProofAccount({
     provider: input.provider,
-    seedHex: input.seedHex,
+    proofSignerPrivateKey: input.proofSignerPrivateKey,
+    proofSignerSalt: input.proofSignerSalt,
     rpcProvider,
     privacyProofSignerClassHash: input.privacyProofSignerClassHash,
     minProvingDelayBlocks: input.minProvingDelayBlocks,
+    assertWalletContext: input.assertWalletContext,
   });
   const provingBlockId = await provingBlock(
     rpcProvider,
@@ -534,35 +537,34 @@ export async function submitProofBearingCall(input: {
 type EmbeddedPrivacyProofAccount = {
   address: string;
   signer: Signer;
-  privateKey: string;
 };
 
 async function createEmbeddedPrivacyProofAccount(input: {
   provider?: StarknetProviderLike;
-  seedHex: string;
+  proofSignerPrivateKey: string;
+  proofSignerSalt: string;
   rpcProvider: RpcProvider;
   privacyProofSignerClassHash?: string;
   minProvingDelayBlocks: number;
+  assertWalletContext?: () => void | Promise<void>;
 }): Promise<EmbeddedPrivacyProofAccount> {
   if (!input.privacyProofSignerClassHash) {
     throw new Error("Private deposit signer deployment is not configured");
   }
-  const privateKey = await derivePrivacyProofSignerPrivateKey(input.seedHex);
-  const signer = new Signer(privateKey);
+  const signer = new Signer(input.proofSignerPrivateKey);
   const publicKey = normalizeAddress(await signer.getPubKey());
-  const salt = await derivePrivacyProofSignerSalt(input.seedHex);
   const existingAddress = await ensurePrivacyProofSignerContract({
     signerPublicKey: publicKey,
-    salt,
+    salt: input.proofSignerSalt,
     classHash: input.privacyProofSignerClassHash,
     provider: input.provider,
     rpcProvider: input.rpcProvider,
     minProvingDelayBlocks: input.minProvingDelayBlocks,
+    assertWalletContext: input.assertWalletContext,
   });
   return {
     address: existingAddress,
     signer,
-    privateKey,
   };
 }
 
@@ -573,6 +575,7 @@ async function ensurePrivacyProofSignerContract(input: {
   provider?: StarknetProviderLike;
   rpcProvider: RpcProvider;
   minProvingDelayBlocks: number;
+  assertWalletContext?: () => void | Promise<void>;
 }) {
   const expectedAddress = normalizeAddress(hash.calculateContractAddressFromHash(
     input.salt,
@@ -596,6 +599,7 @@ async function ensurePrivacyProofSignerContract(input: {
   if (!input.provider) {
     throw new Error("Connect a Starknet wallet to deploy the private signer");
   }
+  await input.assertWalletContext?.();
   await executeWalletCall(input.provider, {
     contractAddress: constants.UDC.ADDRESS,
     entrypoint: constants.UDC.ENTRYPOINT,
@@ -737,58 +741,4 @@ function safeWalletValue(value: unknown, key: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-async function derivePrivacyProofSignerPrivateKey(seedHex: string) {
-  const value = await deriveFeltFromSeed(
-    seedHex,
-    "proof-signer",
-    ec.starkCurve.CURVE.n
-  );
-  return `0x${value.toString(16)}`;
-}
-
-async function derivePrivacyProofSignerSalt(seedHex: string) {
-  const value = await deriveFeltFromSeed(
-    seedHex,
-    "proof-signer-salt",
-    STARKNET_FIELD_PRIME
-  );
-  return `0x${value.toString(16)}`;
-}
-
-async function deriveFeltFromSeed(
-  seedHex: string,
-  label: string,
-  modulus: bigint
-) {
-  const digest = await sha256SeedDomain(
-    `zylith/starknet-privacy/${label}/`,
-    seedHex
-  );
-  try {
-    return (BigInt(`0x${bytesToHex(digest)}`) % (modulus - 1n)) + 1n;
-  } finally {
-    digest.fill(0);
-  }
-}
-
-async function sha256SeedDomain(domain: string, seedHex: string) {
-  const domainBytes = new TextEncoder().encode(domain);
-  const seedBytes = new TextEncoder().encode(seedHex);
-  const input = new Uint8Array(domainBytes.length + seedBytes.length);
-  input.set(domainBytes);
-  input.set(seedBytes, domainBytes.length);
-  try {
-    return new Uint8Array(await crypto.subtle.digest("SHA-256", input));
-  } finally {
-    seedBytes.fill(0);
-    input.fill(0);
-  }
-}
-
-function bytesToHex(bytes: Uint8Array) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    ""
-  );
 }

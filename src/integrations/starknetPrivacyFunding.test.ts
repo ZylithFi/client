@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { constants } from "starknet";
+import { RpcProvider, constants } from "starknet";
 import {
   privacyBridgeDepositFlatCalldata,
   privacyBridgeDepositCalldata,
@@ -10,13 +10,114 @@ import {
   shouldRetryDirectProvingTransport,
   runProvingTransportAttempts,
   starknetPrivacySdkChainId,
+  submitResidualRecovery,
   STARKNET_PRIVACY_OHTTP_EXECUTE_TIMEOUT_MS,
   type PrivacyBridgeDepositPlan,
+  type SubmitResidualRecoveryInput,
 } from "./starknetPrivacyFunding";
 
+vi.mock("@starkware-libs/starknet-privacy-sdk/browser", () => ({
+  ProvingServiceProofProvider: class {
+    async getDefaultDetails() {
+      return {
+        chainId: constants.StarknetChainId.SN_SEPOLIA,
+        version: "0x3", nonce: "0x0", tip: "0x0",
+        nonceDataAvailabilityMode: "L1", feeDataAvailabilityMode: "L1",
+        paymasterData: [], accountDeploymentData: [],
+        resourceBounds: {
+          l1_gas: { max_amount: 1n, max_price_per_unit: 1n },
+          l2_gas: { max_amount: 1n, max_price_per_unit: 1n },
+          l1_data_gas: { max_amount: 1n, max_price_per_unit: 1n },
+        },
+      };
+    }
+    async prove() {
+      return { data: "test-proof", proofFacts: ["0xfac"] };
+    }
+  },
+}));
+
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("proof signer v2 supplied material", () => {
+  const vectors = [
+    {
+      proofSignerPrivateKey: "0x61e92aa2f68fab50076a57d60f9a65fd953242fd5b5a4ce0c05f3b8a1d4b6db",
+      proofSignerSalt: "0x788689130ce49a08cf4ad92ac95537b9629dc5dea84c26a3d56301466a943f3",
+      publicKey: "0x50556cf7cf2be020b0c9f17d54d6ab6107bf7d60c7d9df3e1794c43b979ca5c",
+      address: "0x434d027452fcf52ccbea3866f0bc3556d24d2d3f56aad18c1c55c9b82fb3dd0",
+    },
+    {
+      proofSignerPrivateKey: "0x7a22e19566683233efedfa4d595a6faf3ca1f62a5e74a3ee9fe631714fce6d8",
+      proofSignerSalt: "0x749be86411fe1f66ae6e9e4cbcf00a326d242efe8930673d199e5b2a358d3d8",
+      publicKey: "0x4eede9925b9650a768688df18e8614f4807843188093a3999a51679684d5068",
+      address: "0x2aa256ef7b02f3d6b90e3a90bc30b22bb527801c1bd9e8474fb8f367d6f103a",
+    },
+  ];
+
+  it.each(vectors)("uses the supplied scalar and salt for account $address without a seed or browser digest", async (vector) => {
+    const addresses: string[] = [];
+    vi.spyOn(RpcProvider.prototype, "getClassHashAt").mockImplementation(async (address) => {
+      addresses.push(String(address));
+      return "0x123";
+    });
+    vi.spyOn(RpcProvider.prototype, "getBlockNumber").mockResolvedValue(100);
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(async () => {
+      throw new Error("the funding integration must not hash recovery seed material");
+    });
+    let relayBody: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      relayBody = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ transaction_hash: "0x999" }));
+    });
+    const input: SubmitResidualRecoveryInput = {
+      proofSignerPrivateKey: vector.proofSignerPrivateKey,
+      proofSignerSalt: vector.proofSignerSalt,
+      chainId: "0x534e5f5345504f4c4941", rpcUrl: "https://rpc.example.invalid",
+      provingUrl: "https://prover.example.invalid", provingOhttpPolicy: "disabled",
+      paymasterAddress: "0x456", paymasterUrl: "https://relay.example.invalid",
+      privacyProofSignerClassHash: "0x123", minProvingDelayBlocks: 0,
+      proofProgramCall: { contractAddress: "0x789", entrypoint: "compile_residual_recovery_proof", calldata: ["0x1"] },
+      settlementCall: { contractAddress: "0xabc", entrypoint: "request_residual_recovery", calldata: ["0x2"] },
+    };
+    const inputHasNoRecoverySeed: "seedHex" extends keyof SubmitResidualRecoveryInput ? false : true = true;
+    expect(inputHasNoRecoverySeed).toBe(true);
+    await expect(submitResidualRecovery(input)).resolves.toEqual({ transactionHash: "0x999" });
+    expect(addresses).toEqual([vector.address]);
+    expect(relayBody).toMatchObject({ signer_address: vector.address, call: { entrypoint: "request_residual_recovery", calldata: ["0x2"] } });
+    expect(JSON.stringify(relayBody)).not.toContain(vector.proofSignerPrivateKey);
+    expect(JSON.stringify(relayBody)).not.toContain("seedHex");
+  });
+
+  it("deploys with the supplied v2 salt and the real Stark signer public key", async () => {
+    const vector = vectors[1];
+    const lookup = vi.spyOn(RpcProvider.prototype, "getClassHashAt");
+    lookup.mockRejectedValueOnce(new Error("not deployed")).mockRejectedValueOnce(new Error("not deployed")).mockResolvedValue("0x123");
+    vi.spyOn(RpcProvider.prototype, "getBlockNumber").mockResolvedValue(100);
+    let approval: unknown;
+    const assertWalletContext = vi.fn(async () => undefined);
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ transaction_hash: "0x999" })));
+    await expect(submitResidualRecovery({
+      provider: { request: async (request) => { approval = request; return { transaction_hash: "0xaaa" }; } },
+      proofSignerPrivateKey: vector.proofSignerPrivateKey, proofSignerSalt: vector.proofSignerSalt,
+      chainId: "0x534e5f5345504f4c4941", rpcUrl: "https://rpc.example.invalid",
+      provingUrl: "https://prover.example.invalid", provingOhttpPolicy: "disabled",
+      paymasterAddress: "0x456", paymasterUrl: "https://relay.example.invalid",
+      privacyProofSignerClassHash: "0x123", minProvingDelayBlocks: 0,
+      assertWalletContext,
+      proofProgramCall: { contractAddress: "0x789", entrypoint: "compile_residual_recovery_proof", calldata: ["0x1"] },
+      settlementCall: { contractAddress: "0xabc", entrypoint: "request_residual_recovery", calldata: ["0x2"] },
+    })).resolves.toEqual({ transactionHash: "0x999" });
+    expect(approval).toEqual({
+      type: "wallet_addInvokeTransaction",
+      params: { calls: [{ contract_address: constants.UDC.ADDRESS, entry_point: constants.UDC.ENTRYPOINT, calldata: ["0x123", vector.proofSignerSalt, "0x0", "0x1", vector.publicKey] }] },
+    });
+    expect(assertWalletContext).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("shouldRetryDirectProvingTransport", () => {

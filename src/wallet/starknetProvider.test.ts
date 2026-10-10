@@ -5,8 +5,10 @@ import {
   ensureWalletChain,
   fetchTransactionReceiptStatus,
   walletErrorMessage,
+  walletAuthDeploymentId,
 } from "./starknetProvider";
 import * as runtimeHttp from "../domain/runtimeHttp";
+import exampleDeployment from "../../public/deployment.example.json";
 
 const deployment = {
   chain_id: "0x534e5f5345504f4c4941",
@@ -16,6 +18,27 @@ const deployment = {
 
 describe("starknet provider safety", () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  it("returns the exact canonical nonzero deployment felt signed by wallet authorization", async () => {
+    const original = structuredClone(exampleDeployment);
+    original.contracts.exchange = "0x123";
+    original.contracts.privacy_deposit_bridge = "0x456";
+    const id = await walletAuthDeploymentId(original as never, 2);
+    const typed = await buildZylithWalletAuthTypedData({ walletAddress: "0xabc", chainId: original.chain_id, deploymentId: id, origin: "https://app.zylith.fi", messageVersion: 2 });
+    expect(id).toBe(typed.message.deployment);
+    expect(id).toMatch(/^0x[1-9a-f][0-9a-f]*$/);
+    expect(BigInt(id)).toBeGreaterThan(0n);
+    expect(BigInt(id)).toBeLessThan(0x800000000000011000000000000000000000000000000000000000000000001n);
+    for (const change of ["chain", "exchange", "bridge", "funding"]) {
+      const changed = structuredClone(original);
+      if (change === "chain") changed.chain_id = "0x1";
+      if (change === "exchange") changed.contracts.exchange = "0x789";
+      if (change === "bridge") changed.contracts.privacy_deposit_bridge = "0x789";
+      if (change === "funding") changed.funding.primary = "different";
+      expect(await walletAuthDeploymentId(changed as never, 2)).not.toBe(id);
+    }
+    await expect(walletAuthDeploymentId(original as never, 1 as never)).rejects.toThrow(/version/i);
+  });
 
   it("never accepts a chain switch unless the wallet reports the expected chain", async () => {
     const provider = {
@@ -33,7 +56,7 @@ describe("starknet provider safety", () => {
     const typedData = await buildZylithWalletAuthTypedData({
       walletAddress: "0x123",
       chainId: deployment.chain_id,
-      deploymentId: "deployment-v2",
+      deploymentId: "0x123",
       origin: "app.zylith.fi",
       messageVersion: 2,
     });
@@ -45,7 +68,7 @@ describe("starknet provider safety", () => {
       buildZylithWalletAuthTypedData({
         walletAddress: "0x123",
         chainId: deployment.chain_id,
-        deploymentId: "deployment-v2",
+        deploymentId: "0x123",
         origin: "https://app.zylith.fi/is-not-a-shortstring",
         messageVersion: 2,
       }),
@@ -62,6 +85,24 @@ describe("starknet provider safety", () => {
     await expect(ensureWalletChain(provider, deployment)).rejects.toThrow(
       /internal wallet failure/i,
     );
+  });
+
+  it("rechecks runtime ownership before a chain-switch wallet prompt", async () => {
+    const changed = new Error("wallet session changed");
+    let checks = 0;
+    const assertCurrent = vi.fn(() => {
+      checks += 1;
+      if (checks === 3) throw changed;
+    });
+    const provider = {
+      request: vi.fn(async ({ type }: { type?: string }) => {
+        if (type === "wallet_switchStarknetChain") return true;
+        return "0x1";
+      }),
+    };
+
+    await expect(ensureWalletChain(provider, deployment, assertCurrent)).rejects.toBe(changed);
+    expect(provider.request.mock.calls.some(([request]) => request.type === "wallet_switchStarknetChain")).toBe(false);
   });
 
   it("rejects cyclic wallet chain responses without overflowing", async () => {

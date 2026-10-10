@@ -14,7 +14,13 @@ import {
   toAtomicStr,
   MarketDataEngine,
 } from "./common.js";
-import { ExchangeHttpError, ExchangeRejectedError, ZylithExchangeClient, transitionWindows } from "./exchange.js";
+import {
+  ExchangeHttpError,
+  ExchangeRejectedError,
+  ZylithExchangeClient,
+  openSealedResponse,
+  transitionWindows,
+} from "./exchange.js";
 
 const pair = {
   pair_id: "ETH/USDC",
@@ -22,6 +28,26 @@ const pair = {
   quote_asset_id: "USDC",
   min_order_amount: "0.01",
   enabled: true,
+};
+
+const testHex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+const testU32be = (value: number) => {
+  const encoded = new Uint8Array(4);
+  new DataView(encoded.buffer).setUint32(0, value, false);
+  return encoded;
+};
+const testFrame = (parts: Uint8Array[]) => {
+  const encoded = new Uint8Array(4 + parts.reduce((total, part) => total + 4 + part.length, 0));
+  const view = new DataView(encoded.buffer);
+  view.setUint32(0, parts.length, false);
+  let offset = 4;
+  for (const part of parts) {
+    view.setUint32(offset, part.length, false);
+    offset += 4;
+    encoded.set(part, offset);
+    offset += part.length;
+  }
+  return encoded;
 };
 
 afterEach(() => {
@@ -548,22 +574,93 @@ describe("@zylith/sdk exchange", () => {
     }).referencePrice("ETH/USDC")).rejects.toThrow(/no reference price/);
   });
 
+  it("accepts only the exact active X25519 execution-key registry", async () => {
+    const profile = "DHKEM(X25519,HKDF-SHA256)/HKDF-SHA256/ChaCha20Poly1305/base";
+    const key = {
+      key_id: "active",
+      algorithm: profile,
+      public_key: "4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a",
+    };
+    const registry = { keys: [key] };
+    const client = (body: unknown) => new ZylithExchangeClient({
+      operatorUrl: "https://operator.example",
+      indexerUrl: "https://indexer.example",
+      fetchImpl: vi.fn(async () => json(body)) as unknown as typeof fetch,
+    });
+
+    await expect(client(registry).executionKeys()).resolves.toEqual(registry);
+    for (const malformed of [
+      null,
+      {},
+      { keys: [] },
+      { keys: [key, { ...key, key_id: "next" }] },
+      ...(["key_id", "algorithm", "public_key"] as const).map((field) => {
+        const missing = { ...key } as Record<string, unknown>;
+        delete missing[field];
+        return { keys: [missing] };
+      }),
+      { keys: [{ ...key, algorithm: "X25519" }] },
+      { keys: [{ ...key, public_key: "00".repeat(32) }] },
+      { keys: [{ ...key, public_key: key.public_key.toUpperCase() }] },
+      { keys: [{ ...key, public_key: "01" }] },
+      ...["UPPER", "-bad", "bad-", "bad.dot", "bad:colon"].map((key_id) => ({ keys: [{ ...key, key_id }] })),
+      ...[
+        `01${"00".repeat(31)}`,
+        `ec${"ff".repeat(30)}7f`,
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        `ed${"ff".repeat(30)}7f`,
+        `ee${"ff".repeat(30)}7f`,
+        `${"00".repeat(31)}80`,
+      ].map((public_key) => ({ keys: [{ ...key, public_key }] })),
+      { keys: [{ ...key, extra: true }] },
+      { ...registry, extra: true },
+    ]) await expect(client(malformed).executionKeys()).rejects.toThrow(/malformed execution-key registry/i);
+  });
+
   it("opens sealed answers, surfaces refusals and redacts operator errors", async () => {
     const responseKey = "ab".repeat(32);
-    const sealed = { version: 2, digest: "d1", shares: [] };
-    const seal = async (answer: unknown, digest = sealed.digest) => {
-      const key = await crypto.subtle.importKey("raw", Uint8Array.from({ length: 32 }, () => 0xab), "AES-GCM", false, ["encrypt"]);
+    const sealed = {
+      version: 3 as const,
+      key_id: "active",
+      digest: "d1".repeat(32),
+      encapsulated_key: "4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a",
+      ciphertext: "cd".repeat(4_112),
+    };
+    const seal = async (answer: unknown, digest = sealed.digest, plaintextOverride?: string) => {
+      const utf8 = (value: string) => new TextEncoder().encode(value);
+      const digestBytes = Uint8Array.from(digest.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
+      const salt = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
       const nonce = Uint8Array.from({ length: 12 }, (_, index) => index);
-      const plaintext = new TextEncoder().encode(JSON.stringify(answer).padEnd(1024, " "));
-      const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: new TextEncoder().encode(digest) }, key, plaintext));
-      const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-      return json({ nonce: hex(nonce), ciphertext: hex(ciphertext) });
+      const version = testU32be(3);
+      const size = testU32be(16_384);
+      const root = await crypto.subtle.importKey("raw", Uint8Array.from({ length: 32 }, () => 0xab), "HKDF", false, ["deriveKey"]);
+      const key = await crypto.subtle.deriveKey(
+        {
+          name: "HKDF",
+          hash: "SHA-256",
+          salt,
+          info: testFrame([utf8("zylith-response-key-hkdf-sha256-v3"), version, size, digestBytes]),
+        },
+        root,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt"],
+      );
+      const plaintext = utf8((plaintextOverride ?? JSON.stringify(answer)).padEnd(16_384, " "));
+      const ciphertext = new Uint8Array(await crypto.subtle.encrypt({
+        name: "AES-GCM",
+        iv: nonce,
+        additionalData: testFrame([utf8("zylith-response-aad-v3"), version, size, digestBytes, salt]),
+      }, key, plaintext));
+      return json({ version: 3, salt: testHex(salt), nonce: testHex(nonce), ciphertext: testHex(ciphertext) });
     };
     const answer = { ok: true, orders: [{ order_id: "0x1", status: "unknown", cancel_requested: false, events: [] }], withdrawals: [] };
     const responses = [
       await seal(answer),
       await seal({ ok: false, error: "rejected 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" }),
       await seal(answer, "another request"),
+      await seal(undefined, sealed.digest, "private-response-material-that-is-not-json"),
       json({ error: "the request does not open" }, 400),
     ];
     const fetchImpl = vi.fn(async () => responses.shift()!);
@@ -574,6 +671,79 @@ describe("@zylith/sdk exchange", () => {
     await expect(refused).rejects.toBeInstanceOf(ExchangeRejectedError);
     await expect(refused).rejects.not.toThrow(/1234567890abcdef/);
     await expect(client.status(sealed, responseKey)).rejects.toThrow(/does not open/);
+    const malformed = client.status(sealed, responseKey);
+    await expect(malformed).rejects.toThrow(/answer is malformed/i);
+    await expect(malformed).rejects.not.toThrow(/private-response-material/);
     await expect(client.submit(sealed, responseKey)).rejects.toBeInstanceOf(ExchangeHttpError);
+  });
+
+  it("matches the frozen response-v3 HKDF and AAD vector", async () => {
+    const utf8 = (value: string) => new TextEncoder().encode(value);
+    const rootBytes = Uint8Array.from({ length: 32 }, () => 0xab);
+    const digest = Uint8Array.from({ length: 32 }, () => 0xd1);
+    const salt = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
+    const version = testU32be(3);
+    const size = testU32be(16_384);
+    const info = testFrame([utf8("zylith-response-key-hkdf-sha256-v3"), version, size, digest]);
+    const aad = testFrame([utf8("zylith-response-aad-v3"), version, size, digest, salt]);
+    const root = await crypto.subtle.importKey("raw", rootBytes, "HKDF", false, ["deriveBits"]);
+    const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, root, 256));
+    const aadDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", aad));
+    expect(testHex(derived)).toBe("ea8e968545afac9bc818918aa846b762c1bd3993270c3433be2c0500647d6c1a");
+    expect(testHex(aadDigest)).toBe("a30c16572c02911878dbaf83891deef37391361916baebb587c15a8c6e54a61f");
+  });
+
+  it("rejects legacy, noncanonical, truncated, and extended response wires", async () => {
+    const digest = "d1".repeat(32);
+    const current = {
+      version: 3 as const,
+      salt: "ab".repeat(32),
+      nonce: "cd".repeat(12),
+      ciphertext: "ef".repeat(16_400),
+    };
+    for (const malformed of [
+      { nonce: current.nonce, ciphertext: current.ciphertext },
+      ...(["version", "salt", "nonce", "ciphertext"] as const).map((field) => {
+        const missing = { ...current } as Record<string, unknown>;
+        delete missing[field];
+        return missing;
+      }),
+      { ...current, version: 2 },
+      { ...current, salt: current.salt.toUpperCase() },
+      { ...current, nonce: `${current.nonce}00` },
+      { ...current, ciphertext: current.ciphertext.slice(2) },
+      { ...current, ciphertext: `${current.ciphertext}00` },
+      { ...current, extra: true },
+    ]) await expect(openSealedResponse("ab".repeat(32), digest, malformed as never)).rejects.toThrow(/malformed sealed response/i);
+  });
+
+  it("rejects legacy, noncanonical, and extended sealed request wires before transport", async () => {
+    const fetchImpl = vi.fn();
+    const client = new ZylithExchangeClient({
+      operatorUrl: "https://operator.example",
+      indexerUrl: "https://indexer.example",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const current = {
+      version: 3 as const,
+      key_id: "active",
+      digest: "ab".repeat(32),
+      encapsulated_key: "4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a",
+      ciphertext: "ef".repeat(4_112),
+    };
+    for (const malformed of [
+      { version: 2, digest: current.digest, shares: [] },
+      ...(["version", "key_id", "digest", "encapsulated_key", "ciphertext"] as const).map((field) => {
+        const missing = { ...current } as Record<string, unknown>;
+        delete missing[field];
+        return missing;
+      }),
+      { ...current, key_id: "UPPER" },
+      { ...current, digest: current.digest.toUpperCase() },
+      { ...current, encapsulated_key: `01${"00".repeat(31)}` },
+      { ...current, ciphertext: `${current.ciphertext}00` },
+      { ...current, extra: true },
+    ]) await expect(client.submit(malformed as never, "ab".repeat(32))).rejects.toThrow(/malformed sealed request/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

@@ -42,6 +42,10 @@ export default defineConfig({
   plugins: [react()],
   build: {
     rolldownOptions: {
+      input: {
+        main: "index.html",
+        walletWorkerBenchmark: "browser-tests/wallet-worker-benchmark.html",
+      },
       output: {
         codeSplitting: {
           groups: [

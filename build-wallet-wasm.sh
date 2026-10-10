@@ -6,6 +6,12 @@ OUT_DIR="${ZYLITH_WALLET_WASM_OUT_DIR:-${ROOT_DIR}/public/wallet}"
 PROFILE="${ZYLITH_WALLET_WASM_PROFILE:-release}"
 TARGET_DIR="${ROOT_DIR}/target/wasm32-unknown-unknown/${PROFILE}"
 WASM_FILE="${TARGET_DIR}/zylith_wallet_wasm.wasm"
+USER_HOME_DIR="${HOME:?HOME must be set to build the wallet WASM package}"
+
+# Rust otherwise embeds absolute workspace and Cargo registry paths in panic/debug metadata. Keep
+# checked-in artifacts reproducible and free of builder-specific home-directory information.
+WALLET_REMAP_FLAG="--remap-path-prefix=${USER_HOME_DIR}=/zylith-build-home"
+export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }${WALLET_REMAP_FLAG}"
 
 if [[ -d "${HOME}/.cargo/bin" ]]; then
   export PATH="${HOME}/.cargo/bin:${PATH}"

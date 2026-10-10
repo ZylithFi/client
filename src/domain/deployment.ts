@@ -127,6 +127,10 @@ export type DeploymentConfig = {
     virtual_program_hash: string;
     starknet_os_config_hash: string;
     proof_account_address: string;
+    proof_account_class_hash: string;
+    transition_proof_program_class_hash: string;
+    withdrawal_proof_program_class_hash: string;
+    residual_recovery_proof_program_class_hash: string;
     settlement_account_address: string;
     proof_validity_blocks: number;
     config_locked_after_deploy: boolean;
@@ -219,7 +223,7 @@ export function assertDeploymentManifest(value: unknown): asserts value is Deplo
   ) {
     throw new Error("Deployment manifest proof configuration is not locked");
   }
-  for (const field of ["transition_proof_program_address", "withdrawal_proof_program_address", "residual_recovery_proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "settlement_account_address"]) {
+  for (const field of ["transition_proof_program_address", "withdrawal_proof_program_address", "residual_recovery_proof_program_address", "virtual_program_hash", "starknet_os_config_hash", "proof_account_address", "proof_account_class_hash", "transition_proof_program_class_hash", "withdrawal_proof_program_class_hash", "residual_recovery_proof_program_class_hash", "settlement_account_address"]) {
     if (!normalizeConfiguredFelt(proof[field])) {
       throw new Error(`Deployment manifest proof ${field} must be a nonzero felt`);
     }
@@ -325,8 +329,7 @@ export function assertBrowserNetworkPolicy(
 }
 
 function validProofVersion(value: unknown): boolean {
-  return (typeof value === "string" && /^PROOF[1-9][0-9]{0,3}$/.test(value))
-    || Boolean(normalizeConfiguredFelt(value));
+  return value === "PROOF2";
 }
 
 function validHttpsUrl(value: unknown): boolean {
@@ -485,12 +488,20 @@ function canonicalJson(value: unknown): string {
     .join(",")}}`;
 }
 
-/** the registry fingerprints the deployed manifest pins; placeholders pin nothing. */
+/** the deployed manifest pins one or two distinct canonical one-key registries. */
 export function pinnedRegistryFingerprints(deployment: Pick<DeploymentConfig, "funding">): string[] {
   const rail = deployment.funding.starknet_privacy;
-  return [rail?.ingress_key_registry_fingerprint, rail?.ingress_key_registry_next_fingerprint]
-    .map((fingerprint) => (fingerprint ?? "").trim().toLowerCase())
-    .filter((fingerprint) => /^[0-9a-f]{64}$/.test(fingerprint) && /[1-9a-f]/.test(fingerprint));
+  const current = rail?.ingress_key_registry_fingerprint;
+  const next = rail?.ingress_key_registry_next_fingerprint;
+  if (current === undefined) {
+    if (next !== undefined) throw new Error("The execution key fingerprint is missing its current pin.");
+    return [];
+  }
+  const canonical = (pin: unknown) => typeof pin === "string" && /^[0-9a-f]{64}$/.test(pin) && /[1-9a-f]/.test(pin);
+  if (!canonical(current)) throw new Error("The current execution key fingerprint is malformed.");
+  if (next === undefined) return [current];
+  if (!canonical(next) || next === current) throw new Error("The next execution key fingerprint must be canonical and distinct.");
+  return [current, next];
 }
 
 /**
@@ -507,6 +518,7 @@ export function assertPinnedExecutionKeys(fingerprint: string, deployment: Pick<
 }
 
 let deploymentPromise: Promise<DeploymentConfig> | null = null;
+let deploymentRefreshPromise: Promise<DeploymentConfig> | null = null;
 
 export function loadDeployment(): Promise<DeploymentConfig> {
   deploymentPromise ??= requestDeployment().catch((error: unknown) => {
@@ -516,10 +528,142 @@ export function loadDeployment(): Promise<DeploymentConfig> {
   return deploymentPromise;
 }
 
-async function requestDeployment(): Promise<DeploymentConfig> {
+/**
+ * refreshes a stale session's manifest only when its current pins do not include the active key.
+ * all concurrent callers share one network request; the session and normal cache change only
+ * after the trusted manifest validates, preserves deployment context, and pins this key.
+ */
+export async function deploymentForExecutionKey(
+  fingerprint: string,
+  current: DeploymentConfig,
+  accept: (deployment: DeploymentConfig) => void,
+): Promise<DeploymentConfig> {
+  if (!/^[0-9a-f]{64}$/.test(fingerprint) || !/[1-9a-f]/.test(fingerprint)) {
+    throw new Error("The operator returned a malformed execution-key registry fingerprint.");
+  }
+  if (pinnedRegistryFingerprints({ funding: current.funding }).includes(fingerprint)) return current;
+
+  deploymentRefreshPromise ??= requestDeployment(true).finally(() => {
+    deploymentRefreshPromise = null;
+  });
+  const refreshed = await deploymentRefreshPromise;
+  assertUnchangedDeploymentContext(current, refreshed);
+  if (!pinnedRegistryFingerprints({ funding: refreshed.funding }).includes(fingerprint)) {
+    throw new Error("The operator's execution keys do not match this deployment. Private requests are disabled.");
+  }
+  const trusted = withRefreshedExecutionKeyPins(current, refreshed);
+  // the wallet supplies a generation-checked acceptor. if it throws, neither the live session nor
+  // this module's cache is changed. the callback and cache assignment are synchronous, so a
+  // suspend/new-generation event cannot interleave between them.
+  accept(trusted);
+  deploymentPromise = Promise.resolve(trusted);
+  return trusted;
+}
+
+function assertUnchangedDeploymentContext(current: DeploymentConfig, refreshed: DeploymentConfig): void {
+  if (canonicalJson(deploymentSecurityIdentity(current)) !== canonicalJson(deploymentSecurityIdentity(refreshed))) {
+    throw new Error("The deployment context changed while refreshing execution keys.");
+  }
+}
+
+/**
+ * the immutable identity used to authorize a pin-only refresh. release metadata, governance
+ * roles, and runtime limits are deliberately absent: they are mutable manifest data and are not
+ * imported by this path. chain/deployment addresses, public service endpoints, market identity,
+ * funding cryptography, and proof-verifier identity must remain exact.
+ */
+export function deploymentSecurityIdentity(value: DeploymentConfig) {
+  const rail = value.funding.starknet_privacy!;
+  const felt = (candidate: string | undefined) => candidate === undefined ? null : `0x${BigInt(candidate).toString(16)}`;
+  return {
+    network: value.network,
+    chain_id: felt(value.chain_id),
+    rpc_url: value.rpc_url,
+    contracts: {
+      commitment_registry: felt(value.contracts.commitment_registry),
+      privacy_deposit_bridge: felt(value.contracts.privacy_deposit_bridge),
+      ekubo_external_match_router: felt(value.contracts.ekubo_external_match_router),
+      exchange: felt(value.contracts.exchange),
+    },
+    market_registry: {
+      schema_version: value.market_registry.schema_version,
+      registry_hash: value.market_registry.registry_hash,
+      network: value.market_registry.network,
+      chain_id: felt(value.market_registry.chain_id),
+    },
+    funding: {
+      primary: value.funding.primary,
+      privacy_pool: felt(rail.privacy_pool),
+      privacy_pool_class_hash: felt(rail.privacy_pool_class_hash),
+      bridge_adapter: felt(rail.bridge_adapter),
+      proving_url: rail.proving_url,
+      proving_ohttp_policy: rail.proving_ohttp_policy,
+      paymaster_address: felt(rail.paymaster_address),
+      paymaster_url: rail.paymaster_url,
+      proof_signer_class_hash: felt(rail.proof_signer_class_hash),
+      sdk_package: rail.sdk_package,
+      sdk_version: rail.sdk_version,
+      min_proving_delay_blocks: rail.min_proving_delay_blocks,
+    },
+    proof: {
+      scheme: value.proof.scheme,
+      proof_version: value.proof.proof_version,
+      transition_proof_program_address: felt(value.proof.transition_proof_program_address),
+      withdrawal_proof_program_address: felt(value.proof.withdrawal_proof_program_address),
+      residual_recovery_proof_program_address: felt(value.proof.residual_recovery_proof_program_address),
+      virtual_program_hash: felt(value.proof.virtual_program_hash),
+      starknet_os_config_hash: felt(value.proof.starknet_os_config_hash),
+      proof_account_address: felt(value.proof.proof_account_address),
+      proof_account_class_hash: felt(value.proof.proof_account_class_hash),
+      transition_proof_program_class_hash: felt(value.proof.transition_proof_program_class_hash),
+      withdrawal_proof_program_class_hash: felt(value.proof.withdrawal_proof_program_class_hash),
+      residual_recovery_proof_program_class_hash: felt(value.proof.residual_recovery_proof_program_class_hash),
+      settlement_account_address: felt(value.proof.settlement_account_address),
+      config_locked_after_deploy: value.proof.config_locked_after_deploy,
+    },
+  };
+}
+
+export async function deploymentManifestIdentity(value: DeploymentConfig): Promise<string> {
+  const encoded = new TextEncoder().encode(canonicalJson(deploymentSecurityIdentity(value)));
+  let digest: Uint8Array<ArrayBuffer> | undefined;
+  try {
+    digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
+    return `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  } finally {
+    encoded.fill(0);
+    digest?.fill(0);
+  }
+}
+
+function withRefreshedExecutionKeyPins(current: DeploymentConfig, refreshed: DeploymentConfig): DeploymentConfig {
+  const currentRail = current.funding.starknet_privacy!;
+  const refreshedRail = refreshed.funding.starknet_privacy!;
+  const nextRail = {
+    ...currentRail,
+    ingress_key_registry_fingerprint: refreshedRail.ingress_key_registry_fingerprint,
+  };
+  if (refreshedRail.ingress_key_registry_next_fingerprint === undefined) {
+    delete nextRail.ingress_key_registry_next_fingerprint;
+  } else {
+    nextRail.ingress_key_registry_next_fingerprint = refreshedRail.ingress_key_registry_next_fingerprint;
+  }
+  return {
+    ...current,
+    funding: {
+      ...current.funding,
+      starknet_privacy: nextRail,
+    },
+  };
+}
+
+async function requestDeployment(bypassHttpCache = false): Promise<DeploymentConfig> {
   let response: Response;
   try {
-    response = await fetchWithTimeout("/deployment.json", { headers: { accept: "application/json" } }, DEPLOYMENT_MANIFEST_TIMEOUT_MS);
+    response = await fetchWithTimeout("/deployment.json", {
+      headers: { accept: "application/json" },
+      ...(bypassHttpCache ? { cache: "no-store" as const } : {}),
+    }, DEPLOYMENT_MANIFEST_TIMEOUT_MS);
   } catch {
     throw new Error("Deployment manifest is unavailable. Check your connection and retry.");
   }

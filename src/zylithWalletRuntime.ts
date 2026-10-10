@@ -21,7 +21,7 @@ import type {
   WalletOrder,
   WithdrawableNote,
 } from "@zylith/sdk";
-import { ExchangeHttpError, ExchangeRejectedError, readSdkJsonResponse, transitionWindows } from "@zylith/sdk";
+import { ExchangeHttpError, ExchangeRejectedError, readSdkResponseText, transitionWindows } from "@zylith/sdk";
 import {
   connectedStarknetAddress,
   notifyWalletRuntimeChanged,
@@ -33,7 +33,8 @@ import {
   BACKUP_URL,
   type DeploymentConfig,
   type PairConfig,
-  assertPinnedExecutionKeys,
+  deploymentManifestIdentity,
+  deploymentForExecutionKey,
   enabledPairs,
   exchange,
   loadDeployment,
@@ -43,7 +44,7 @@ import {
   markDepositRecordFailed,
   pendingDepositFailureReason,
 } from "./domain/depositConfirmationState";
-import { normalizeFeltForComparison, normalizeStrictFelt, requiredNonZeroFelt, requiredString } from "./domain/felt";
+import { STARKNET_FIELD_PRIME, normalizeFeltForComparison, normalizeStrictFelt, requiredNonZeroFelt, requiredString } from "./domain/felt";
 import {
   fundingRailTokenAddress,
   selectedDepositFundingRail,
@@ -58,30 +59,37 @@ import { padRecoverySnapshotPayload } from "./domain/sizeClassPadding";
 import { orderQuoteValue } from "./domain/tradeIntent";
 import { userFacingErrorMessage } from "./domain/userFacingErrors";
 import {
-  createIndexedDbWalletDeviceKeyStore,
-  createWalletDeviceSessionManager,
-  type WalletDeviceSessionMetadata,
+  WALLET_DEVICE_SESSION_DEFAULT_TTL_MS,
+  createWalletDeviceRecordStore,
+  type WalletDeviceRecordStore,
 } from "./domain/walletDeviceSession";
 import {
-  type EncryptedLocalStore,
   type VaultRecord,
   type WalletSignatureMessageVersion,
   type WalletSignatureVaultContext,
   type WalletSignatureVaultRecord,
-  decryptLocalStore,
-  decryptSeedWithWalletSignature,
-  encryptLocalStore,
-  encryptSeedWithWalletSignature,
+  requireLocalStoreCompatibility,
   isWalletSignatureVaultRecord,
   stableJsonStringify,
-  walletSignatureVaultAuthToken,
-  walletSignatureVaultId,
-  walletSignatureVaultMetadataMatches,
 } from "./domain/walletLocalCrypto";
+import {
+  WalletCryptoClient,
+  WalletCryptoError,
+  createWalletCryptoClient,
+  type SignatureVaultPreparation,
+  type WalletCryptoClientOptions,
+} from "./domain/walletCryptoClient";
+import {
+  createWalletSignatureVaultStore,
+  type WalletSignatureVaultStore,
+} from "./domain/walletSignatureVaultStore";
+import type { WalletWorkerContext } from "./workers/walletCryptoProtocol";
+import { WALLET_KEY_SCHEDULE_VERSION, WalletMigrationRequiredError, parseWalletJson, requireWalletKeyScheduleVersion } from "./domain/walletVersion";
 import { proofSubmissionStarted } from "./integrations/starknetPrivacyErrors";
 import {
   type TransactionReceiptStatus,
   buildZylithWalletAuthTypedData,
+  connectedProviderAddress,
   ensureWalletChain,
   executeStarknetWalletCall,
   fetchTransactionReceiptStatus,
@@ -95,38 +103,84 @@ import {
 export { validateWalletChainMatch } from "./wallet/starknetProvider";
 
 type WalletWasmModule = {
-  default?: () => Promise<void>;
-  zylith_wallet_generate_seed_hex: () => string;
-  zylith_wallet_derive_public_config: (seedHex: string) => string;
+  default?: () => Promise<unknown>;
   zylith_wallet_market_ids: (inputJson: string) => string;
-  zylith_wallet_recovery_auth_tag: (seedHex: string) => string;
-  zylith_wallet_build_deposit_submission_plan: (inputJson: string) => string;
-  zylith_wallet_build_order_request: (inputJson: string) => string;
-  zylith_wallet_build_cancel_request: (inputJson: string) => string;
-  zylith_wallet_build_withdraw_request: (inputJson: string) => string;
-  zylith_wallet_build_status_requests: (inputJson: string) => string;
   zylith_wallet_registry_fingerprint: (registryJson: string) => string;
   zylith_wallet_transition_output_root: (inputJson: string) => string;
   zylith_wallet_recover_order_outputs: (inputJson: string) => string;
   zylith_wallet_recover_order_residuals: (inputJson: string) => string;
   zylith_wallet_quote_residual_recovery: (inputJson: string) => string;
-  zylith_wallet_build_residual_recovery: (inputJson: string) => string;
   zylith_wallet_build_note_membership: (inputJson: string) => string;
   zylith_wallet_note_summary: (noteJson: string) => string;
-  zylith_wallet_create_recovery_snapshot: (inputJson: string) => string;
-  zylith_wallet_decrypt_recovery_artifact: (seedHex: string, artifactJson: string) => string;
-  zylith_wallet_sign_strk20_exit_claim: (inputJson: string) => string;
 };
 
-/** a sealed request and the one-time key its answer opens with. */
+export interface WalletCryptoPort {
+  unlockFromDeviceSession(context: WalletWorkerContext): Promise<unknown>;
+  revokeDeviceSession(context: WalletWorkerContext): Promise<void>;
+  deriveSignatureVaultCredentials(signature: unknown, context: WalletWorkerContext): Promise<{ walletAuthId: string; authToken: string }>;
+  prepareSignatureVaultCreate(signature: unknown, context: WalletWorkerContext, rememberDevice?: boolean, deviceTtlMs?: number): Promise<SignatureVaultPreparation>;
+  prepareSignatureVaultOpen(signature: unknown, vaultRaw: string, context: WalletWorkerContext, rememberDevice?: boolean, deviceTtlMs?: number): Promise<SignatureVaultPreparation>;
+  commitSignatureVault(preparation: SignatureVaultPreparation): Promise<unknown>;
+  abortSignatureVault(preparation: SignatureVaultPreparation): Promise<void>;
+  finalizeSignatureVault(preparation: SignatureVaultPreparation, rememberDevice?: boolean): Promise<{ remembered: boolean }>;
+  publicConfig(): Promise<string>;
+  recoveryAuthTag(): Promise<string>;
+  deriveProofSigner(inputJson: string): Promise<string>;
+  encryptLocalState(inputJson: string): Promise<string>;
+  decryptLocalState(inputJson: string): Promise<string>;
+  buildDepositSubmissionPlan(inputJson: string): Promise<string>;
+  buildOrderRequest(inputJson: string): Promise<string>;
+  buildCancelRequest(inputJson: string): Promise<string>;
+  buildStatusRequests(inputJson: string): Promise<string>;
+  buildWithdrawRequest(inputJson: string): Promise<string>;
+  buildResidualRecovery(inputJson: string): Promise<string>;
+  createRecoverySnapshot(inputJson: string): Promise<string>;
+  decryptRecoveryArtifact(inputJson: string): Promise<string>;
+  signStrk20ExitClaim(inputJson: string): Promise<string>;
+  lock(): Promise<void>;
+  dispose(): void;
+}
+
+export interface ZylithWalletRuntimeOptions {
+  walletCryptoClientFactory?: (options: Pick<WalletCryptoClientOptions, "deviceRecordStore" | "onInvalidated">) => WalletCryptoPort;
+  deviceRecordStore?: WalletDeviceRecordStore;
+  signatureVaultStore?: WalletSignatureVaultStore;
+  now?: () => number;
+}
+
+/** a sealed request and the per-request root from which each answer key is derived. */
 type SealedBuild = { sealed: SealedRequest; response_key: string };
 
+const HPKE_PROFILE = "DHKEM(X25519,HKDF-SHA256)/HKDF-SHA256/ChaCha20Poly1305/base" as const;
+const X25519_FIELD_PRIME = `ed${"ff".repeat(30)}7f`;
+const X25519_LOW_ORDER_KEYS = new Set([
+  `01${"00".repeat(31)}`,
+  `ec${"ff".repeat(30)}7f`,
+  "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+  "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+]);
+type ExecutionKeyRegistry = {
+  keys: Array<{ key_id: string; algorithm: typeof HPKE_PROFILE; public_key: string }>;
+};
+
 export type WalletPublicConfig = {
+  key_schedule_version: 2;
   account_id: string;
   spend_authority: string;
-  note_recognition_public_key: string;
+  owner_tag: string;
   withdraw_authority: string;
 };
+
+export function requireWalletPublicConfig(value: unknown): WalletPublicConfig {
+  requireWalletKeyScheduleVersion(value);
+  if (Object.keys(value).length !== 5
+    || Object.keys(value).some((key) => !["key_schedule_version", "account_id", "spend_authority", "owner_tag", "withdraw_authority"].includes(key))
+    || typeof value.account_id !== "string" || !/^[0-9a-f]{64}$/.test(value.account_id)
+    || ![value.spend_authority, value.owner_tag, value.withdraw_authority].every(isNonZeroFelt)) {
+    throw new WalletMigrationRequiredError();
+  }
+  return value as WalletPublicConfig;
+}
 
 /** a note as the exchange commits to it. */
 type NoteFields = {
@@ -291,6 +345,7 @@ export type StoredOrder = WalletOrder & {
 
 export type WalletState = {
   version: 2;
+  key_schedule_version: 2;
   notes: WalletNote[];
   orders: StoredOrder[];
   /** the last transition whose outputs were scanned. */
@@ -298,17 +353,22 @@ export type WalletState = {
 };
 
 type RecoveryArtifact = {
+  key_schedule_version: 2;
   artifact_id: string;
   account_id: string;
   kind: "Snapshot" | "WalletEvent";
   sequence: number;
   created_at_unix_ms: number;
-  payload: { algorithm: string; nonce: string; ciphertext: string };
+  payload: { key_schedule_version: 2; algorithm: string; nonce: string; ciphertext: string };
 };
 
 function isRecoveryArtifact(value: unknown): value is RecoveryArtifact {
   if (!isRecord(value) || !isRecord(value.payload)) return false;
-  return typeof value.artifact_id === "string"
+  return value.key_schedule_version === WALLET_KEY_SCHEDULE_VERSION
+    && value.payload.key_schedule_version === WALLET_KEY_SCHEDULE_VERSION
+    && Object.keys(value).every((key) => ["key_schedule_version", "artifact_id", "account_id", "kind", "sequence", "created_at_unix_ms", "payload"].includes(key))
+    && Object.keys(value.payload).every((key) => ["key_schedule_version", "algorithm", "nonce", "ciphertext"].includes(key))
+    && typeof value.artifact_id === "string"
     && /^[0-9a-f]{64}$/i.test(value.artifact_id)
     && typeof value.account_id === "string"
     && /^[0-9a-f]{64}$/i.test(value.account_id)
@@ -328,6 +388,10 @@ function isRecoveryArtifact(value: unknown): value is RecoveryArtifact {
 export function requireRecoveryArtifactHistory(value: unknown, accountId: string): RecoveryArtifact[] {
   if (!isRecord(value) || !Array.isArray(value.artifacts) || value.artifacts.length > 64) {
     throw new Error("The recovery service returned a malformed snapshot list.");
+  }
+  for (const artifact of value.artifacts) {
+    requireWalletKeyScheduleVersion(artifact);
+    requireWalletKeyScheduleVersion(artifact.payload);
   }
   const snapshots = value.artifacts
     .filter((artifact) => isRecoveryArtifact(artifact) && artifact.kind === "Snapshot" && artifact.account_id === accountId)
@@ -357,6 +421,8 @@ export function requireWalletSignatureVaultBundle(
   if (!isRecord(value)) {
     throw new Error("The wallet vault service returned a malformed response.");
   }
+  requireWalletKeyScheduleVersion(value.vault);
+  if (value.vault.version !== 3) throw new WalletMigrationRequiredError();
   const allowed = new Set(["wallet_auth_id", "vault", "updated_at_unix_ms"]);
   if (
     Object.keys(value).some((key) => !allowed.has(key))
@@ -376,7 +442,25 @@ class RecoveryStateConflictError extends Error {
   }
 }
 
+class WalletSessionChangedError extends Error {
+  constructor() {
+    super("Wallet session changed. Retry.");
+    this.name = "WalletSessionChangedError";
+  }
+}
+
+class ExitClaimAuthorizationError extends Error {
+  constructor() {
+    super("Private withdrawal authorization failed. Retry.");
+    this.name = "ExitClaimAuthorizationError";
+  }
+}
+
 export function recoverySnapshotStateForScope(payload: unknown, targetScope: string): WalletState | null {
+  requireWalletKeyScheduleVersion(payload);
+  requireWalletKeyScheduleVersion(payload.state);
+  if (payload.version !== 2 || !isRecord(payload.state) || payload.state.version !== 2) throw new WalletMigrationRequiredError();
+  if (Object.keys(payload).some((key) => !["version", "key_schedule_version", "scope", "state", "padding"].includes(key))) throw new WalletMigrationRequiredError();
   if (
     !isRecord(payload)
     || payload.version !== 2
@@ -388,7 +472,7 @@ export function recoverySnapshotStateForScope(payload: unknown, targetScope: str
     );
   }
   // recovery history is seed-scoped, while wallet state is deployment-scoped. a redeployment
-  // therefore leaves valid older snapshots in the same authenticated history. They remain the
+  // therefore leaves valid older snapshots in the same authenticated history. they remain the
   // append-only history head but must never be merged into the current exchange's local state.
   if (payload.scope !== targetScope) return null;
   return requireWalletState(payload.state);
@@ -596,46 +680,36 @@ function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-export function assertSealedBuild(value: unknown): asserts value is SealedBuild {
+export function assertSealedBuild(
+  value: unknown,
+  expectedKeyId?: string,
+  operationFields: readonly string[] = [],
+): asserts value is SealedBuild {
   if (!isRecord(value) || !isRecord(value.sealed)) {
     throw new Error("The wallet produced a malformed private request.");
   }
+  const topLevelFields = new Set(["sealed", "response_key", ...operationFields]);
   const sealed = value.sealed;
   if (
-    value.response_key === undefined
+    Object.keys(value).length !== topLevelFields.size
+    || Object.keys(value).some((key) => !topLevelFields.has(key))
+    || value.response_key === undefined
     || typeof value.response_key !== "string"
-    || !/^[0-9a-f]{64}$/i.test(value.response_key)
-    || sealed.version !== 2
+    || !/^[0-9a-f]{64}$/.test(value.response_key)
+    || Object.keys(sealed).length !== 5
+    || Object.keys(sealed).some((key) => !["version", "key_id", "digest", "encapsulated_key", "ciphertext"].includes(key))
+    || sealed.version !== 3
+    || typeof sealed.key_id !== "string"
+    || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(sealed.key_id)
+    || (expectedKeyId !== undefined && sealed.key_id !== expectedKeyId)
     || typeof sealed.digest !== "string"
-    || !/^[0-9a-f]{64}$/i.test(sealed.digest)
-    || !Array.isArray(sealed.shares)
-    || sealed.shares.length < 1
-    || sealed.shares.length > 4
+    || !/^[0-9a-f]{64}$/.test(sealed.digest)
+    || typeof sealed.encapsulated_key !== "string"
+    || !/^[0-9a-f]{64}$/.test(sealed.encapsulated_key)
+    || !usableX25519PublicKey(sealed.encapsulated_key)
+    || typeof sealed.ciphertext !== "string"
+    || !/^[0-9a-f]{8224}$/.test(sealed.ciphertext)
   ) throw new Error("The wallet produced a malformed private request.");
-  const keyIds = new Set<string>();
-  for (const share of sealed.shares) {
-    if (!isRecord(share) || !isRecord(share.ciphertext)) {
-      throw new Error("The wallet produced a malformed private request.");
-    }
-    const ciphertext = share.ciphertext;
-    if (
-      typeof share.key_id !== "string"
-      || !/^[a-zA-Z0-9._:-]{1,64}$/.test(share.key_id)
-      || keyIds.has(share.key_id)
-      || ciphertext.algorithm !== "ecdh-p256+hkdf-sha256+aes-256-gcm/private-order-v1"
-      || ciphertext.key_id !== share.key_id
-      || typeof ciphertext.ephemeral_public_key !== "string"
-      || !/^(?:0x)?04[0-9a-f]{128}$/i.test(ciphertext.ephemeral_public_key)
-      || typeof ciphertext.nonce !== "string"
-      || !/^[0-9a-f]{24}$/i.test(ciphertext.nonce)
-      || typeof ciphertext.ciphertext !== "string"
-      || ciphertext.ciphertext.length < 32
-      || ciphertext.ciphertext.length > 64 * 1024
-      || ciphertext.ciphertext.length % 2 !== 0
-      || !/^[0-9a-f]+$/i.test(ciphertext.ciphertext)
-    ) throw new Error("The wallet produced a malformed private request.");
-    keyIds.add(share.key_id);
-  }
 }
 
 function onchainInteger(value: unknown, maximum: bigint): bigint | null {
@@ -788,28 +862,47 @@ export function requireStatusAnswer(
   return value as StatusAnswer;
 }
 
-export function requireExecutionKeyRegistry(value: unknown): { keys: Array<{ key_id: string; public_key: string }> } {
-  if (!isRecord(value) || !Array.isArray(value.keys) || value.keys.length < 1 || value.keys.length > 4) {
+export function requireExecutionKeyRegistry(value: unknown): ExecutionKeyRegistry {
+  if (
+    !isRecord(value)
+    || Object.keys(value).length !== 1
+    || !Array.isArray(value.keys)
+    || value.keys.length !== 1
+  ) {
     throw new Error("The operator returned a malformed execution-key registry.");
   }
-  const ids = new Set<string>();
-  const points = new Set<string>();
-  const keys = value.keys.map((candidate) => {
+  const keys: ExecutionKeyRegistry["keys"] = value.keys.map((candidate) => {
     if (
       !isRecord(candidate)
-      || !/^[a-zA-Z0-9._:-]{1,64}$/.test(String(candidate.key_id ?? ""))
-      || !/^(?:0x)?04[0-9a-f]{128}$/i.test(String(candidate.public_key ?? ""))
+      || Object.keys(candidate).length !== 3
+      || Object.keys(candidate).some((key) => !["key_id", "algorithm", "public_key"].includes(key))
+      || typeof candidate.key_id !== "string"
+      || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(candidate.key_id)
+      || candidate.algorithm !== HPKE_PROFILE
+      || typeof candidate.public_key !== "string"
+      || !/^[0-9a-f]{64}$/.test(candidate.public_key)
+      || !usableX25519PublicKey(candidate.public_key)
     ) throw new Error("The operator returned a malformed execution-key registry.");
-    const keyId = String(candidate.key_id);
-    const publicKey = String(candidate.public_key).toLowerCase().replace(/^0x/, "");
-    if (ids.has(keyId) || points.has(publicKey)) {
-      throw new Error("The operator returned a duplicated execution key.");
-    }
-    ids.add(keyId);
-    points.add(publicKey);
-    return { key_id: keyId, public_key: publicKey };
+    return {
+      key_id: candidate.key_id,
+      algorithm: HPKE_PROFILE,
+      public_key: candidate.public_key,
+    };
   });
   return { keys };
+}
+
+function usableX25519PublicKey(publicKey: string) {
+  if (publicKey === "00".repeat(32) || X25519_LOW_ORDER_KEYS.has(publicKey)) return false;
+  const bytes = publicKey.match(/../g);
+  const prime = X25519_FIELD_PRIME.match(/../g);
+  if (!bytes || !prime || (Number.parseInt(bytes[31], 16) & 0x80) !== 0) return false;
+  for (let index = 31; index >= 0; index -= 1) {
+    const byte = Number.parseInt(bytes[index], 16);
+    const primeByte = Number.parseInt(prime[index], 16);
+    if (byte !== primeByte) return byte < primeByte;
+  }
+  return false;
 }
 
 export function requireIndexerStatus(value: unknown) {
@@ -1068,9 +1161,11 @@ function validResidualRecovery(value: unknown, residualSeq: number | undefined):
 }
 
 export function requireWalletState(value: unknown): WalletState {
+  requireWalletKeyScheduleVersion(value);
   if (!isRecord(value) || value.version !== 2) {
-    throw new Error("The stored wallet state has an unsupported version.");
+    throw new WalletMigrationRequiredError();
   }
+  if (Object.keys(value).some((key) => !["version", "key_schedule_version", "notes", "orders", "scanned_seq"].includes(key))) throw new WalletMigrationRequiredError();
   if (
     !Array.isArray(value.notes)
     || value.notes.length > MAX_STORED_NOTES
@@ -1214,22 +1309,67 @@ export function walletWasmModuleUrlAllowed(moduleUrl: string, pageUrl: string): 
   }
 }
 
-export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime {
-  let seedHex: string | null = null;
+const PROOF_SIGNER_SCALAR_ORDER = 0x800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2fn;
+
+function proofSignerContextFelt(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^(?:0x)?[0-9a-fA-F]+$/.test(value)) {
+    throw new Error(`${label} must be a nonzero canonical Starknet felt.`);
+  }
+  const digits = value.replace(/^0x/, "").replace(/^0+/, "");
+  if (!digits || digits.length > 64) {
+    throw new Error(`${label} must be a nonzero canonical Starknet felt.`);
+  }
+  const parsed = BigInt(`0x${digits}`);
+  if (parsed >= STARKNET_FIELD_PRIME) {
+    throw new Error(`${label} must be a nonzero canonical Starknet felt.`);
+  }
+  return `0x${parsed.toString(16)}`;
+}
+
+export function parseWalletProofSignerMaterial(
+  encoded: string,
+): { proofSignerPrivateKey: string; proofSignerSalt: string } {
+  try {
+    const material = parseWalletJson(encoded);
+    requireWalletKeyScheduleVersion(material);
+    const canonicalNonzero = (value: unknown, limit: bigint): value is string =>
+      typeof value === "string" && value.length <= 66 && /^0x[1-9a-f][0-9a-f]*$/.test(value) && BigInt(value) < limit;
+    if (Object.keys(material).length !== 3
+      || Object.keys(material).some((key) => !["key_schedule_version", "proof_signer_private_key", "proof_signer_salt"].includes(key))
+      || !canonicalNonzero(material.proof_signer_private_key, PROOF_SIGNER_SCALAR_ORDER)
+      || !canonicalNonzero(material.proof_signer_salt, STARKNET_FIELD_PRIME)) {
+      throw new Error("invalid material");
+    }
+    return { proofSignerPrivateKey: material.proof_signer_private_key, proofSignerSalt: material.proof_signer_salt };
+  } catch {
+    throw new Error("Wallet returned invalid v2 proof signer material.");
+  }
+}
+
+export function createZylithWalletRuntime(
+  core: WalletWasmModule,
+  options: ZylithWalletRuntimeOptions = {},
+): WalletRuntime {
+  const now = options.now ?? Date.now;
+  const deviceRecordStore = options.deviceRecordStore ?? createWalletDeviceRecordStore(localStorage);
+  const signatureVaultStore = options.signatureVaultStore ?? createWalletSignatureVaultStore(localStorage);
+  const walletCryptoClientFactory = options.walletCryptoClientFactory
+    ?? ((clientOptions) => createWalletCryptoClient(clientOptions));
+  let sessionReady = false;
+  let walletClient: WalletCryptoPort | null = null;
+  let workerContext: WalletWorkerContext | null = null;
+  let activeDeviceSession = false;
+  let vaultRecordUnsubscribe: (() => void) | null = null;
   let publicConfig: WalletPublicConfig | null = null;
   let deployment: DeploymentConfig | null = null;
   let scope = "";
   let state: WalletState = emptyState();
   let activeWalletAddress: string | null = null;
   let generation = 0;
+  let clearedSessionFailure: { generation: number; error: unknown } | null = null;
   let saveChain: Promise<void> = Promise.resolve();
   let snapshotSaveChain: Promise<boolean> = Promise.resolve(false);
-  const deviceSession = createWalletDeviceSessionManager({
-    storage: localStorage,
-    keyStore: createIndexedDbWalletDeviceKeyStore(),
-  });
   let timer: number | null = null;
-  let deviceSessionExpiryTimer: number | null = null;
   let workerRunning = false;
   let statusChunkCursor = 0;
   let refreshInFlight: Promise<void> | null = null;
@@ -1248,18 +1388,27 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   const residualOperationsInFlight = new Set<string>();
   const authenticatedAdmissions = new Set<string>();
   let registryCache: {
-    keys: Array<{ key_id: string; public_key: string }>;
+    keys: ExecutionKeyRegistry["keys"];
     loadedAt: number;
   } | null = null;
+  let registryLoadInFlight: Promise<ExecutionKeyRegistry> | null = null;
   const claimsInFlight = new Set<string>();
 
   function call<T>(fn: (input: string) => string, input: unknown): T {
     return JSON.parse(fn(JSON.stringify(input))) as T;
   }
 
+  function sessionContext() {
+    if (!walletClient || !workerContext || !publicConfig || !deployment) {
+      throw new Error("Wallet session is locked");
+    }
+    return { client: walletClient, workerContext, publicConfig, deployment };
+  }
+
   function unlocked() {
-    if (!seedHex || !publicConfig || !deployment) throw new Error("Wallet session is locked");
-    return { seedHex, publicConfig, deployment };
+    if (!sessionReady) throw new Error("Wallet session is locked");
+    ensureCurrent(generation);
+    return sessionContext();
   }
 
   function chainContext() {
@@ -1268,24 +1417,88 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   // local state
 
+  function readCompatibleLocalState(targetScope: string) {
+    const raw = localStorage.getItem(`${STATE_PREFIX}${targetScope}`);
+    if (raw !== null) requireLocalStoreCompatibility(raw);
+    return raw;
+  }
+
+  function requireOwnedClient(sessionGeneration: number, client: WalletCryptoPort) {
+    if (sessionGeneration !== generation || walletClient !== client) {
+      throw new WalletSessionChangedError();
+    }
+  }
+
+  function translateWalletCryptoError(error: unknown): unknown {
+    return error instanceof WalletCryptoError && error.code === "MIGRATION_REQUIRED"
+      ? new WalletMigrationRequiredError()
+      : error;
+  }
+
+async function awaitOwnedClient<T>(
+    sessionGeneration: number,
+    client: WalletCryptoPort,
+    operation: Promise<T>,
+  ): Promise<T> {
+    try {
+      const result = await operation;
+      requireOwnedClient(sessionGeneration, client);
+      return result;
+    } catch (error) {
+      requireOwnedClient(sessionGeneration, client);
+      throw translateWalletCryptoError(error);
+    }
+  }
+
+  async function awaitCurrent<T>(sessionGeneration: number, operation: Promise<T>): Promise<T> {
+    let result: T;
+    try {
+      result = await operation;
+    } catch (error) {
+      requireCurrentFailure(error, sessionGeneration);
+      throw error;
+    }
+    ensureCurrent(sessionGeneration);
+    return result;
+  }
+
+  type HydrationLocalStateOwnership = {
+    readonly generation: number;
+    readonly scope: string;
+    expectedRaw: string | null;
+  };
+
+  function requireHydrationLocalStateOwnership(ownership: HydrationLocalStateOwnership) {
+    ensureCurrent(ownership.generation);
+    if (scope !== ownership.scope || readCompatibleLocalState(ownership.scope) !== ownership.expectedRaw) {
+      throw new WalletSessionChangedError();
+    }
+  }
+
   async function loadState() {
-    const { seedHex: seed, publicConfig: config } = unlocked();
+    const { client } = sessionContext();
     const sessionGeneration = generation;
     const targetScope = scope;
     const key = `${STATE_PREFIX}${targetScope}`;
     stateWritesBlocked = false;
     state = emptyState();
     const raw = localStorage.getItem(key);
-    if (raw === null) return false;
+    const ownership: HydrationLocalStateOwnership = { generation: sessionGeneration, scope: targetScope, expectedRaw: raw };
+    if (raw === null) return { corrupted: false, ownership };
     try {
-      const stored = JSON.parse(raw) as EncryptedLocalStore;
-      const decrypted = await decryptLocalStore<unknown>(stored, seed, config.account_id, "wallet-state");
+      const decrypted = parseWalletJson(
+        await awaitOwnedClient(sessionGeneration, client, client.decryptLocalState(raw)),
+        ["version"],
+      );
       ensureCurrent(sessionGeneration);
       if (scope !== targetScope) throw new Error("Wallet session changed. Retry.");
+      requireHydrationLocalStateOwnership(ownership);
       state = requireWalletState(decrypted);
-      return false;
-    } catch {
+      return { corrupted: false, ownership };
+    } catch (error) {
       ensureCurrent(sessionGeneration);
+      requireHydrationLocalStateOwnership(ownership);
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
       stateWritesBlocked = true;
       const quarantineKey = `${STATE_QUARANTINE_PREFIX}${targetScope}`;
       try {
@@ -1294,86 +1507,168 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         // the original encrypted value remains untouched when quarantine storage is unavailable.
       }
       state = emptyState();
-      return true;
+      return { corrupted: true, ownership };
     }
   }
 
-  async function saveState() {
-    if (!seedHex || !publicConfig) return;
+  async function saveState(ownership?: HydrationLocalStateOwnership) {
+    if (!walletClient || !publicConfig) return;
+    if (ownership) requireHydrationLocalStateOwnership(ownership);
     if (stateWritesBlocked) {
       throw new Error("The damaged local wallet state is quarantined and cannot be overwritten.");
     }
     const sessionGeneration = generation;
     const targetScope = scope;
-    const seed = seedHex;
-    const accountId = publicConfig.account_id;
+    const client = walletClient;
     const snapshot = structuredClone(state);
-    const save = saveChain.catch(() => undefined).then(async () => {
-      const encrypted = await encryptLocalStore(snapshot, seed, accountId, "wallet-state");
+    const save = saveChain.catch(() => undefined).then(() => preserveSessionOnMigration(sessionGeneration, async () => {
+      requireWalletState(snapshot);
+      const encryptedRaw = await awaitOwnedClient(
+        sessionGeneration,
+        client,
+        client.encryptLocalState(JSON.stringify({ value: snapshot })),
+      );
+      const encrypted = parseWalletJson(encryptedRaw, ["version"]);
       ensureCurrent(sessionGeneration);
+      requireSessionStorageCompatibility(sessionGeneration);
       if (scope !== targetScope) throw new Error("Wallet session changed. Retry.");
-      localStorage.setItem(`${STATE_PREFIX}${targetScope}`, JSON.stringify(encrypted));
+      if (ownership) requireHydrationLocalStateOwnership(ownership);
+      const key = `${STATE_PREFIX}${targetScope}`;
+      const nextRaw = JSON.stringify(encrypted);
+      localStorage.setItem(key, nextRaw);
+      if (ownership) ownership.expectedRaw = nextRaw;
       snapshotDirty = true;
       stateRevision += 1;
       notifyWalletRuntimeChanged();
-    });
+    }));
     saveChain = save.catch(() => undefined);
     await save;
   }
 
   // session
 
-  async function hydrate(nextSeedHex: string, walletAddress: string, sessionGeneration: number) {
+  async function hydrate(
+    client: WalletCryptoPort,
+    context: WalletWorkerContext,
+    nextDeployment: DeploymentConfig,
+    sessionGeneration: number,
+  ) {
     ensureCurrent(sessionGeneration);
-    const nextDeployment = await loadDeployment();
-    const nextConfig = JSON.parse(core.zylith_wallet_derive_public_config(nextSeedHex)) as WalletPublicConfig;
-    ensureCurrent(sessionGeneration);
+    clearedSessionFailure = null;
+    requireOwnedClient(sessionGeneration, client);
+    const nextConfig = requireWalletPublicConfig(parseWalletJson(
+      await awaitOwnedClient(sessionGeneration, client, client.publicConfig()),
+    ));
     try {
-      seedHex = nextSeedHex;
       publicConfig = nextConfig;
       deployment = nextDeployment;
-      activeWalletAddress = normalizeFeltForComparison(walletAddress);
+      activeWalletAddress = context.walletAddress;
       scope = `${nextConfig.account_id}:${normalizeFeltForComparison(nextDeployment.contracts.exchange)}`;
-      const localStateCorrupted = await loadState();
-      ensureCurrent(sessionGeneration);
-      const recovered = await pullRecoverySnapshot().catch((error: unknown) => {
-        if (error instanceof RecoveryStateConflictError) throw error;
+      const { corrupted: localStateCorrupted, ownership } = await loadState();
+      requireHydrationLocalStateOwnership(ownership);
+      const recovered = await pullRecoverySnapshot(ownership).catch((error: unknown) => {
+        if (error instanceof RecoveryStateConflictError || error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
         return false;
       });
+      requireHydrationLocalStateOwnership(ownership);
       if (localStateCorrupted && !recovered) {
         throw new Error("The encrypted local wallet state is damaged and no valid recovery snapshot was available.");
       }
-      startWorker();
-      notifyWalletRuntimeChanged();
+      ensureCurrent(sessionGeneration);
+      requireHydrationLocalStateOwnership(ownership);
       return true;
     } catch (error) {
-      if (generation === sessionGeneration) clearSession(false);
+      if (generation === sessionGeneration) clearSession(false, { generation: sessionGeneration, error });
       throw error;
     }
   }
 
   function ensureCurrent(sessionGeneration: number) {
-    if (sessionGeneration !== generation) throw new Error("Wallet session changed. Retry.");
+    if (sessionGeneration !== generation) throw new WalletSessionChangedError();
+    if (sessionReady) requireSessionStorageCompatibility(sessionGeneration);
   }
 
-  function clearSession(revokeDeviceSession: boolean) {
-    const walletAddress = activeWalletAddress;
+  function clearMigrationSession(error: unknown, sessionGeneration: number) {
+    if (error instanceof WalletMigrationRequiredError && generation === sessionGeneration) {
+      clearSession(false, { generation: sessionGeneration, error });
+    }
+  }
+
+  function requireCurrentFailure(error: unknown, sessionGeneration: number) {
+    // only the exact failure that cleared this session may cross its own cleanup boundary.
+    if (sessionGeneration !== generation && (
+      clearedSessionFailure?.generation !== sessionGeneration
+      || clearedSessionFailure.error !== error
+      || generation !== sessionGeneration + 1
+      || walletClient !== null
+    )) throw new WalletSessionChangedError();
+  }
+
+  function requireSessionStorageCompatibility(sessionGeneration: number) {
+    if (sessionGeneration !== generation) throw new WalletSessionChangedError();
+    try {
+      if (activeWalletAddress) {
+        requireNoLegacyDeviceRecord(activeWalletAddress);
+        readVaultSnapshot(activeWalletAddress);
+      }
+      if (scope) readCompatibleLocalState(scope);
+    } catch (error) {
+      clearMigrationSession(error, sessionGeneration);
+      throw error;
+    }
+  }
+
+  async function preserveSessionOnMigration<T>(sessionGeneration: number, operation: () => Promise<T>): Promise<T> {
+    try {
+      const result = await operation();
+      ensureCurrent(sessionGeneration);
+      return result;
+    } catch (error) {
+      requireCurrentFailure(error, sessionGeneration);
+      clearMigrationSession(error, sessionGeneration);
+      throw error;
+    }
+  }
+
+  function guardSessionOperation<Args extends unknown[], Result>(operation: (...args: Args) => Promise<Result>) {
+    return (...args: Args) => preserveSessionOnMigration(generation, () => operation(...args));
+  }
+
+  function bestEffortSnapshotFailure(error: unknown): false {
+    if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+    return false;
+  }
+
+  function clearSession(
+    revokeDeviceSession: boolean,
+    failure?: { generation: number; error: unknown },
+    clientAlreadyInvalidated = false,
+  ) {
+    clearedSessionFailure = failure ?? null;
+    sessionReady = false;
+    const detachedClient = walletClient;
+    const detachedContext = workerContext;
+    const revokeOwnedDevice = revokeDeviceSession && activeDeviceSession;
+    walletClient = null;
+    workerContext = null;
+    activeDeviceSession = false;
+    const unsubscribe = vaultRecordUnsubscribe;
+    vaultRecordUnsubscribe = null;
     generation += 1;
     workerRunning = false;
     if (timer !== null) window.clearTimeout(timer);
-    if (deviceSessionExpiryTimer !== null) window.clearTimeout(deviceSessionExpiryTimer);
     timer = null;
-    deviceSessionExpiryTimer = null;
+    try { unsubscribe?.(); } catch { /* terminal cleanup remains best effort */ }
     refreshInFlight = null;
     saveChain = Promise.resolve();
     snapshotSaveChain = Promise.resolve(false);
-    seedHex = null;
     publicConfig = null;
     deployment = null;
     activeWalletAddress = null;
     scope = "";
     state = emptyState();
     registryCache = null;
+    registryLoadInFlight = null;
     depositInFlight = null;
     depositOperationInFlight = false;
     orderSubmissionInFlight = false;
@@ -1390,8 +1685,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     recoveryHeadSequence = 0;
     statusChunkCursor = 0;
     notifyWalletRuntimeChanged();
-    if (revokeDeviceSession && walletAddress) {
-      void deviceSession.revoke(walletAddress);
+    if (detachedClient && !clientAlreadyInvalidated) {
+      if (revokeOwnedDevice && detachedContext) {
+        void detachedClient.revokeDeviceSession(detachedContext).catch(() => {
+          detachedClient.dispose();
+        });
+      } else {
+        void detachedClient.lock().catch(() => {
+          detachedClient.dispose();
+        });
+      }
     }
   }
 
@@ -1441,25 +1744,33 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   // wallet-signature vault
 
-  function vaultStorageKey(starknetAddress?: string | null) {
-    const normalized = starknetAddress ? normalizeFeltForComparison(starknetAddress) : "";
-    return normalized ? `${VAULT_KEY}:${normalized}` : VAULT_KEY;
-  }
-
-  function readVault(starknetAddress?: string | null) {
+  function requireNoLegacyDeviceRecord(starknetAddress: string) {
+    const walletAddress = normalizeFeltForComparison(starknetAddress);
     try {
-      const raw = localStorage.getItem(vaultStorageKey(starknetAddress));
-      if (!raw || raw.length > 4_096) return null;
-      return JSON.parse(raw) as VaultRecord;
-    } catch {
-      return null;
+      if (
+        localStorage.getItem(`zylith.wallet.device-session.v1:${walletAddress}`) !== null
+        || localStorage.getItem(`zylith.wallet.device-session.v2:${walletAddress}`) !== null
+      ) {
+        throw new WalletMigrationRequiredError();
+      }
+    } catch (error) {
+      if (error instanceof WalletMigrationRequiredError) throw error;
+      throw new WalletMigrationRequiredError();
     }
   }
 
+  function readVaultSnapshot(starknetAddress: string) {
+    requireNoLegacyDeviceRecord(starknetAddress);
+    return signatureVaultStore.read(starknetAddress);
+  }
+
   function hasVault(starknetAddress?: string | null) {
+    if (!starknetAddress) return false;
     try {
-      return localStorage.getItem(vaultStorageKey(starknetAddress)) !== null;
-    } catch {
+      requireNoLegacyDeviceRecord(starknetAddress);
+      return signatureVaultStore.readRaw(starknetAddress) !== null;
+    } catch (error) {
+      if (error instanceof WalletMigrationRequiredError) throw error;
       // inaccessible storage must never look like permission to create a new seed.
       return true;
     }
@@ -1467,6 +1778,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   async function vaultContext(
     starknetAddress: string,
+    sessionGeneration: number,
     messageVersion: WalletSignatureMessageVersion = 2,
     deploymentId?: string,
   ): Promise<WalletSignatureVaultContext> {
@@ -1477,20 +1789,40 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (connected && normalizeFeltForComparison(connected) !== walletAddress) {
       throw new Error("Connected Starknet wallet changed during private trading authorization");
     }
-    const manifest = await loadDeployment();
-    await ensureWalletChain(provider as never, manifest);
+    const manifest = await awaitCurrent(sessionGeneration, loadDeployment());
+    await awaitCurrent(
+      sessionGeneration,
+      ensureWalletChain(provider as never, manifest, () => ensureCurrent(sessionGeneration)),
+    );
     const chainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
-    const resolvedDeploymentId = deploymentId?.trim().toLowerCase()
-      || (await walletAuthDeploymentId(manifest, messageVersion));
-    const origin = window.location?.origin || "zylith://local";
-    const typedData = await buildZylithWalletAuthTypedData({
+    const resolvedDeploymentId = deploymentId
+      ?? (await awaitCurrent(sessionGeneration, walletAuthDeploymentId(manifest, messageVersion)));
+    const origin = window.location.origin;
+    const typedData = await awaitCurrent(sessionGeneration, buildZylithWalletAuthTypedData({
       walletAddress,
       chainId,
       deploymentId: resolvedDeploymentId,
       origin,
       messageVersion,
-    });
-    const signature = await requestStarknetWalletTypedSignature(provider as never, typedData);
+    }));
+    const signature = await awaitCurrent(
+      sessionGeneration,
+      requestStarknetWalletTypedSignature(provider as never, typedData),
+    );
+    const confirmedAddress = connectedProviderAddress(provider as never) ?? connectedStarknetAddress();
+    if (
+      !confirmedAddress
+      || normalizeFeltForComparison(confirmedAddress) !== walletAddress
+    ) {
+      throw new Error("Connected Starknet wallet changed during private trading authorization");
+    }
+    const confirmedChainId = await awaitCurrent(
+      sessionGeneration,
+      readStarknetWalletChainId(provider as never),
+    );
+    if (normalizeFeltForComparison(confirmedChainId) !== normalizeFeltForComparison(chainId)) {
+      throw new Error("Connected Starknet wallet chain changed during private trading authorization");
+    }
     return {
       signature,
       walletAddress,
@@ -1501,183 +1833,472 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
   }
 
-  async function vaultRequest(context: WalletSignatureVaultContext) {
-    const [walletAuthId, authToken] = await Promise.all([walletSignatureVaultId(context), walletSignatureVaultAuthToken(context)]);
-    return { walletAuthId, authToken, path: `/api/wallet-vaults/${encodeURIComponent(walletAuthId)}` };
+  async function workerContextFor(
+    context: Pick<WalletSignatureVaultContext, "walletAddress" | "chainId" | "deploymentId" | "origin">,
+    manifest: DeploymentConfig,
+    sessionGeneration: number,
+  ): Promise<WalletWorkerContext> {
+    const manifestIdentity = await awaitCurrent(sessionGeneration, deploymentManifestIdentity(manifest));
+    return {
+      walletAddress: normalizeFeltForComparison(context.walletAddress),
+      chainId: requiredNonZeroFelt(context.chainId, "chain_id"),
+      deploymentId: requiredNonZeroFelt(manifest.contracts.exchange, "exchange address"),
+      vaultDeploymentId: requiredNonZeroFelt(context.deploymentId, "vault deployment id"),
+      origin: context.origin,
+      manifestIdentity,
+      manifestVersion: "1",
+      expiresAtMs: now() + WALLET_DEVICE_SESSION_DEFAULT_TTL_MS,
+    };
   }
 
-  async function pullVault(context: WalletSignatureVaultContext): Promise<WalletSignatureVaultRecord | null> {
+  function createOwnedWalletClient(context: WalletWorkerContext, sessionGeneration: number) {
+    let candidate: WalletCryptoPort | null = null;
+    candidate = walletCryptoClientFactory({
+      deviceRecordStore,
+      onInvalidated: () => {
+        if (generation === sessionGeneration && walletClient === candidate) {
+          clearSession(false, undefined, true);
+        }
+      },
+    });
+    walletClient = candidate;
+    workerContext = context;
+    return candidate;
+  }
+
+  async function deriveVaultCredentials(
+    signature: unknown,
+    context: WalletWorkerContext,
+    sessionGeneration: number,
+  ) {
+    const credentialClient = walletCryptoClientFactory({ deviceRecordStore, onInvalidated: () => undefined });
+    try {
+      const credentials = await awaitCurrent(
+        sessionGeneration,
+        credentialClient.deriveSignatureVaultCredentials(signature, context),
+      );
+      return credentials;
+    } finally {
+      credentialClient.dispose();
+    }
+  }
+
+  function vaultPath(walletAuthId: string) {
+    return `/api/wallet-vaults/${encodeURIComponent(walletAuthId)}`;
+  }
+
+  async function pullVault(
+    credentials: { walletAuthId: string; authToken: string },
+    sessionGeneration: number,
+  ): Promise<WalletSignatureVaultRecord | null> {
+    ensureCurrent(sessionGeneration);
     if (!BACKUP_URL) return null;
-    const { walletAuthId, authToken, path } = await vaultRequest(context);
+    const path = vaultPath(credentials.walletAuthId);
     let response: Response;
     try {
-      response = await fetchWithTimeout(`${BACKUP_URL}${path}`, { headers: { accept: "application/json", "x-zylith-wallet-vault-auth": authToken } }, WALLET_VAULT_REQUEST_TIMEOUT_MS);
+      response = await fetchWithTimeout(`${BACKUP_URL}${path}`, {
+        headers: { accept: "application/json", "x-zylith-wallet-vault-auth": credentials.authToken },
+      }, WALLET_VAULT_REQUEST_TIMEOUT_MS);
     } catch {
+      ensureCurrent(sessionGeneration);
       throw new Error("Private trading state is unavailable. Retry later.");
     }
+    ensureCurrent(sessionGeneration);
     if (response.status === 404) return null;
     if (!response.ok) throw new RuntimeHttpStatusError(path, response.status, "");
-    const bundle = (await readSdkJsonResponse(response, {
+    const raw = await awaitCurrent(sessionGeneration, readSdkResponseText(response, {
       timeoutMs: WALLET_VAULT_REQUEST_TIMEOUT_MS,
       label: "Wallet vault response",
-    })) as WalletSignatureVaultBundle;
-    return requireWalletSignatureVaultBundle(bundle, walletAuthId);
+    }));
+    const bundle = parseWalletJson(raw, ["version", "message_version", "updated_at_unix_ms"]) as WalletSignatureVaultBundle;
+    return requireWalletSignatureVaultBundle(bundle, credentials.walletAuthId);
   }
 
-  async function pushVault(context: WalletSignatureVaultContext, vault: VaultRecord) {
+  async function pushVault(
+    credentials: { walletAuthId: string; authToken: string },
+    vaultRaw: string,
+    sessionGeneration: number,
+  ) {
     if (!BACKUP_URL) return;
-    const { walletAuthId, authToken, path } = await vaultRequest(context);
-    await postJson(BACKUP_URL, path, { wallet_auth_id: walletAuthId, vault, updated_at_unix_ms: Date.now() }, { "x-zylith-wallet-vault-auth": authToken });
-  }
-
-  async function openVault(vault: WalletSignatureVaultRecord, context: WalletSignatureVaultContext, sessionGeneration: number) {
-    if (!walletSignatureVaultMetadataMatches(vault, context)) return false;
-    let nextSeedHex: string;
-    try {
-      nextSeedHex = await decryptSeedWithWalletSignature(vault, context);
-    } catch {
-      return false;
-    }
     ensureCurrent(sessionGeneration);
-    localStorage.setItem(vaultStorageKey(vault.wallet_address), JSON.stringify(vault));
-    const normalizedSeed = normalizeSeed(nextSeedHex);
-    const opened = await hydrate(normalizedSeed, context.walletAddress, sessionGeneration);
-    if (!opened) return false;
-    try {
-      await deviceSession.seal(normalizedSeed, {
-        walletAddress: context.walletAddress,
-        chainId: context.chainId,
-        deploymentId: context.deploymentId,
-        origin: context.origin,
-      });
-      scheduleDeviceSessionExpiry(context.walletAddress);
-    } catch {
-      // remembering the session is a convenience. without device-key storage the wallet stays
-      // usable and simply asks for a signature again after a reload.
-    }
-    return true;
+    const path = vaultPath(credentials.walletAuthId);
+    const vault = parseWalletJson(vaultRaw, ["version", "message_version"]);
+    await awaitCurrent(sessionGeneration, postJson(BACKUP_URL, path, {
+      wallet_auth_id: credentials.walletAuthId,
+      vault,
+      updated_at_unix_ms: now(),
+    }, { "x-zylith-wallet-vault-auth": credentials.authToken }));
   }
 
-  async function deviceSessionMetadata(
+  async function publishVault(walletAddress: string, raw: string, sessionGeneration: number) {
+    ensureCurrent(sessionGeneration);
+    const published = await signatureVaultStore.publish(
+      walletAddress,
+      raw,
+      () => {
+        if (generation !== sessionGeneration) return false;
+        try {
+          requireNoLegacyDeviceRecord(walletAddress);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    );
+    ensureCurrent(sessionGeneration);
+    requireNoLegacyDeviceRecord(walletAddress);
+    return published;
+  }
+
+  function installVaultMonitor(
+    walletAddress: string,
+    expectedRaw: string,
+    client: WalletCryptoPort,
+    sessionGeneration: number,
+  ) {
+    let active = true;
+    const unsubscribe = signatureVaultStore.subscribe(walletAddress, (nextRaw) => {
+      if (!active || nextRaw === expectedRaw) return;
+      active = false;
+      if (generation === sessionGeneration && walletClient === client) clearSession(false);
+    });
+    try {
+      if (signatureVaultStore.readRaw(walletAddress) !== expectedRaw) {
+        throw new WalletSessionChangedError();
+      }
+    } catch (error) {
+      active = false;
+      try { unsubscribe(); } catch { /* listener cleanup is best effort */ }
+      throw error;
+    }
+    vaultRecordUnsubscribe = () => {
+      active = false;
+      unsubscribe();
+    };
+  }
+
+  async function openPreparedVault(
+    client: WalletCryptoPort,
+    preparation: SignatureVaultPreparation,
+    context: WalletWorkerContext,
+    manifest: DeploymentConfig,
+    sessionGeneration: number,
+  ) {
+    let committed = false;
+    try {
+      await awaitOwnedClient(sessionGeneration, client, client.commitSignatureVault(preparation));
+      committed = true;
+      await hydrate(client, context, manifest, sessionGeneration);
+      installVaultMonitor(context.walletAddress, preparation.vaultRaw, client, sessionGeneration);
+      const finalized = await awaitOwnedClient(
+        sessionGeneration,
+        client,
+        client.finalizeSignatureVault(preparation, true),
+      );
+      if (signatureVaultStore.readRaw(context.walletAddress) !== preparation.vaultRaw) {
+        throw new WalletSessionChangedError();
+      }
+      sessionReady = true;
+      activeDeviceSession = finalized.remembered;
+      startWorker();
+      notifyWalletRuntimeChanged();
+      return true;
+    } catch (error) {
+      if (!committed && generation === sessionGeneration && walletClient === client) {
+        walletClient = null;
+        workerContext = null;
+        try {
+          await client.abortSignatureVault(preparation);
+        } catch {
+          client.dispose();
+        }
+        ensureCurrent(sessionGeneration);
+      }
+      if (generation === sessionGeneration && (walletClient === client || walletClient === null)) {
+        clearSession(false, { generation: sessionGeneration, error }, walletClient === null);
+      }
+      throw translateWalletCryptoError(error);
+    }
+  }
+
+  async function deviceSessionContext(
     starknetAddress: string,
-  ): Promise<WalletDeviceSessionMetadata | null> {
+    sessionGeneration: number,
+  ): Promise<{ context: WalletWorkerContext; manifest: DeploymentConfig } | null> {
     const provider = selectedStarknetProvider();
     if (!provider) return null;
     const walletAddress = normalizeFeltForComparison(starknetAddress);
     const connected = connectedStarknetAddress();
     if (!connected || normalizeFeltForComparison(connected) !== walletAddress) return null;
-    const manifest = await loadDeployment();
+    const manifest = await awaitCurrent(sessionGeneration, loadDeployment());
     const expectedChainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
-    const actualChainId = await readStarknetWalletChainId(provider as never).catch(() => null);
+    let actualChainId: string | null;
+    try {
+      actualChainId = await awaitCurrent(sessionGeneration, readStarknetWalletChainId(provider as never));
+    } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      actualChainId = null;
+    }
     if (!actualChainId || normalizeFeltForComparison(actualChainId) !== normalizeFeltForComparison(expectedChainId)) {
       return null;
     }
+    const vaultDeploymentId = await awaitCurrent(sessionGeneration, walletAuthDeploymentId(manifest, 2));
     return {
-      walletAddress,
-      chainId: expectedChainId,
-      deploymentId: await walletAuthDeploymentId(manifest, 2),
-      origin: window.location?.origin || "zylith://local",
+      context: await workerContextFor({
+        walletAddress,
+        chainId: expectedChainId,
+        deploymentId: vaultDeploymentId,
+        origin: window.location.origin,
+      }, manifest, sessionGeneration),
+      manifest,
     };
   }
 
   function unlockWithDeviceSession(starknetAddress: string) {
     return vaultOperations.run(`device:${normalizeFeltForComparison(starknetAddress)}`, async () => {
       const sessionGeneration = generation;
-      if (seedHex) {
-        return activeWalletAddress === normalizeFeltForComparison(starknetAddress);
+      clearedSessionFailure = null;
+      ensureCurrent(sessionGeneration);
+      if (sessionReady) return activeWalletAddress === normalizeFeltForComparison(starknetAddress);
+      const resolved = await deviceSessionContext(starknetAddress, sessionGeneration);
+      ensureCurrent(sessionGeneration);
+      if (!resolved) return false;
+      const snapshot = readVaultSnapshot(resolved.context.walletAddress);
+      if (!snapshot) return false;
+      const client = createOwnedWalletClient(resolved.context, sessionGeneration);
+      try {
+        await awaitOwnedClient(
+          sessionGeneration,
+          client,
+          client.unlockFromDeviceSession(resolved.context),
+        );
+        activeDeviceSession = true;
+        await hydrate(client, resolved.context, resolved.manifest, sessionGeneration);
+        installVaultMonitor(resolved.context.walletAddress, snapshot.raw, client, sessionGeneration);
+        sessionReady = true;
+        startWorker();
+        notifyWalletRuntimeChanged();
+        return true;
+      } catch (error) {
+        if (error instanceof WalletCryptoError && error.code === "DEVICE_SESSION_MISSING") {
+          if (generation === sessionGeneration && walletClient === client) {
+            walletClient = null;
+            workerContext = null;
+            client.dispose();
+          }
+          return false;
+        }
+        if (generation === sessionGeneration && walletClient === client) {
+          clearSession(false, { generation: sessionGeneration, error });
+        }
+        throw translateWalletCryptoError(error);
       }
-      const metadata = await deviceSessionMetadata(starknetAddress);
-      ensureCurrent(sessionGeneration);
-      if (!metadata) return false;
-      const storedSeed = await deviceSession.open(metadata);
-      ensureCurrent(sessionGeneration);
-      if (!storedSeed) return false;
-      const opened = await hydrate(normalizeSeed(storedSeed), metadata.walletAddress, sessionGeneration);
-      if (opened) scheduleDeviceSessionExpiry(metadata.walletAddress);
-      return opened;
     });
-  }
-
-  function scheduleDeviceSessionExpiry(walletAddress: string) {
-    if (deviceSessionExpiryTimer !== null) window.clearTimeout(deviceSessionExpiryTimer);
-    const expiresAt = deviceSession.expiresAt(walletAddress);
-    if (!expiresAt) return;
-    const remaining = expiresAt - Date.now();
-    deviceSessionExpiryTimer = window.setTimeout(() => {
-      deviceSessionExpiryTimer = null;
-      if (activeWalletAddress !== normalizeFeltForComparison(walletAddress)) return;
-      if (expiresAt <= Date.now()) lock();
-      else scheduleDeviceSessionExpiry(walletAddress);
-    }, Math.max(0, Math.min(remaining, 2_147_000_000)));
   }
 
   function createWalletWithWalletSignature(starknetAddress: string) {
     return vaultOperations.run(`create:${normalizeFeltForComparison(starknetAddress)}`, async () => {
       const sessionGeneration = generation;
-      const context = await vaultContext(starknetAddress);
+      clearedSessionFailure = null;
+      ensureCurrent(sessionGeneration);
+      if (sessionReady) throw new Error("Wallet session already exists");
+      const context = await vaultContext(starknetAddress, sessionGeneration);
       ensureCurrent(sessionGeneration);
       if (hasVault(context.walletAddress)) throw new Error("Wallet session already exists");
-      const remote = await pullVault(context);
-      if (remote) return openVault(remote, context, sessionGeneration);
-      const nextSeedHex = normalizeSeed(core.zylith_wallet_generate_seed_hex());
-      const vault = await encryptSeedWithWalletSignature(nextSeedHex, context);
+      const manifest = await awaitCurrent(sessionGeneration, loadDeployment());
+      const resolvedWorkerContext = await workerContextFor(context, manifest, sessionGeneration);
+      const credentials = await deriveVaultCredentials(context.signature, resolvedWorkerContext, sessionGeneration);
+      const remote = await pullVault(credentials, sessionGeneration);
       ensureCurrent(sessionGeneration);
+      if (remote) {
+        const remoteRaw = JSON.stringify(remote);
+        const published = await publishVault(context.walletAddress, remoteRaw, sessionGeneration);
+        if (!published) {
+          const current = readVaultSnapshot(context.walletAddress);
+          if (!current) throw new WalletSessionChangedError();
+          return openVaultWithFreshClient(current.raw, context.signature, resolvedWorkerContext, manifest, sessionGeneration);
+        }
+        return openVaultWithFreshClient(remoteRaw, context.signature, resolvedWorkerContext, manifest, sessionGeneration);
+      }
+      const client = createOwnedWalletClient(resolvedWorkerContext, sessionGeneration);
+      let preparation: SignatureVaultPreparation;
+      try {
+        preparation = await awaitOwnedClient(
+          sessionGeneration,
+          client,
+          client.prepareSignatureVaultCreate(context.signature, resolvedWorkerContext, true),
+        );
+      } catch (error) {
+        const translated = translateWalletCryptoError(error);
+        if (generation === sessionGeneration && walletClient === client) {
+          clearSession(false, { generation: sessionGeneration, error: translated });
+        }
+        throw translated;
+      }
       // the remote vault is the wallet's only backup, so a new seed is used only once stored; a
       // conflict means this wallet already stored one elsewhere, which is restored instead.
       try {
-        await pushVault(context, vault);
+        await pushVault(credentials, preparation.vaultRaw, sessionGeneration);
       } catch (error) {
+        if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+        ensureCurrent(sessionGeneration);
         if (error instanceof RuntimeHttpStatusError && error.status === 409) {
-          const existing = await pullVault(context);
-          if (existing) return openVault(existing, context, sessionGeneration);
+          if (walletClient === client) {
+            walletClient = null;
+            workerContext = null;
+          }
+          try { await client.abortSignatureVault(preparation); } catch { client.dispose(); }
+          ensureCurrent(sessionGeneration);
+          const existing = await pullVault(credentials, sessionGeneration);
+          if (existing) {
+            const existingRaw = JSON.stringify(existing);
+            const published = await publishVault(context.walletAddress, existingRaw, sessionGeneration);
+            const selected = published ? existingRaw : readVaultSnapshot(context.walletAddress)?.raw;
+            if (selected) return openVaultWithFreshClient(selected, context.signature, resolvedWorkerContext, manifest, sessionGeneration);
+          }
+          const conflict = new Error("The existing private trading wallet could not be restored after a backup conflict. Retry.");
+          clearSession(false, { generation: sessionGeneration, error: conflict }, true);
+          throw conflict;
+        } else {
+          const existing = await pullVault(credentials, sessionGeneration).catch((readError: unknown) => {
+            if (readError instanceof WalletMigrationRequiredError || readError instanceof WalletSessionChangedError) throw readError;
+            ensureCurrent(sessionGeneration);
+            return null;
+          });
+          if (existing && stableJsonStringify(existing) === stableJsonStringify(parseWalletJson(preparation.vaultRaw))) {
+            // an ambiguous acknowledgement is accepted only after an authenticated exact reread.
+          } else {
+            try { await client.abortSignatureVault(preparation); } catch { client.dispose(); }
+            ensureCurrent(sessionGeneration);
+            throw new Error("Could not back up the new private trading wallet. Nothing was created; retry when the service is reachable.", { cause: error });
+          }
         }
-        throw new Error("Could not back up the new private trading wallet. Nothing was created; retry when the service is reachable.", { cause: error });
       }
-      return openVault(vault, context, sessionGeneration);
+      const published = await publishVault(context.walletAddress, preparation.vaultRaw, sessionGeneration);
+      if (!published && signatureVaultStore.readRaw(context.walletAddress) !== preparation.vaultRaw) {
+        if (walletClient === client) {
+          walletClient = null;
+          workerContext = null;
+        }
+        try { await client.abortSignatureVault(preparation); } catch { client.dispose(); }
+        ensureCurrent(sessionGeneration);
+        const current = readVaultSnapshot(context.walletAddress);
+        if (!current) throw new WalletSessionChangedError();
+        return openVaultWithFreshClient(current.raw, context.signature, resolvedWorkerContext, manifest, sessionGeneration);
+      }
+      return openPreparedVault(client, preparation, resolvedWorkerContext, manifest, sessionGeneration);
     });
+  }
+
+  async function openVaultWithFreshClient(
+    vaultRaw: string,
+    signature: unknown,
+    context: WalletWorkerContext,
+    manifest: DeploymentConfig,
+    sessionGeneration: number,
+  ) {
+    ensureCurrent(sessionGeneration);
+    const client = createOwnedWalletClient(context, sessionGeneration);
+    let preparation: SignatureVaultPreparation;
+    try {
+      preparation = await awaitOwnedClient(
+        sessionGeneration,
+        client,
+        client.prepareSignatureVaultOpen(signature, vaultRaw, context, true),
+      );
+    } catch (error) {
+      const translated = translateWalletCryptoError(error);
+      if (generation === sessionGeneration && walletClient === client) {
+        clearSession(false, { generation: sessionGeneration, error: translated });
+      }
+      throw translated;
+    }
+    if (preparation.vaultRaw !== vaultRaw) {
+      const error = new WalletSessionChangedError();
+      if (walletClient === client) {
+        walletClient = null;
+        workerContext = null;
+      }
+      try { await client.abortSignatureVault(preparation); } catch { client.dispose(); }
+      ensureCurrent(sessionGeneration);
+      clearSession(false, { generation: sessionGeneration, error }, true);
+      throw error;
+    }
+    return openPreparedVault(client, preparation, context, manifest, sessionGeneration);
   }
 
   function unlockWithWalletSignature(starknetAddress: string) {
     return vaultOperations.run(`unlock:${normalizeFeltForComparison(starknetAddress)}`, async () => {
       const sessionGeneration = generation;
-      if (seedHex) {
-        return activeWalletAddress === normalizeFeltForComparison(starknetAddress);
-      }
-      const stored = readVault(starknetAddress);
-      const storedVault = isWalletSignatureVaultRecord(stored) ? stored : null;
+      clearedSessionFailure = null;
+      ensureCurrent(sessionGeneration);
+      if (sessionReady) return activeWalletAddress === normalizeFeltForComparison(starknetAddress);
+      const stored = readVaultSnapshot(starknetAddress);
       const context = await vaultContext(
         starknetAddress,
-        storedVault?.message_version ?? 2,
-        storedVault?.deployment_id,
+        sessionGeneration,
+        stored?.vault.message_version ?? 2,
+        stored?.vault.deployment_id,
       );
       ensureCurrent(sessionGeneration);
-      const vault = storedVault ?? (await pullVault(context));
-      return vault ? openVault(vault, context, sessionGeneration) : false;
+      const manifest = await awaitCurrent(sessionGeneration, loadDeployment());
+      const workerContext = await workerContextFor(context, manifest, sessionGeneration);
+      let vaultRaw = stored?.raw ?? null;
+      if (vaultRaw === null) {
+        const credentials = await deriveVaultCredentials(context.signature, workerContext, sessionGeneration);
+        const remote = await pullVault(credentials, sessionGeneration);
+        if (!remote) return false;
+        const remoteRaw = JSON.stringify(remote);
+        const published = await publishVault(context.walletAddress, remoteRaw, sessionGeneration);
+        vaultRaw = published ? remoteRaw : readVaultSnapshot(context.walletAddress)?.raw ?? null;
+        if (vaultRaw === null) throw new WalletSessionChangedError();
+      }
+      return openVaultWithFreshClient(vaultRaw, context.signature, workerContext, manifest, sessionGeneration);
     });
   }
 
   // recovery snapshots
 
-  function recoveryHeaders(seed: string) {
-    return { "x-zylith-recovery-auth": core.zylith_wallet_recovery_auth_tag(seed) };
+  async function recoveryHeaders(client: WalletCryptoPort, sessionGeneration: number) {
+    const authTag = await awaitOwnedClient(sessionGeneration, client, client.recoveryAuthTag());
+    return { "x-zylith-recovery-auth": authTag };
   }
 
   function recoveryPath(accountId: string) {
     return `/api/recovery/${encodeURIComponent(accountId)}/artifacts`;
   }
 
-  async function pullRecoverySnapshot() {
+  async function pullRecoverySnapshot(ownership?: HydrationLocalStateOwnership) {
     if (!BACKUP_URL) return false;
-    const { seedHex: seed, publicConfig: config } = unlocked();
+    if (ownership) requireHydrationLocalStateOwnership(ownership);
+    const { client, publicConfig: config } = sessionContext();
     const sessionGeneration = generation;
     const targetScope = scope;
-    const list = await fetchJson<{ artifacts?: RecoveryArtifact[] }>(BACKUP_URL, recoveryPath(config.account_id), recoveryHeaders(seed));
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(`${BACKUP_URL}${recoveryPath(config.account_id)}`, {
+        headers: { accept: "application/json", ...await recoveryHeaders(client, sessionGeneration) },
+      }, WALLET_VAULT_REQUEST_TIMEOUT_MS);
+    } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
+      if (ownership) requireHydrationLocalStateOwnership(ownership);
+      return false;
+    }
     ensureCurrent(sessionGeneration);
-    if (list === null) return false;
+    if (ownership) requireHydrationLocalStateOwnership(ownership);
+    if (!response.ok) return false;
+    const responseRaw = await awaitCurrent(sessionGeneration, readSdkResponseText(response, {
+      timeoutMs: WALLET_VAULT_REQUEST_TIMEOUT_MS,
+      label: "Recovery snapshot response",
+    }));
+    if (ownership) requireHydrationLocalStateOwnership(ownership);
+    const list = parseWalletJson(responseRaw);
     let snapshots: RecoveryArtifact[];
     try {
       snapshots = requireRecoveryArtifactHistory(list, config.account_id);
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError) throw error;
       throw error instanceof RecoveryStateConflictError
         ? error
         : new RecoveryStateConflictError(error);
@@ -1688,23 +2309,30 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     for (const snapshot of snapshots) {
       let payload: { version?: number; scope?: string; state?: unknown };
       try {
-        payload = JSON.parse(core.zylith_wallet_decrypt_recovery_artifact(seed, JSON.stringify(snapshot))) as {
+        payload = parseWalletJson(await awaitOwnedClient(
+          sessionGeneration,
+          client,
+          client.decryptRecoveryArtifact(JSON.stringify(snapshot)),
+        ), ["version"]) as {
           version?: number;
           scope?: string;
           state?: unknown;
         };
       } catch (error) {
+        if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
         ensureCurrent(sessionGeneration);
         throw new RecoveryStateConflictError(error);
       }
       ensureCurrent(sessionGeneration);
       if (scope !== targetScope) throw new Error("Wallet session changed. Retry.");
+      if (ownership) requireHydrationLocalStateOwnership(ownership);
       try {
         const snapshotState = recoverySnapshotStateForScope(payload, targetScope);
         if (snapshotState === null) continue;
         applicableSnapshots += 1;
         changed = mergeState(recoveredState, snapshotState) || changed;
       } catch (error) {
+        if (error instanceof WalletMigrationRequiredError) throw error;
         throw new RecoveryStateConflictError(error);
       }
     }
@@ -1712,15 +2340,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       state = recoveredState;
       stateWritesBlocked = false;
       try {
-        await saveState();
+        await saveState(ownership);
       } catch (error) {
-        stateWritesBlocked = true;
+        if (generation === sessionGeneration && scope === targetScope) stateWritesBlocked = true;
         throw error;
       }
     } else if (changed) {
       state = recoveredState;
-      await saveState();
+      await saveState(ownership);
     }
+    ensureCurrent(sessionGeneration);
+    if (ownership) requireHydrationLocalStateOwnership(ownership);
     recoveryHeadArtifactId = snapshots.at(-1)?.artifact_id ?? null;
     recoveryHeadSequence = snapshots.at(-1)?.sequence ?? 0;
     return applicableSnapshots > 0;
@@ -1730,7 +2360,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const requestedGeneration = generation;
     const upload = snapshotSaveChain
       .catch(() => false)
-      .then(() => requestedGeneration === generation ? pushRecoverySnapshotNow(force) : false);
+      .then(() => {
+        ensureCurrent(requestedGeneration);
+        return preserveSessionOnMigration(requestedGeneration, () => pushRecoverySnapshotNow(force));
+      });
     snapshotSaveChain = upload.catch(() => false);
     return upload;
   }
@@ -1742,36 +2375,41 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function pushRecoverySnapshotNow(force = false) {
-    if (!BACKUP_URL || !seedHex || !publicConfig) return false;
+    if (!BACKUP_URL || !walletClient || !publicConfig) return false;
     if (!force && (!snapshotDirty || Date.now() - lastSnapshotAt < RECOVERY_SNAPSHOT_MIN_INTERVAL_MS)) return false;
     const sessionGeneration = generation;
+    requireSessionStorageCompatibility(sessionGeneration);
     const targetScope = scope;
-    const seed = seedHex;
+    const client = walletClient;
     const accountId = publicConfig.account_id;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const now = Math.max(Date.now(), recoveryHeadSequence + 1);
       const revision = stateRevision;
       const stateSnapshot = structuredClone(state);
-      const artifact = JSON.parse(core.zylith_wallet_create_recovery_snapshot(
-        JSON.stringify({
-          seed_hex: seed,
+      requireWalletState(stateSnapshot);
+      const artifact = JSON.parse(await awaitOwnedClient(
+        sessionGeneration,
+        client,
+        client.createRecoverySnapshot(JSON.stringify({
           sequence: now,
           created_at_unix_ms: now,
-          payload_json: JSON.stringify(padRecoverySnapshotPayload({ version: 2, scope: targetScope, state: stateSnapshot })),
-        })
+          payload_json: JSON.stringify(padRecoverySnapshotPayload({ version: 2, key_schedule_version: WALLET_KEY_SCHEDULE_VERSION, scope: targetScope, state: stateSnapshot })),
+        })),
       )) as unknown;
       if (!isRecoveryArtifact(artifact) || artifact.account_id !== accountId) {
         throw new Error("The wallet produced a malformed recovery snapshot.");
       }
       try {
-        const stored = await postJson<unknown>(BACKUP_URL, recoveryPath(accountId), {
+        const stored = await awaitCurrent(sessionGeneration, postJson<unknown>(BACKUP_URL, recoveryPath(accountId), {
           artifact,
           previous_artifact_id: recoveryHeadArtifactId,
-        }, recoveryHeaders(seed));
+        }, await recoveryHeaders(client, sessionGeneration)));
         if (!isRecoveryArtifact(stored) || stableJsonStringify(stored) !== stableJsonStringify(artifact)) {
           throw new Error("The recovery service returned a mismatched snapshot acknowledgement.");
         }
       } catch (error) {
+        if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+        ensureCurrent(sessionGeneration);
         if (!(error instanceof RuntimeHttpStatusError) || error.status !== 409 || attempt !== 0) throw error;
         await pullRecoverySnapshot();
         ensureCurrent(sessionGeneration);
@@ -1862,26 +2500,27 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     depositOperationInFlight = true;
     const sessionGeneration = generation;
     try {
-    const { seedHex: seed, deployment: manifest } = unlocked();
-    if (!isDecimal(amountAtoms)) throw new Error("Deposit amount is invalid");
-    const amount = BigInt(amountAtoms);
-    if (amount <= 0n) throw new Error("Deposit amount must be greater than zero");
-    const rail = selectedDepositFundingRail(manifest);
-    const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
-    const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
-    const tokenAddress = fundingRailTokenAddress(manifest, asset);
-    const feeTokenAddress = fundingRailTokenAddress(
-      manifest,
-      manifest.market_registry.gas_fee_asset_id,
-    );
-    setPrivacyFundingStage("Connecting Starknet wallet and checking network");
-    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
-    ensureCurrent(sessionGeneration);
-    const plan = call<{
+      const { client, deployment: manifest } = unlocked();
+      if (!isDecimal(amountAtoms)) throw new Error("Deposit amount is invalid");
+      const amount = BigInt(amountAtoms);
+      if (amount <= 0n) throw new Error("Deposit amount must be greater than zero");
+      const rail = selectedDepositFundingRail(manifest);
+      const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
+      const tokenAddress = fundingRailTokenAddress(manifest, asset);
+      const plan = parseWalletJson(await awaitOwnedClient(
+        sessionGeneration,
+        client,
+        client.buildDepositSubmissionPlan(JSON.stringify({
+          bridge_address: bridgeAddress,
+          asset_id: asset,
+          amount: amount.toString(),
+          deposit_nonce: randomU64(),
+        })),
+      )) as {
       note_commitment: string;
       note_fields: NoteFields;
       encoded_args: Record<"funding_commitments" | "deposit_roots" | "encrypted_note_activations" | "note_commitments" | "asset_ids" | "amounts" | "withdraw_authorities", string[]>;
-    }>(core.zylith_wallet_build_deposit_submission_plan, { seed_hex: seed, asset_id: asset, amount: amount.toString(), deposit_nonce: randomU64() });
+    };
     const encodedFields = [
       "funding_commitments",
       "deposit_roots",
@@ -1917,6 +2556,23 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       || !isNonZeroFelt(plan.encoded_args.deposit_roots[0])
       || !isNonZeroFelt(plan.encoded_args.encrypted_note_activations[0])
     ) throw new Error("The wallet produced an inconsistent deposit plan.");
+    setPrivacyFundingStage("Connecting Starknet wallet and checking network");
+    const provider = await awaitCurrent(
+      sessionGeneration,
+      selectInjectedStarknetProvider(activeWalletAddress, () => ensureCurrent(sessionGeneration)),
+    );
+    const connectedChainId = await awaitCurrent(
+      sessionGeneration,
+      readStarknetWalletChainId(provider as never),
+    );
+    if (normalizeStrictFelt(requiredNonZeroFelt(connectedChainId, "connected_chain_id"))
+      !== normalizeStrictFelt(requiredNonZeroFelt(manifest.chain_id, "chain_id"))) {
+      throw new Error("Connected Starknet wallet chain does not match the deployment network.");
+    }
+    const depositWalletAddress = requiredNonZeroFelt(
+      activeWalletAddress,
+      "connected_wallet_address",
+    );
     const requestId = randomFeltHex();
     if (!addNote(plan.note_fields, asset, "deposit", {
       deposit: { funding_commitment: plan.encoded_args.funding_commitments[0], request_id: requestId, requested_at_ms: Date.now(), confirmed: false },
@@ -1927,6 +2583,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     try {
       await requireRecoverySnapshot();
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       state.notes = state.notes.filter(
         (candidate) => normalizeFeltForComparison(candidate.commitment) !== normalizeFeltForComparison(note.commitment),
       );
@@ -1941,23 +2599,23 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const [
         walletPrivacy,
         { privacyBridgeDepositFlatCalldata },
-      ] = await Promise.all([
+      ] = await awaitCurrent(sessionGeneration, Promise.all([
         import("./integrations/starknetWalletPrivacy"),
         import("./integrations/starknetPrivacyFunding"),
-      ]);
+      ]));
       walletSubmissionMayHaveLanded = walletPrivacy.walletPrivateSubmissionMayHaveLanded;
-      const feeResult = await starknetCall(
-        manifest.rpc_url,
-        privacyPoolAddress,
-        "get_fee_amount",
-        [],
+      const depositAsset = manifest.market_registry.assets.find(
+        (candidate) => candidate.asset_id === asset,
       );
-      const feeAmount = BigInt(requiredNonZeroFelt(feeResult[0], "privacy_pool_fee"));
-      const result = await walletPrivacy.fundZylithFromWallet({
+      if (!depositAsset) throw new Error(`${asset} is not configured for deposits.`);
+      const result = await awaitCurrent(sessionGeneration, walletPrivacy.fundZylithFromWallet({
         provider: provider as never,
         tokenAddress,
-        feeTokenAddress,
-        feeAmount,
+        tokenMetadata: {
+          name: asset,
+          symbol: asset,
+          decimals: depositAsset.decimals,
+        },
         amount,
         amountLabel: `${fromAtomicStr(amount.toString(), asset)} ${asset}`,
         bridgeAddress,
@@ -1965,9 +2623,15 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           amount,
           encodedArgs: plan.encoded_args,
         }),
-        onStage: setPrivacyFundingStage,
+        onStage: (stage) => {
+          ensureCurrent(sessionGeneration);
+          setPrivacyFundingStage(stage);
+        },
         transactionStatus: async (hash) => {
-          const status = await fetchTransactionReceiptStatus(hash, manifest);
+          const status = await awaitCurrent(
+            sessionGeneration,
+            fetchTransactionReceiptStatus(hash, manifest),
+          );
           if (status?.failed) return "failed";
           if (status?.confirmed) return "confirmed";
           return "pending";
@@ -1977,21 +2641,24 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           const currentAddress = connectedStarknetAddress();
           if (
             !currentAddress
-            || normalizeFeltForComparison(currentAddress) !== activeWalletAddress
+            || normalizeFeltForComparison(currentAddress)
+              !== normalizeFeltForComparison(depositWalletAddress)
           ) {
             throw new Error("Connected Starknet wallet changed during the deposit.");
           }
         },
         onPrivateDepositSubmissionStarted: () => {
+          ensureCurrent(sessionGeneration);
           walletSubmissionStarted = true;
         },
-      });
-      ensureCurrent(sessionGeneration);
+      }));
       note.deposit!.transaction_hash = result.transactionHash;
       submitted = true;
       await saveState();
       return { transaction_hash: result.transactionHash, note_commitment: note.commitment };
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       // once the wallet submission begins, a missing or malformed acknowledgement cannot prove the
       // transaction did not land. keep the deterministic note until chain recovery resolves it.
       const ambiguous = submitted
@@ -2000,11 +2667,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       await saveState();
       throw error;
     } finally {
-      if (generation === sessionGeneration && depositInFlight === requestId) {
-        depositInFlight = null;
+      if (generation === sessionGeneration) {
+        if (depositInFlight === requestId) depositInFlight = null;
+        void pushRecoverySnapshot(true).catch(() => false);
+        kick();
       }
-      void pushRecoverySnapshot(true).catch(() => false);
-      kick();
     }
     } finally {
       if (generation === sessionGeneration) depositOperationInFlight = false;
@@ -2012,10 +2679,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function refreshDeposits() {
+    const sessionGeneration = generation;
     const pending = state.notes.filter((note) => note.deposit && !note.deposit.confirmed && !note.deposit.failed);
     if (pending.length === 0) return false;
     // every wallet reads the same recent list and matches locally.
-    const recent = await exchange().recentDeposits();
+    const recent = await awaitCurrent(sessionGeneration, exchange().recentDeposits());
     if (
       !isRecord(recent)
       || !Array.isArray(recent.recent_funding_commitments)
@@ -2034,11 +2702,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       if (confirmed.has(normalizeFeltForComparison(note.deposit!.funding_commitment))) {
         markDepositRecordConfirmed(record);
       } else if (!stale) {
-        const status = note.deposit!.transaction_hash ? await receipt(note.deposit!.transaction_hash) : null;
+        const status = note.deposit!.transaction_hash
+          ? await receipt(note.deposit!.transaction_hash, sessionGeneration)
+          : null;
         if (status?.confirmed) {
           const registered = await fundingCommitmentRegistration(
             note.deposit!.funding_commitment,
-          ).catch(() => null);
+            sessionGeneration,
+          ).catch((error: unknown) => {
+            if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+            return null;
+          });
           if (registered === true) {
             markDepositRecordConfirmed(record);
             note.deposit = {
@@ -2072,14 +2746,14 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return changed;
   }
 
-  async function fundingCommitmentRegistration(fundingCommitment: string) {
+  async function fundingCommitmentRegistration(fundingCommitment: string, sessionGeneration: number) {
     const { deployment: manifest } = unlocked();
-    const fields = await starknetCall(
+    const fields = await awaitCurrent(sessionGeneration, starknetCall(
       manifest.rpc_url,
       manifest.contracts.commitment_registry,
       "is_funding_commitment_registered",
       [fundingCommitment],
-    );
+    ));
     return parseFundingCommitmentRegistration(fields);
   }
 
@@ -2096,13 +2770,29 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
   }
 
-  async function receipt(transactionHash: string): Promise<TransactionReceiptStatus | null> {
-    return fetchTransactionReceiptStatus(transactionHash, unlocked().deployment).catch(() => null);
+  async function receipt(
+    transactionHash: string,
+    sessionGeneration: number,
+  ): Promise<TransactionReceiptStatus | null> {
+    const manifest = unlocked().deployment;
+    try {
+      return await awaitCurrent(
+        sessionGeneration,
+        fetchTransactionReceiptStatus(transactionHash, manifest),
+      );
+    } catch {
+      ensureCurrent(sessionGeneration);
+      return null;
+    }
   }
 
-  async function recoveryTransactionState(transactionHash: string, submittedAtMs: number) {
+  async function recoveryTransactionState(
+    transactionHash: string,
+    submittedAtMs: number,
+    sessionGeneration: number,
+  ) {
     return recoveryTransactionDisposition(
-      await receipt(transactionHash),
+      await receipt(transactionHash, sessionGeneration),
       submittedAtMs,
       Date.now(),
       RECOVERY_TRANSACTION_MISSING_GRACE_MS,
@@ -2118,18 +2808,48 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function executionKeys() {
-    if (!registryCache || Date.now() - registryCache.loadedAt >= 60_000) {
-      const registry = requireExecutionKeyRegistry(await exchange().executionKeys());
-      assertPinnedExecutionKeys(core.zylith_wallet_registry_fingerprint(JSON.stringify(registry)), unlocked().deployment);
-      registryCache = { ...registry, loadedAt: Date.now() };
+    if (registryCache && Date.now() - registryCache.loadedAt < 60_000) {
+      return { keys: registryCache.keys };
     }
-    return { keys: registryCache.keys };
+    if (!registryLoadInFlight) {
+      const sessionGeneration = generation;
+      const pending = (async () => {
+        const sessionDeployment = unlocked().deployment;
+        const registry = requireExecutionKeyRegistry(
+          await awaitCurrent(sessionGeneration, exchange().executionKeys()),
+        );
+        const fingerprint = core.zylith_wallet_registry_fingerprint(JSON.stringify(registry));
+        const trustedDeployment = await awaitCurrent(
+          sessionGeneration,
+          deploymentForExecutionKey(fingerprint, sessionDeployment, (accepted) => {
+            ensureCurrent(sessionGeneration);
+            deployment = accepted;
+          }),
+        );
+        deployment = trustedDeployment;
+        registryCache = { ...registry, loadedAt: Date.now() };
+        return { keys: registryCache.keys };
+      })();
+      registryLoadInFlight = pending;
+    }
+    const pending = registryLoadInFlight;
+    try {
+      return await pending;
+    } finally {
+      if (registryLoadInFlight === pending) registryLoadInFlight = null;
+    }
   }
 
   /** sealed requests are already one fixed size: the envelope pads inside, in wasm. */
-  async function submitSealed(built: SealedBuild) {
-    assertSealedBuild(built);
-    return exchange().submit(built.sealed, built.response_key);
+  async function submitSealed(built: SealedBuild, sessionGeneration: number) {
+    const responseKey = built.response_key;
+    let submission: ReturnType<ReturnType<typeof exchange>["submit"]>;
+    try {
+      submission = exchange().submit(built.sealed, responseKey);
+    } finally {
+      built.response_key = "";
+    }
+    return awaitCurrent(sessionGeneration, submission);
   }
 
   /** the input an order locks: its base for a sell, its quote at the limit for a buy. */
@@ -2172,8 +2892,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (orderSubmissionInFlight) throw new Error("An order submission is already in progress.");
     orderSubmissionInFlight = true;
     const sessionGeneration = generation;
+    let sealedBuild: SealedBuild | null = null;
     try {
-    const { seedHex: seed } = unlocked();
+    const { client } = unlocked();
     if (
       !isBoundedString(draft.pair, 64)
       || draft.pair.length === 0
@@ -2193,14 +2914,18 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     const fundingAsset = draft.side === "Sell" ? pair.base_asset_id : pair.quote_asset_id;
     const funding = selectFunding(fundingAsset, fundingRequirement(draft, pair));
-    const [registry, rawStatus] = await Promise.all([executionKeys(), exchange().exchangeStatus()]);
+    const [registry, rawStatus] = await Promise.all([
+      executionKeys(),
+      awaitCurrent(sessionGeneration, exchange().exchangeStatus()),
+    ]);
     ensureCurrent(sessionGeneration);
     const status = requireExchangeStatus(rawStatus, unlocked().deployment);
     const expiresAt = draft.expiresAtMs ?? Date.now() + DEFAULT_ORDER_LIFETIME_MS;
     if (expiresAt <= Date.now()) throw new Error("Order expiry must be in the future");
-    const built = call<SealedBuild & { order_id: string; terms: unknown; nullifiers: string[] }>(core.zylith_wallet_build_order_request, {
-      seed_hex: seed,
-      chain_context: chainContext(),
+    const built = parseWalletJson(await awaitOwnedClient(
+      sessionGeneration,
+      client,
+      client.buildOrderRequest(JSON.stringify({
       pair: draft.pair,
       sell: draft.side === "Sell",
       external: draft.external,
@@ -2209,8 +2934,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       expiry_ms: expiresAt,
       funding: funding.map((note) => note.fields),
       registry,
-    });
-    assertSealedBuild(built);
+      })),
+    )) as SealedBuild & { order_id: string; terms: unknown; nullifiers: string[] };
+    sealedBuild = built;
+    assertSealedBuild(built, registry.keys[0].key_id, ["order_id", "terms", "nullifiers"]);
     const terms = isRecord(built.terms) ? built.terms : null;
     const owner = terms && isRecord(terms.owner) ? terms.owner : null;
     const expectedPairId = call<{ pair_id: string }>(core.zylith_wallet_market_ids, {
@@ -2271,6 +2998,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     try {
       await requireRecoverySnapshot();
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       const current = orderById(order.order_id) ?? order;
       releaseFunding(current);
       state.orders = state.orders.filter(
@@ -2282,15 +3011,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const persistedOrder = orderById(order.order_id);
     if (!persistedOrder) throw new Error("The backed-up order is missing from local state.");
     try {
-      await submitSealed(built);
+      await submitSealed(built, sessionGeneration);
       ensureCurrent(sessionGeneration);
       setOrder(persistedOrder, { state: "pending" });
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       if (definitiveRejection(error)) {
         releaseFunding(persistedOrder);
         setOrder(persistedOrder, { state: "failed", last_error: userFacingErrorMessage(error) });
         await saveState();
-        await pushRecoverySnapshot(true).catch(() => false);
+        await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
         throw error;
       }
       // the operator may have accepted it; the next refresh settles which.
@@ -2299,6 +3030,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     kick();
     return { order_id: persistedOrder.order_id };
     } finally {
+      if (sealedBuild) sealedBuild.response_key = "";
       if (generation === sessionGeneration) orderSubmissionInFlight = false;
     }
   }
@@ -2308,28 +3040,37 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (cancellationsInFlight.has(operationId)) throw new Error("This order cancellation is already in progress.");
     cancellationsInFlight.add(operationId);
     const sessionGeneration = generation;
+    let sealedBuild: SealedBuild | null = null;
     try {
-    const { seedHex: seed } = unlocked();
+    const { client } = unlocked();
     const order = orderById(orderId);
     if (!order || !OPEN_STATES.has(order.state)) throw new Error("The order is not open");
     const registry = await executionKeys();
     ensureCurrent(sessionGeneration);
-    const built = call<SealedBuild>(core.zylith_wallet_build_cancel_request, {
-      seed_hex: seed,
-      chain_context: chainContext(),
+    const built = parseWalletJson(await awaitOwnedClient(
+      sessionGeneration,
+      client,
+      client.buildCancelRequest(JSON.stringify({
       order_id: order.order_id,
       registry,
-    });
+      })),
+    )) as SealedBuild;
+    sealedBuild = built;
+    assertSealedBuild(built, registry.keys[0].key_id);
     const previousState = order.state;
     const previousCancelRequested = order.cancel_requested;
     setOrder(order, { state: "cancelling", cancel_requested: true });
     const cancellationRevision = order.updated_at_ms;
     await saveState();
-    void pushRecoverySnapshot(true).catch(() => false);
+    ensureCurrent(sessionGeneration);
+    await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
+    ensureCurrent(sessionGeneration);
     try {
-      await submitSealed(built);
+      await submitSealed(built, sessionGeneration);
       ensureCurrent(sessionGeneration);
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       if (definitiveRejection(error)) {
         const current = orderById(order.order_id);
         if (
@@ -2339,7 +3080,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         ) {
           setOrder(current, { state: previousState, cancel_requested: previousCancelRequested });
           await saveState();
-          await pushRecoverySnapshot(true).catch(() => false);
+          await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
         }
         throw error;
       }
@@ -2348,6 +3089,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     kick();
     } finally {
+      if (sealedBuild) sealedBuild.response_key = "";
       if (generation === sessionGeneration) cancellationsInFlight.delete(operationId);
     }
   }
@@ -2465,32 +3207,44 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
    * across refreshes; an idle wallet does not send an empty synthetic request. */
   async function fetchStatus(): Promise<StatusAnswer | null> {
     const sessionGeneration = generation;
-    const { seedHex: seed } = unlocked();
+    const { client } = unlocked();
     const orders = followedOrders();
     const exits = followedExits();
     if (orders.length === 0 && exits.length === 0) return null;
     const registry = await executionKeys();
     ensureCurrent(sessionGeneration);
-    const built = call<SealedBuild[]>(core.zylith_wallet_build_status_requests, {
+    const built = parseWalletJson(await awaitOwnedClient(
+      sessionGeneration,
+      client,
+      client.buildStatusRequests(JSON.stringify({
       registry,
-      seed_hex: seed,
-      chain_context: chainContext(),
       orders: orders.map((order) => ({ order_id: order.order_id, after_seq: order.seen_seqs.length > 0 ? Math.max(...order.seen_seqs) : 0 })),
       nullifiers: exits.map((note) => note.nullifier),
-    });
-    if (!Array.isArray(built) || built.length === 0 || built.length > Math.ceil((orders.length + exits.length) / 8)) {
-      throw new Error("The wallet did not build a valid status request set.");
+      })),
+    )) as SealedBuild[];
+    try {
+      if (!Array.isArray(built) || built.length === 0 || built.length > Math.ceil((orders.length + exits.length) / 8)) {
+        throw new Error("The wallet did not build a valid status request set.");
+      }
+      const request = built[statusChunkCursor % built.length];
+      assertSealedBuild(request, registry.keys[0].key_id);
+      statusChunkCursor = (statusChunkCursor + 1) % built.length;
+      const statusRequest = exchange().status(request.sealed, request.response_key);
+      const answer = await awaitCurrent(sessionGeneration, statusRequest);
+      return requireStatusAnswer(
+        answer,
+        orders.map((order) => order.order_id),
+        exits.map((note) => note.nullifier),
+      );
+    } finally {
+      if (Array.isArray(built)) {
+        for (const candidate of built) {
+          if (isRecord(candidate) && typeof candidate.response_key === "string") {
+            candidate.response_key = "";
+          }
+        }
+      }
     }
-    const request = built[statusChunkCursor % built.length];
-    assertSealedBuild(request);
-    statusChunkCursor = (statusChunkCursor + 1) % built.length;
-    const answer = await exchange().status(request.sealed, request.response_key);
-    ensureCurrent(sessionGeneration);
-    return requireStatusAnswer(
-      answer,
-      orders.map((order) => order.order_id),
-      exits.map((note) => note.nullifier),
-    );
   }
 
   async function refreshOrders(status: StatusAnswer | null) {
@@ -2502,14 +3256,14 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const entry = byId.get(normalizeFeltForComparison(order.order_id));
       if (!entry) continue;
       if (entry.status === "unknown") {
-        changed = (await resolveUnknownOrder(order)) || changed;
+        changed = (await resolveUnknownOrder(order, sessionGeneration)) || changed;
         continue;
       }
       const admissionClaimed = entry.status === "live"
         || entry.status === "closed"
         || entry.events.length > 0;
       if (admissionClaimed && !authenticatedAdmissions.has(normalizeFeltForComparison(order.order_id))) {
-        const admission = await fundingAdmissionState(order);
+        const admission = await fundingAdmissionState(order, sessionGeneration);
         ensureCurrent(sessionGeneration);
         if (admission === "unused") {
           if (entry.status === "closed") {
@@ -2567,9 +3321,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   /** an order the operator does not know: its funding nullifiers say whether it was ever admitted. */
-  async function resolveUnknownOrder(order: StoredOrder) {
+  async function resolveUnknownOrder(order: StoredOrder, sessionGeneration: number) {
     if (Date.now() - order.submitted_at_ms < UNKNOWN_ORDER_GRACE_MS && !order.cancel_requested) return false;
-    const admission = await fundingAdmissionState(order);
+    const admission = await fundingAdmissionState(order, sessionGeneration);
     if (admission === "unused") {
       releaseFunding(order);
       const state = unadmittedOrderState(order, Date.now());
@@ -2597,14 +3351,22 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return true;
   }
 
-  async function fundingAdmissionState(order: StoredOrder): Promise<"unused" | "spent" | "conflict"> {
-    const states = await Promise.all(order.nullifiers.map((nullifier) => nullifierState(nullifier)));
+  async function fundingAdmissionState(
+    order: StoredOrder,
+    sessionGeneration: number,
+  ): Promise<"unused" | "spent" | "conflict"> {
+    const states = await Promise.all(
+      order.nullifiers.map((nullifier) => nullifierState(nullifier, sessionGeneration)),
+    );
     return fundingAdmissionDisposition(states);
   }
 
-  async function nullifierState(nullifier: string) {
+  async function nullifierState(nullifier: string, sessionGeneration: number) {
     const { deployment: manifest } = unlocked();
-    const values = await starknetCall(manifest.rpc_url, manifest.contracts.exchange, "nullifier_state", [nullifier]);
+    const values = await awaitCurrent(
+      sessionGeneration,
+      starknetCall(manifest.rpc_url, manifest.contracts.exchange, "nullifier_state", [nullifier]),
+    );
     if (values.length !== 1 || !normalizeStrictFelt(values[0])) {
       throw new Error("The deployed nullifier state has an unexpected layout.");
     }
@@ -2615,14 +3377,14 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return value;
   }
 
-  async function pendingExit(note: WalletNote) {
+  async function pendingExit(note: WalletNote, sessionGeneration: number) {
     const { deployment: manifest } = unlocked();
-    const fields = await starknetCall(
+    const fields = await awaitCurrent(sessionGeneration, starknetCall(
       manifest.rpc_url,
       manifest.contracts.exchange,
       "pending_exit",
       [note.nullifier],
-    );
+    ));
     if (fields.length !== 5) throw new Error("The deployed pending exit has an unexpected layout.");
     const amount = onchainInteger(fields[1], MAX_U128);
     const maturesAt = onchainInteger(fields[4], MAX_U64);
@@ -2637,24 +3399,30 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     return Number(maturesAt) * 1_000;
   }
 
-  async function claimedOpenNoteId(exitCommitment: string) {
+  async function claimedOpenNoteId(exitCommitment: string, sessionGeneration: number) {
     const { deployment: manifest } = unlocked();
-    const fields = await starknetCall(
+    const fields = await awaitCurrent(sessionGeneration, starknetCall(
       manifest.rpc_url,
       manifest.contracts.privacy_deposit_bridge,
       "strk20_exit_claimed_open_note_id",
       [exitCommitment],
-    );
+    ));
     return parseClaimedOpenNoteId(fields);
   }
 
-  async function readRecoveryCapacity(note: ResidualNote): Promise<RecoveryCapacityView> {
+  async function readRecoveryCapacity(
+    note: ResidualNote,
+    sessionGeneration: number,
+  ): Promise<RecoveryCapacityView> {
     const { deployment: manifest } = unlocked();
-    const fields = await starknetCall(manifest.rpc_url, manifest.contracts.exchange, "capacity", [
-      String(note.reserved_seq),
-      note.pair_id,
-      note.sell ? "0x1" : "0x0",
-    ]);
+    const fields = await awaitCurrent(
+      sessionGeneration,
+      starknetCall(manifest.rpc_url, manifest.contracts.exchange, "capacity", [
+        String(note.reserved_seq),
+        note.pair_id,
+        note.sell ? "0x1" : "0x0",
+      ]),
+    );
     if (fields.length !== 9) throw new Error("The deployed recovery capacity has an unexpected layout.");
     const boundedAmounts = fields.slice(0, 3).concat(fields.slice(4, 7));
     const openedAtValue = onchainInteger(fields[3], MAX_U64);
@@ -2687,18 +3455,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   /** builds the exact public recovery statement from chain-indexed data only. */
   async function prepareResidualRecovery(orderId: string): Promise<ResidualRecoveryPreparation> {
     const sessionGeneration = generation;
-    const { seedHex: seed, deployment: manifest } = unlocked();
+    const { client, deployment: manifest } = unlocked();
     const order = orderById(orderId);
     if (!order?.residual) throw new Error("This order has no recoverable residual state.");
 
     const residual = requireStoredResidual(order.residual);
-    const pairFields = await starknetCall(
+    const pairFields = await awaitCurrent(sessionGeneration, starknetCall(
       manifest.rpc_url,
       manifest.contracts.exchange,
       "pair_config",
       [residual.note.pair_id],
-    );
-    ensureCurrent(sessionGeneration);
+    ));
     const configuredPair = pairConfig(order.pair);
     const registryPair = manifest.market_registry.markets.find(
       (candidate) => candidate.market_id === configuredPair.pair_id,
@@ -2763,8 +3530,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       // local state restored without cached membership reconstructs it from the
       // exact on-chain note-batch history through this transition.
       const [windowStart, windowEnd] = transitionWindows(residual.seq, residual.seq)[0];
-      const transitionList = await exchange().transitions(windowStart, windowEnd);
-      ensureCurrent(sessionGeneration);
+      const transitionList = await awaitCurrent(
+        sessionGeneration,
+        exchange().transitions(windowStart, windowEnd),
+      );
       const transition = requireTransitionRange(transitionList, windowStart, windowEnd)
         .find((entry) => entry.seq === residual.seq);
       if (!transition) throw new Error("The public chain index is missing the residual transition.");
@@ -2781,11 +3550,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       residual.note_root = membership.note_root;
       residual.membership = membership.membership;
       await saveState();
-      await pushRecoverySnapshot(true).catch(() => false);
+      await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
     }
     let capacity = { generation: 0, status: 0, total: "0", consumed_base: "0", pool_quote: "0", scale: "0" };
     if (BigInt(residual.note.reserved) !== 0n) {
-      const view = await readRecoveryCapacity(residual.note);
+      const view = await readRecoveryCapacity(residual.note, sessionGeneration);
       ensureCurrent(sessionGeneration);
       if (view.status !== CAPACITY_FILLED && view.status !== CAPACITY_FROZEN) {
         throw new ResidualCapacityFreezeRequiredError();
@@ -2803,7 +3572,20 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const prepared = order.residual_recovery?.residual_seq === residual.seq
       ? order.residual_recovery
       : undefined;
-    const built = call<{
+    const built = parseWalletJson(await awaitOwnedClient(
+      sessionGeneration,
+      client,
+      client.buildResidualRecovery(JSON.stringify({
+        note_root: membership.note_root,
+        note: residual.note,
+        membership: membership.membership,
+        output_asset_id: outputAssetId,
+        fee_bps: feeBps.toString(),
+        capacity,
+        input_exit_commitment: prepared?.input_exit_commitment ?? undefined,
+        output_exit_commitment: prepared?.output_exit_commitment ?? undefined,
+      })),
+    )) as {
       public: {
         nullifier: string;
         commitment: string;
@@ -2817,17 +3599,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       calldata: string[];
       input_exit_commitment?: string | null;
       output_exit_commitment?: string | null;
-    }>(core.zylith_wallet_build_residual_recovery, {
-      seed_hex: seed,
-      note_root: membership.note_root,
-      note: residual.note,
-      membership: membership.membership,
-      output_asset_id: outputAssetId,
-      fee_bps: feeBps.toString(),
-      capacity,
-      input_exit_commitment: prepared?.input_exit_commitment ?? undefined,
-      output_exit_commitment: prepared?.output_exit_commitment ?? undefined,
-    });
+    };
     order.residual_recovery = {
       ...(prepared ?? {}),
       residual_seq: residual.seq,
@@ -2861,7 +3633,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       proof_program_call: {
         contract_address: manifest.proof.residual_recovery_proof_program_address,
         entrypoint: "compile_residual_recovery_proof",
-        calldata: [manifest.contracts.exchange, String(built.witness.length), ...built.witness],
+        calldata: [String(built.witness.length), ...built.witness],
       },
       settlement_call: {
         contract_address: manifest.contracts.exchange,
@@ -2873,15 +3645,15 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
   }
 
-  async function pendingResidualExit(nullifier: string) {
+  async function pendingResidualExit(nullifier: string, sessionGeneration: number) {
     const { deployment: manifest } = unlocked();
     return parsePendingResidualExit(
-      await starknetCall(
+      await awaitCurrent(sessionGeneration, starknetCall(
         manifest.rpc_url,
         manifest.contracts.exchange,
         "pending_residual_exit",
         [nullifier],
-      ),
+      )),
     );
   }
 
@@ -2907,16 +3679,16 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   /** proves and requests the exact prepared residual exit without operator cooperation. */
   async function submitResidualRecovery(orderId: string): Promise<ResidualRecoverySubmission> {
     const sessionGeneration = generation;
-    const { seedHex: seed, deployment: manifest } = unlocked();
+    const { client, deployment: manifest } = unlocked();
     const prepared = await prepareResidualRecovery(orderId);
     ensureCurrent(sessionGeneration);
     const order = orderById(orderId);
     if (!order?.residual_recovery) throw new Error("The residual recovery was not persisted.");
     const persisted = order.residual_recovery;
-    const current = await nullifierState(prepared.nullifier);
+    const current = await nullifierState(prepared.nullifier, sessionGeneration);
     ensureCurrent(sessionGeneration);
     if (current === NULLIFIER_EXIT_PENDING || current === NULLIFIER_EXITED) {
-      const pending = await pendingResidualExit(prepared.nullifier);
+      const pending = await pendingResidualExit(prepared.nullifier, sessionGeneration);
       ensureCurrent(sessionGeneration);
       assertPendingResidualMatches(persisted, pending);
       persisted.matures_at = pending.matures_at;
@@ -2934,6 +3706,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const disposition = await recoveryTransactionState(
         persisted.request_transaction_hash,
         persisted.request_submitted_at_ms ?? order.updated_at_ms,
+        sessionGeneration,
       );
       ensureCurrent(sessionGeneration);
       if (disposition !== "retry") {
@@ -2959,39 +3732,90 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     }
     persisted.request_submitted_at_ms = undefined;
     const rail = selectedResidualRecoveryFundingRail(manifest);
-    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
-    ensureCurrent(sessionGeneration);
-    const { submitResidualRecovery: submit } = await import("./integrations/starknetPrivacyFunding");
-    let result: { transactionHash: string };
-    try {
-      result = await submit({
-        provider: provider as never,
-        seedHex: seed,
-        chainId: requiredNonZeroFelt(manifest.chain_id, "chain_id"),
-        rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
-        provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
-        provingOhttpPolicy: rail.provingOhttpPolicy,
-        paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
-        paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
-        privacyProofSignerClassHash: requiredNonZeroFelt(
+    const chainId = proofSignerContextFelt(manifest.chain_id, "chain_id");
+    const recoveryWalletAddress = requiredNonZeroFelt(
+      activeWalletAddress,
+      "connected_wallet_address",
+    );
+    const proofSignerMaterial = parseWalletProofSignerMaterial(await awaitOwnedClient(
+      sessionGeneration,
+      client,
+      client.deriveProofSigner(JSON.stringify({
+        proof_signer_class_hash: proofSignerContextFelt(
           rail.privacyProofSignerClassHash,
           "privacy_proof_signer_class_hash",
         ),
-        minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
-        proofProgramCall: {
-          contractAddress: prepared.proof_program_call.contract_address,
-          entrypoint: prepared.proof_program_call.entrypoint,
-          calldata: prepared.proof_program_call.calldata,
-        },
-        settlementCall: {
-          contractAddress: prepared.settlement_call.contract_address,
-          entrypoint: prepared.settlement_call.entrypoint,
-          calldata: prepared.settlement_call.calldata,
-        },
-      });
-    } catch (error) {
-      if (proofSubmissionStarted(error)) {
+      })),
+    ));
+    let result: { transactionHash: string };
+    try {
+      try {
         ensureCurrent(sessionGeneration);
+        const provider = await awaitCurrent(
+          sessionGeneration,
+          selectInjectedStarknetProvider(activeWalletAddress, () => ensureCurrent(sessionGeneration)),
+        );
+        const connectedChainId = await awaitCurrent(
+          sessionGeneration,
+          readStarknetWalletChainId(provider as never),
+        );
+        if (proofSignerContextFelt(connectedChainId, "connected_chain_id") !== chainId) {
+          throw new Error("Connected Starknet wallet chain does not match the deployment network.");
+        }
+        const { submitResidualRecovery: submit } = await awaitCurrent(
+          sessionGeneration,
+          import("./integrations/starknetPrivacyFunding"),
+        );
+        result = await awaitCurrent(sessionGeneration, submit({
+          provider: provider as never,
+          ...proofSignerMaterial,
+          chainId: proofSignerContextFelt(manifest.chain_id, "chain_id"),
+          rpcUrl: requiredString(manifest.rpc_url, "rpc_url"),
+          provingUrl: serviceUrl(rail.provingUrl, "/starknet-privacy-prover"),
+          provingOhttpPolicy: rail.provingOhttpPolicy,
+          paymasterAddress: requiredNonZeroFelt(rail.paymasterAddress, "privacy_paymaster_address"),
+          paymasterUrl: requiredString(rail.paymasterUrl, "privacy_paymaster_url"),
+          privacyProofSignerClassHash: proofSignerContextFelt(
+            rail.privacyProofSignerClassHash,
+            "privacy_proof_signer_class_hash",
+          ),
+          minProvingDelayBlocks: rail.minProvingDelayBlocks ?? DEFAULT_MIN_PROVING_DELAY_BLOCKS,
+          proofProgramCall: {
+            contractAddress: prepared.proof_program_call.contract_address,
+            entrypoint: prepared.proof_program_call.entrypoint,
+            calldata: prepared.proof_program_call.calldata,
+          },
+          settlementCall: {
+            contractAddress: prepared.settlement_call.contract_address,
+            entrypoint: prepared.settlement_call.entrypoint,
+            calldata: prepared.settlement_call.calldata,
+          },
+          assertWalletContext: async () => {
+            ensureCurrent(sessionGeneration);
+            const currentAddress = connectedProviderAddress(provider as never)
+              ?? connectedStarknetAddress();
+            if (
+              !currentAddress
+              || normalizeFeltForComparison(currentAddress)
+                !== normalizeFeltForComparison(recoveryWalletAddress)
+            ) {
+              throw new Error("Connected Starknet wallet changed during residual recovery.");
+            }
+            const currentChainId = await awaitCurrent(
+              sessionGeneration,
+              readStarknetWalletChainId(provider as never),
+            );
+            if (proofSignerContextFelt(currentChainId, "connected_chain_id") !== chainId) {
+              throw new Error("Connected Starknet wallet chain changed during residual recovery.");
+            }
+          },
+        }));
+      } finally {
+        proofSignerMaterial.proofSignerPrivateKey = "";
+      }
+    } catch (error) {
+      ensureCurrent(sessionGeneration);
+      if (proofSubmissionStarted(error)) {
         persisted.request_submitted_at_ms = Date.now();
         order.updated_at_ms = persisted.request_submitted_at_ms;
         await saveState();
@@ -3004,7 +3828,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     persisted.request_submitted_at_ms = Date.now();
     order.updated_at_ms = persisted.request_submitted_at_ms;
     await saveState();
-    await pushRecoverySnapshot(true).catch(() => false);
+    await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
     return {
       nullifier: prepared.nullifier,
       transaction_hash: result.transactionHash,
@@ -3019,9 +3843,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     const order = orderById(orderId);
     const prepared = order?.residual_recovery;
     if (!order || !prepared) throw new Error("Prepare and request this residual recovery first.");
-    const current = await nullifierState(prepared.nullifier);
-    const pending = await pendingResidualExit(prepared.nullifier);
-    ensureCurrent(sessionGeneration);
+    const current = await nullifierState(prepared.nullifier, sessionGeneration);
+    const pending = await pendingResidualExit(prepared.nullifier, sessionGeneration);
     assertPendingResidualMatches(prepared, pending);
     prepared.matures_at = pending.matures_at;
     if (current === NULLIFIER_EXITED) {
@@ -3043,6 +3866,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const disposition = await recoveryTransactionState(
         prepared.finalization_transaction_hash,
         prepared.finalization_submitted_at_ms ?? order.updated_at_ms,
+        sessionGeneration,
       );
       ensureCurrent(sessionGeneration);
       if (disposition !== "retry") {
@@ -3057,21 +3881,22 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       prepared.finalization_submitted_at_ms = undefined;
       await saveState();
     }
-    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
-    ensureCurrent(sessionGeneration);
-    const result = await executeStarknetWalletCall(provider, {
+    const provider = await awaitCurrent(
+      sessionGeneration,
+      selectInjectedStarknetProvider(activeWalletAddress, () => ensureCurrent(sessionGeneration)),
+    );
+    const result = await awaitCurrent(sessionGeneration, executeStarknetWalletCall(provider, {
       contractAddress: manifest.contracts.exchange,
       entrypoint: "finalize_residual_recovery",
       calldata: [prepared.nullifier],
-    });
-    ensureCurrent(sessionGeneration);
+    }));
     const finalizationHash = transactionHash(result);
     if (!finalizationHash) throw new Error("The wallet did not return a recovery-finalization transaction hash.");
     prepared.finalization_transaction_hash = finalizationHash;
     prepared.finalization_submitted_at_ms = Date.now();
     order.updated_at_ms = prepared.finalization_submitted_at_ms;
     await saveState();
-    await pushRecoverySnapshot(true).catch(() => false);
+    await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
     return {
       nullifier: prepared.nullifier,
       transaction_hash: prepared.finalization_transaction_hash ?? null,
@@ -3083,16 +3908,14 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   /** claims the user-owned legs staged by a finalized residual recovery. */
   async function claimResidualRecovery(orderId: string): Promise<ResidualRecoveryClaim> {
     const sessionGeneration = generation;
-    const { seedHex: seed, deployment: manifest } = unlocked();
+    const { deployment: manifest } = unlocked();
     const order = orderById(orderId);
     const prepared = order?.residual_recovery;
     if (!order || !prepared) throw new Error("This order has no prepared residual recovery.");
-    if ((await nullifierState(prepared.nullifier)) !== NULLIFIER_EXITED) {
+    if ((await nullifierState(prepared.nullifier, sessionGeneration)) !== NULLIFIER_EXITED) {
       throw new Error("Finalize the residual recovery before claiming its assets.");
     }
-    ensureCurrent(sessionGeneration);
-    const pending = await pendingResidualExit(prepared.nullifier);
-    ensureCurrent(sessionGeneration);
+    const pending = await pendingResidualExit(prepared.nullifier, sessionGeneration);
     assertPendingResidualMatches(prepared, pending);
     const outputAsset = order.side === "Sell" ? order.quote_asset : order.base_asset;
 
@@ -3105,11 +3928,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     ) => {
       if (BigInt(amount) === 0n) return null;
       if (!exitCommitment) throw new Error("A nonzero residual leg is missing its exit authority.");
-      const alreadyClaimed = await claimedOpenNoteId(exitCommitment);
-      ensureCurrent(sessionGeneration);
+      const alreadyClaimed = await claimedOpenNoteId(exitCommitment, sessionGeneration);
       if (alreadyClaimed) return null;
       const result = await submitExitClaimToWallet({
-        seed,
         manifest,
         asset,
         assetId,
@@ -3126,6 +3947,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const disposition = await recoveryTransactionState(
         prepared.input_claim_transaction_hash,
         prepared.input_claim_submitted_at_ms ?? order.updated_at_ms,
+        sessionGeneration,
       );
       ensureCurrent(sessionGeneration);
       if (disposition === "retry") {
@@ -3159,6 +3981,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const disposition = await recoveryTransactionState(
         prepared.output_claim_transaction_hash,
         prepared.output_claim_submitted_at_ms ?? order.updated_at_ms,
+        sessionGeneration,
       );
       ensureCurrent(sessionGeneration);
       if (disposition === "retry") {
@@ -3189,7 +4012,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       }
     }
     order.updated_at_ms = Date.now();
-    await pushRecoverySnapshot(true).catch(() => false);
+    await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
     return {
       input_transaction_hash: prepared.input_claim_transaction_hash ?? null,
       output_transaction_hash: prepared.output_claim_transaction_hash ?? null,
@@ -3205,8 +4028,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (!order || !residual || BigInt(residual.note.reserved) === 0n) {
       throw new Error("This order has no external capacity to freeze.");
     }
-    const capacity = await readRecoveryCapacity(residual.note);
-    ensureCurrent(sessionGeneration);
+    const capacity = await readRecoveryCapacity(residual.note, sessionGeneration);
     if (capacity.status === CAPACITY_FILLED || capacity.status === CAPACITY_FROZEN) {
       return { transaction_hash: null, already_final: true };
     }
@@ -3222,6 +4044,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       const disposition = await recoveryTransactionState(
         pendingFreeze.transaction_hash,
         pendingFreeze.submitted_at_ms,
+        sessionGeneration,
       );
       ensureCurrent(sessionGeneration);
       if (disposition !== "retry") {
@@ -3233,9 +4056,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       order.residual_capacity_freeze = undefined;
       await saveState();
     }
-    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
-    ensureCurrent(sessionGeneration);
-    const result = await executeStarknetWalletCall(provider, {
+    const provider = await awaitCurrent(
+      sessionGeneration,
+      selectInjectedStarknetProvider(activeWalletAddress, () => ensureCurrent(sessionGeneration)),
+    );
+    const result = await awaitCurrent(sessionGeneration, executeStarknetWalletCall(provider, {
       contractAddress: manifest.contracts.exchange,
       entrypoint: "freeze_expired_capacity",
       calldata: [
@@ -3244,8 +4069,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         residual.note.sell ? "0x1" : "0x0",
         String(capacity.generation),
       ],
-    });
-    ensureCurrent(sessionGeneration);
+    }));
     const hash = transactionHash(result);
     if (!hash) throw new Error("The wallet did not return a capacity-freeze transaction hash.");
     order.residual_capacity_freeze = {
@@ -3255,7 +4079,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     };
     order.updated_at_ms = order.residual_capacity_freeze.submitted_at_ms;
     await saveState();
-    await pushRecoverySnapshot(true).catch(() => false);
+    await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
     return {
       transaction_hash: hash,
       already_final: false,
@@ -3272,14 +4096,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     );
     if (scanning.length === 0) return false;
     const from = Math.min(...scanning.map((order) => Math.max(order.scan_after_seq, state.scanned_seq)));
-    const status = requireIndexerStatus(await exchange().indexerStatus());
-    ensureCurrent(sessionGeneration);
+    const status = requireIndexerStatus(
+      await awaitCurrent(sessionGeneration, exchange().indexerStatus()),
+    );
     if (status.latest_seq <= from) return false;
     const latestSeq = Math.min(status.latest_seq, from + MAX_TRANSITION_SCAN_SEQS);
     const transitions: TransitionOutputs[] = [];
     for (const [windowStart, windowEnd] of transitionWindows(from + 1, latestSeq)) {
-      const range = await exchange().transitions(windowStart, windowEnd);
-      ensureCurrent(sessionGeneration);
+      const range = await awaitCurrent(
+        sessionGeneration,
+        exchange().transitions(windowStart, windowEnd),
+      );
       transitions.push(...requireTransitionRange(range, windowStart, windowEnd)
         .filter((transition) => transition.seq > from && transition.seq <= latestSeq));
     }
@@ -3348,13 +4175,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       throw new Error("The note-batch membership position is invalid.");
     }
     const { deployment: manifest } = unlocked();
-    const countFields = await starknetCall(
+    const countFields = await awaitCurrent(sessionGeneration, starknetCall(
       manifest.rpc_url,
       manifest.contracts.exchange,
       "note_batch_count",
       [],
-    );
-    ensureCurrent(sessionGeneration);
+    ));
     if (countFields.length !== 1 || !normalizeStrictFelt(countFields[0])) {
       throw new Error("The deployed note-batch count has an unexpected layout.");
     }
@@ -3376,13 +4202,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     sessionGeneration: number,
   ) {
     const { deployment: manifest } = unlocked();
-    const fields = await starknetCall(
+    const fields = await awaitCurrent(sessionGeneration, starknetCall(
       manifest.rpc_url,
       manifest.contracts.exchange,
       "note_batch_roots",
       [String(start), String(end)],
-    );
-    ensureCurrent(sessionGeneration);
+    ));
     const expected = end - start + 1;
     if (
       fields.length !== expected + 1
@@ -3512,22 +4337,26 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     if (withdrawalsInFlight.has(operationId)) throw new Error("This withdrawal is already in progress.");
     withdrawalsInFlight.add(operationId);
     const sessionGeneration = generation;
+    let sealedBuild: SealedBuild | null = null;
     try {
-    const { seedHex: seed } = unlocked();
+    const { client } = unlocked();
     if (!withdrawalAvailable()) throw new Error("Withdrawals are not configured for this deployment.");
     const note = noteByCommitment(noteCommitment);
     if (!note || !(spendable(note) || note.exit?.stage === "failed")) throw new Error("This note cannot be withdrawn");
     const previousExit = note.exit ? structuredClone(note.exit) : undefined;
     const registry = await executionKeys();
     ensureCurrent(sessionGeneration);
-    const built = call<SealedBuild & { nullifier: string; exit_commitment: string }>(core.zylith_wallet_build_withdraw_request, {
-      seed_hex: seed,
-      chain_context: chainContext(),
+    const built = parseWalletJson(await awaitOwnedClient(
+      sessionGeneration,
+      client,
+      client.buildWithdrawRequest(JSON.stringify({
       note: note.fields,
       exit_commitment: note.exit?.exit_commitment,
       registry,
-    });
-    assertSealedBuild(built);
+      })),
+    )) as SealedBuild & { nullifier: string; exit_commitment: string };
+    sealedBuild = built;
+    assertSealedBuild(built, registry.keys[0].key_id, ["nullifier", "exit_commitment"]);
     if (
       normalizeFeltForComparison(built.nullifier) !== normalizeFeltForComparison(note.nullifier)
       || !isNonZeroFelt(built.exit_commitment)
@@ -3539,43 +4368,49 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     try {
       await requireRecoverySnapshot();
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       const current = noteByCommitment(note.commitment);
       if (current) current.exit = previousExit;
       await saveState();
       throw error;
     }
     try {
-      await submitSealed(built);
+      await submitSealed(built, sessionGeneration);
       ensureCurrent(sessionGeneration);
     } catch (error) {
+      if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
+      ensureCurrent(sessionGeneration);
       if (definitiveRejection(error)) {
         note.exit = { ...note.exit, stage: "failed", failure: userFacingErrorMessage(error) };
         await saveState();
-        await pushRecoverySnapshot(true).catch(() => false);
+        await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
       }
       throw error;
     }
     kick();
     return { nullifier: built.nullifier };
     } finally {
+      if (sealedBuild) sealedBuild.response_key = "";
       if (generation === sessionGeneration) withdrawalsInFlight.delete(operationId);
     }
   }
 
   async function refreshWithdrawals(status: StatusAnswer | null) {
+    const sessionGeneration = generation;
     const byNullifier = new Map((status?.withdrawals ?? []).map((entry) => [normalizeFeltForComparison(entry.nullifier), entry]));
     let changed = false;
     for (const note of state.notes.filter((candidate) => candidate.exit && !candidate.spent && candidate.exit.stage !== "failed")) {
       const exit = note.exit!;
       if (exit.stage === "claiming") {
-        changed = (await settleClaim(note)) || changed;
+        changed = (await settleClaim(note, sessionGeneration)) || changed;
         continue;
       }
       if (exit.stage !== "finalized") {
         const statusEntry = byNullifier.get(normalizeFeltForComparison(note.nullifier));
         const stage = statusEntry?.stage;
         if (stage && typeof stage === "object" && "Failed" in stage) {
-          const chainState = await nullifierState(note.nullifier);
+          const chainState = await nullifierState(note.nullifier, sessionGeneration);
           if (chainState === NULLIFIER_UNUSED) {
             note.exit = { ...exit, stage: "failed", failure: stage.Failed.reason };
             changed = true;
@@ -3598,12 +4433,12 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         const shouldReadChain = statusEntry !== undefined
           || Date.now() - exit.requested_at_ms >= UNKNOWN_WITHDRAWAL_GRACE_MS;
         if (note.exit!.stage !== "finalized" && shouldReadChain) {
-          const chainState = await nullifierState(note.nullifier);
+          const chainState = await nullifierState(note.nullifier, sessionGeneration);
           if (chainState === NULLIFIER_EXITED) {
             note.exit = { ...note.exit!, stage: "finalized" };
             changed = true;
           } else if (chainState === NULLIFIER_EXIT_PENDING) {
-            const maturesAtMs = await pendingExit(note);
+            const maturesAtMs = await pendingExit(note, sessionGeneration);
             if (note.exit!.stage !== "maturing" || note.exit!.matures_at_ms !== maturesAtMs) {
               note.exit = { ...note.exit!, stage: "maturing", matures_at_ms: maturesAtMs };
               changed = true;
@@ -3627,6 +4462,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   /** moves a matured exit into the connected wallet's shielded balance. */
   async function claimWithdrawal(noteCommitment: string) {
+    unlocked();
     const operationId = normalizeFeltForComparison(noteCommitment);
     if (claimsInFlight.has(operationId)) {
       throw new Error("This private withdrawal is already being received.");
@@ -3644,7 +4480,10 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
     try {
       return { transaction_hash: await claimExit(note, sessionGeneration) };
     } catch (error) {
-      if (sessionGeneration === generation) {
+      const failedBeforeProofSubmission = error instanceof ExitClaimAuthorizationError
+        || error instanceof WalletMigrationRequiredError
+        || error instanceof WalletSessionChangedError;
+      if (!failedBeforeProofSubmission && sessionGeneration === generation) {
         const current = noteByCommitment(note.commitment);
         if (current?.exit?.stage === "finalized") {
           current.exit = claimRetryState(current.exit, error, Date.now());
@@ -3659,10 +4498,9 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
 
   /** claims a finalized exit into the privacy pool as an open note the wallet owns. */
   async function claimExit(note: WalletNote, sessionGeneration: number) {
-    const { seedHex: seed, deployment: manifest } = unlocked();
+    const { deployment: manifest } = unlocked();
     const exit = note.exit!;
-    const alreadyClaimed = await claimedOpenNoteId(exit.exit_commitment);
-    ensureCurrent(sessionGeneration);
+    const alreadyClaimed = await claimedOpenNoteId(exit.exit_commitment, sessionGeneration);
     if (alreadyClaimed) {
       note.spent = true;
       note.exit = {
@@ -3676,7 +4514,6 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       return null;
     }
     const result = await submitExitClaimToWallet({
-      seed,
       manifest,
       asset: note.asset,
       assetId: note.asset,
@@ -3700,7 +4537,6 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   }
 
   async function submitExitClaimToWallet(input: {
-    seed: string;
     manifest: DeploymentConfig;
     asset: string;
     assetId: string;
@@ -3719,15 +4555,17 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       input.manifest.market_registry.gas_fee_asset_id,
     );
     const chainId = requiredNonZeroFelt(input.manifest.chain_id, "chain_id");
-    const feeResult = await starknetCall(
+    const feeResult = await awaitCurrent(input.sessionGeneration, starknetCall(
       input.manifest.rpc_url,
       privacyPoolAddress,
       "get_fee_amount",
       [],
-    );
+    ));
     const feeAmount = BigInt(requiredNonZeroFelt(feeResult[0], "privacy_pool_fee"));
-    const provider = await selectInjectedStarknetProvider(activeWalletAddress);
-    ensureCurrent(input.sessionGeneration);
+    const provider = await awaitCurrent(
+      input.sessionGeneration,
+      selectInjectedStarknetProvider(activeWalletAddress, () => ensureCurrent(input.sessionGeneration)),
+    );
     const walletAddress = connectedStarknetAddress();
     if (!walletAddress || normalizeFeltForComparison(walletAddress) !== activeWalletAddress) {
       throw new Error("Connected Starknet wallet changed during the private withdrawal.");
@@ -3738,11 +4576,11 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         privacyBridgeStrk20ExitAuthorizationCall,
         privacyBridgeStrk20ExitClaimFlatCalldata,
       },
-    ] = await Promise.all([
+    ] = await awaitCurrent(input.sessionGeneration, Promise.all([
       import("./integrations/starknetWalletPrivacy"),
       import("./integrations/starknetPrivacyFunding"),
-    ]);
-    const result = await claimZylithExitToWallet({
+    ]));
+    const result = await awaitCurrent(input.sessionGeneration, claimZylithExitToWallet({
       provider: provider as never,
       walletAddress,
       chainId,
@@ -3767,37 +4605,46 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
           throw new Error("Connected Starknet wallet changed during the private withdrawal.");
         }
       },
-      buildAuthorizationCall: (openNoteId) => {
-        const signature = call<{ signature_r: string; signature_s: string }>(
-          core.zylith_wallet_sign_strk20_exit_claim,
-          {
-            seed_hex: input.seed,
-            chain_id: chainId,
-            bridge_address: bridgeAddress,
-            privacy_pool_address: privacyPoolAddress,
-            exchange_address: chainContext(),
-            asset_id: input.assetId,
-            token_address: tokenAddress,
-            amount: input.amount,
-            exit_commitment: input.exitCommitment,
-            claim_account: paymasterAddress,
-            open_note_id: openNoteId,
-          },
-        );
-        return privacyBridgeStrk20ExitAuthorizationCall({
-          bridgeAddress,
-          exitCommitment: input.exitCommitment,
-          openNoteId,
-          signature,
-        });
+      buildAuthorizationCall: async (openNoteId) => {
+        try {
+          ensureCurrent(input.sessionGeneration);
+          const { client } = unlocked();
+          const signature = parseWalletJson(await awaitOwnedClient(
+            input.sessionGeneration,
+            client,
+            client.signStrk20ExitClaim(JSON.stringify({
+              bridge_address: bridgeAddress,
+              privacy_pool_address: privacyPoolAddress,
+              asset_id: input.assetId,
+              token_address: tokenAddress,
+              amount: input.amount,
+              exit_commitment: input.exitCommitment,
+              claim_account: paymasterAddress,
+              open_note_id: openNoteId,
+            })),
+          )) as { signature_r: string; signature_s: string };
+          return privacyBridgeStrk20ExitAuthorizationCall({
+            bridgeAddress,
+            exitCommitment: input.exitCommitment,
+            openNoteId,
+            signature,
+          });
+        } catch (error) {
+          if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) {
+            throw error;
+          }
+          throw new ExitClaimAuthorizationError();
+        }
       },
-    });
-    ensureCurrent(input.sessionGeneration);
+    }));
     return result;
   }
 
-  async function settleClaim(note: WalletNote) {
-    const alreadyClaimed = await claimedOpenNoteId(note.exit!.exit_commitment);
+  async function settleClaim(note: WalletNote, sessionGeneration: number) {
+    const alreadyClaimed = await claimedOpenNoteId(
+      note.exit!.exit_commitment,
+      sessionGeneration,
+    );
     if (alreadyClaimed) {
       note.spent = true;
       note.exit = {
@@ -3808,7 +4655,7 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       };
       return true;
     }
-    const status = await receipt(note.exit!.claim_transaction_hash!);
+    const status = await receipt(note.exit!.claim_transaction_hash!, sessionGeneration);
     if (status?.confirmed && !status.failed) {
       note.spent = true;
       return true;
@@ -3836,6 +4683,8 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   // refresh
 
   function refresh() {
+    if (!sessionReady) return Promise.reject(new Error("Wallet session is locked"));
+    ensureCurrent(generation);
     refreshInFlight ??= (async () => {
       const sessionGeneration = generation;
       try {
@@ -3844,26 +4693,34 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
         try {
           status = await fetchStatus();
         } catch (error) {
+          if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
           firstError = error;
         }
-        if (sessionGeneration !== generation) return;
+        ensureCurrent(sessionGeneration);
         const steps = [refreshDeposits, () => refreshOrders(status), scanTransitions, () => refreshWithdrawals(status)];
         let changed = false;
         for (const step of steps) {
           try {
             changed = (await step()) || changed;
           } catch (error) {
+            if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
             firstError ??= error;
           }
-          if (sessionGeneration !== generation) return;
+          ensureCurrent(sessionGeneration);
         }
         if (changed) await saveState();
         try {
           await pushRecoverySnapshot();
         } catch (error) {
+          if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
           firstError ??= error;
         }
+        ensureCurrent(sessionGeneration);
         if (firstError) throw firstError;
+      } catch (error) {
+        requireCurrentFailure(error, sessionGeneration);
+        clearMigrationSession(error, sessionGeneration);
+        throw error;
       } finally {
         if (generation === sessionGeneration) refreshInFlight = null;
       }
@@ -3892,18 +4749,26 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
   return {
     hasVault,
     vaultAuthMode: (starknetAddress) => {
-      if (starknetAddress && deviceSession.hasRecord(starknetAddress)) return "device-session";
-      return hasVault(starknetAddress) ? "wallet-signature" : "none";
+      const sessionGeneration = generation;
+      try {
+        ensureCurrent(sessionGeneration);
+        if (starknetAddress) requireNoLegacyDeviceRecord(starknetAddress);
+        if (starknetAddress && deviceRecordStore.read(starknetAddress)) return "device-session";
+        return hasVault(starknetAddress) ? "wallet-signature" : "none";
+      } catch (error) {
+        clearMigrationSession(error, sessionGeneration);
+        throw error;
+      }
     },
     isReady: (starknetAddress) => Boolean(
-      seedHex
+      sessionReady
       && publicConfig
       && (!starknetAddress
         || activeWalletAddress === normalizeFeltForComparison(starknetAddress)),
     ),
-    createWalletWithWalletSignature,
-    unlockWithDeviceSession,
-    unlockWithWalletSignature,
+    createWalletWithWalletSignature: guardSessionOperation(createWalletWithWalletSignature),
+    unlockWithDeviceSession: guardSessionOperation(unlockWithDeviceSession),
+    unlockWithWalletSignature: guardSessionOperation(unlockWithWalletSignature),
     getPublicConfig: () => publicConfig,
     lock,
     suspend,
@@ -3915,18 +4780,18 @@ export function createZylithWalletRuntime(core: WalletWasmModule): WalletRuntime
       residual_recovery_available: Boolean(order.residual),
     })),
     withdrawalAvailable,
-    submitDepositViaWallet,
-    submitOrder,
-    cancelOrder,
-    prepareResidualRecovery: (orderId) => runResidualOperation(orderId, () => prepareResidualRecovery(orderId)),
-    submitResidualRecovery: (orderId) =>
-      runResidualOperation(orderId, () => submitResidualRecovery(orderId)),
-    freezeResidualRecoveryCapacity: (orderId) => runResidualOperation(orderId, () => freezeResidualRecoveryCapacity(orderId)),
-    finalizeResidualRecovery: (orderId) => runResidualOperation(orderId, () => finalizeResidualRecovery(orderId)),
-    claimResidualRecovery: (orderId) => runResidualOperation(orderId, () => claimResidualRecovery(orderId)),
-    withdraw,
-    claimWithdrawal,
-    refresh,
+    submitDepositViaWallet: guardSessionOperation(submitDepositViaWallet),
+    submitOrder: guardSessionOperation(submitOrder),
+    cancelOrder: guardSessionOperation(cancelOrder),
+    prepareResidualRecovery: guardSessionOperation((orderId: string) => runResidualOperation(orderId, () => prepareResidualRecovery(orderId))),
+    submitResidualRecovery: guardSessionOperation((orderId: string) =>
+      runResidualOperation(orderId, () => submitResidualRecovery(orderId))),
+    freezeResidualRecoveryCapacity: guardSessionOperation((orderId: string) => runResidualOperation(orderId, () => freezeResidualRecoveryCapacity(orderId))),
+    finalizeResidualRecovery: guardSessionOperation((orderId: string) => runResidualOperation(orderId, () => finalizeResidualRecovery(orderId))),
+    claimResidualRecovery: guardSessionOperation((orderId: string) => runResidualOperation(orderId, () => claimResidualRecovery(orderId))),
+    withdraw: guardSessionOperation(withdraw),
+    claimWithdrawal: guardSessionOperation(claimWithdrawal),
+    refresh: guardSessionOperation(refresh),
   };
 }
 
@@ -4372,7 +5237,7 @@ function mergeResidualRecovery(
 }
 
 function emptyState(): WalletState {
-  return { version: 2, notes: [], orders: [], scanned_seq: 0 };
+  return { version: 2, key_schedule_version: WALLET_KEY_SCHEDULE_VERSION, notes: [], orders: [], scanned_seq: 0 };
 }
 
 function definitiveRejection(error: unknown) {
@@ -4390,12 +5255,6 @@ function definitiveRejection(error: unknown) {
 
 function maxZero(value: bigint) {
   return value < 0n ? 0n : value;
-}
-
-function normalizeSeed(value: string) {
-  const normalized = value.trim().replace(/^0x/i, "").toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(normalized)) throw new Error("Recovery seed must be 64 hex characters");
-  return normalized;
 }
 
 function randomU64() {

@@ -11,6 +11,7 @@ import { type DeploymentConfig, loadDeployment } from "../domain/deployment";
 import {
   normalizeConfiguredFelt,
   normalizeFeltForComparison,
+  STARKNET_FIELD_PRIME,
 } from "../domain/felt";
 import { starknetRpc } from "../domain/runtimeHttp";
 import {
@@ -115,6 +116,11 @@ export async function buildZylithWalletAuthTypedData(input: {
   if (!/^[\x20-\x7e]{1,31}$/.test(origin)) {
     throw new Error("Zylith wallet authorization origin is not a readable short string");
   }
+  if (input.messageVersion !== 2 || input.deploymentId.length > 66
+    || !/^0x[1-9a-f][0-9a-f]*$/.test(input.deploymentId)
+    || normalizeConfiguredFelt(input.deploymentId) !== input.deploymentId) {
+    throw new Error("Wallet authorization requires a canonical nonzero deployment felt.");
+  }
   return {
     types: {
       StarknetDomain: [
@@ -142,7 +148,7 @@ export async function buildZylithWalletAuthTypedData(input: {
       action: "Only sign on app.zylith.fi",
       wallet: input.walletAddress,
       origin,
-      deployment: feltFromHexHash(input.deploymentId),
+      deployment: input.deploymentId,
       version: String(input.messageVersion),
     },
   };
@@ -238,11 +244,6 @@ export async function sha256Hex(value: string) {
   return `0x${bytesToHex(new Uint8Array(digest))}`;
 }
 
-function feltFromHexHash(value: string) {
-  const normalized = value.trim().replace(/^0x/i, "").toLowerCase();
-  return `0x${normalized.slice(0, 62) || "0"}`;
-}
-
 function bytesToHex(bytes: Uint8Array) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
     ""
@@ -329,18 +330,26 @@ export function connectedProviderAddress(provider: StarknetInjectedProvider) {
  * the wallet the user connected, and only that wallet. another installed wallet is never
  * prompted or selected here: doing so would link a second account to this session.
  */
-export async function selectInjectedStarknetProvider(expectedAddress?: string | null) {
+export async function selectInjectedStarknetProvider(
+  expectedAddress?: string | null,
+  assertCurrent: () => void = () => undefined,
+) {
+  assertCurrent();
   const provider = selectedStarknetProvider();
   if (!provider) {
     throw new Error("Connect a Starknet wallet before submitting this transaction");
   }
   const deployment = await loadDeployment();
+  assertCurrent();
   // re-read the wallet account silently before every state-changing action; provider events can
   // arrive late, so the cached address alone is not an authorization boundary.
   let address = await restoreConnectedStarknetWallet().catch(() => null);
+  assertCurrent();
   if (!address) {
     const walletId = discoverStarknetWallets().find((option) => option.provider === provider)?.id;
+    assertCurrent();
     address = await connectStarknetProvider(provider as never, walletId);
+    assertCurrent();
   }
   if (!address) {
     throw new Error("Unlock your Starknet wallet and retry.");
@@ -358,22 +367,29 @@ export async function selectInjectedStarknetProvider(expectedAddress?: string | 
   ) {
     throw new Error("Selected Starknet wallet cannot submit this transaction");
   }
-  await ensureWalletChain(provider as never, deployment);
+  await ensureWalletChain(provider as never, deployment, assertCurrent);
+  assertCurrent();
   return provider;
 }
 
 export async function ensureWalletChain(
   provider: StarknetInjectedProvider,
-  deployment: Pick<DeploymentConfig, "chain_id" | "network" | "rpc_url">
+  deployment: Pick<DeploymentConfig, "chain_id" | "network" | "rpc_url">,
+  assertCurrent: () => void = () => undefined,
 ) {
   const expected = normalizeRuntimeChainId(deployment.chain_id);
   if (!expected) {
     throw new Error("Deployment manifest is missing the Starknet chain ID.");
   }
+  assertCurrent();
   const current = await requestWalletChainId(provider);
+  assertCurrent();
   if (normalizeRuntimeChainId(current) === expected) return;
+  assertCurrent();
   await requestWalletChainSwitch(provider, expected);
+  assertCurrent();
   const switched = await requestWalletChainId(provider);
+  assertCurrent();
   if (normalizeRuntimeChainId(switched) === expected) return;
   validateWalletChainMatch(deployment.chain_id, switched, deployment.network);
 }
@@ -663,7 +679,8 @@ export async function walletAuthDeploymentId(
   deployment: DeploymentConfig,
   messageVersion: WalletSignatureMessageVersion,
 ) {
-  return sha256Hex(
+  if (messageVersion !== 2) throw new Error("Unsupported wallet signature message version.");
+  const digest = await sha256Hex(
     stableJsonStringify({
       chain_id: deployment.chain_id,
       exchange: normalizeFeltForComparison(deployment.contracts.exchange),
@@ -672,6 +689,10 @@ export async function walletAuthDeploymentId(
       auth_message_version: messageVersion,
     })
   );
+  // the producer names the same 248-bit public deployment context the wallet has always signed.
+  const value = BigInt(`0x${digest.slice(2, 64)}`);
+  if (value === 0n || value >= STARKNET_FIELD_PRIME) throw new Error("Invalid wallet authorization deployment felt.");
+  return `0x${value.toString(16)}`;
 }
 
 /** a view call against the latest block. */
