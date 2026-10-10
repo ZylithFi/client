@@ -18,6 +18,8 @@ import {
   type MarketStats,
   type VenueBbo,
 } from "../lib/marketData";
+import { FailureNotice } from "../../components/FailureNotice";
+import { failureFromCode, type NormalizedFailure } from "../../domain/userFacingErrors";
 
 export function mergeMarketCandles(...collections: MarketCandle[][]) {
   const byTime = new Map<number, MarketCandle>();
@@ -44,6 +46,10 @@ export function TradePage({
   onDeposit,
   onSubmit,
   onViewOrders,
+  onRefreshStatus,
+  onSwitchNetwork,
+  onContactSupport,
+  onDismissError,
 }: {
   pairs: PairConfig[];
   pair: PairConfig | null;
@@ -51,7 +57,7 @@ export function TradePage({
   balances: WalletBalance[];
   walletReady: boolean;
   submitting: boolean;
-  submitError: string | null;
+  submitError: NormalizedFailure | null;
   orders: OrderRow[];
   online: boolean;
   onSelectPair: (pairId: string) => void;
@@ -59,6 +65,10 @@ export function TradePage({
   onDeposit: (asset: string) => void;
   onSubmit: (intent: TicketSubmitIntent) => Promise<boolean | void>;
   onViewOrders: () => void;
+  onRefreshStatus?: () => void | Promise<void>;
+  onSwitchNetwork?: () => void | Promise<void>;
+  onContactSupport?: () => void | Promise<void>;
+  onDismissError?: () => void | Promise<void>;
 }) {
   const [interval, setInterval] = useState<ChartInterval>("15m");
   const [candles, setCandles] = useState<MarketCandle[]>([]);
@@ -175,6 +185,10 @@ export function TradePage({
           onOpenWallet={onOpenWallet}
           onDeposit={onDeposit}
           onSubmit={onSubmit}
+          onRefreshStatus={onRefreshStatus}
+          onSwitchNetwork={onSwitchNetwork}
+          onContactSupport={onContactSupport}
+          onDismissError={onDismissError}
         />
       </div>
       <BboFeedBar feeds={venueBbos.length > 0 ? venueBbos : [
@@ -183,7 +197,15 @@ export function TradePage({
         { venue: "Kraken", bid: 0, ask: 0 },
         { venue: "OKX", bid: 0, ask: 0 },
       ]} />
-      {!online && <div className="orders-help-row" role="alert">Reference prices are unavailable. New orders are temporarily disabled.</div>}
+      {!online && (
+        <FailureNotice
+          className="orders-help-row"
+          failure={failureFromCode("REFERENCE_PRICE_UNAVAILABLE", {
+            stage: "reference-price-poll",
+            presentation: "inline",
+          })}
+        />
+      )}
       <OrdersPanel orders={orders} onViewAll={onViewOrders} />
     </main>
   );

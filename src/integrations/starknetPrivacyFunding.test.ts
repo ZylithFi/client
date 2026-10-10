@@ -6,15 +6,21 @@ import {
   privacyBridgeStrk20ExitClaimCalldata,
   privacyBridgeStrk20ExitClaimFlatCalldata,
   privacyBridgeStrk20ExitAuthorizationCall,
+  fundingRelaySubmissionOutcome,
   sanitizeFundingRelayErrorBody,
   shouldRetryDirectProvingTransport,
   runProvingTransportAttempts,
   starknetPrivacySdkChainId,
+  submitProofBearingCall,
   submitResidualRecovery,
   STARKNET_PRIVACY_OHTTP_EXECUTE_TIMEOUT_MS,
   type PrivacyBridgeDepositPlan,
   type SubmitResidualRecoveryInput,
 } from "./starknetPrivacyFunding";
+import {
+  proofSubmissionRejected,
+  proofSubmissionStarted,
+} from "./starknetPrivacyErrors";
 
 vi.mock("@starkware-libs/starknet-privacy-sdk/browser", () => ({
   ProvingServiceProofProvider: class {
@@ -41,6 +47,56 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("paymaster submission outcomes", () => {
+  const submission = () => submitProofBearingCall({
+    signerAddress: "0x1",
+    chainId: "0x2",
+    paymasterAddress: "0x3",
+    paymasterUrl: "https://relay.example.invalid",
+    callAndProof: {
+      call: { contractAddress: "0x4", entrypoint: "settle", calldata: [] },
+      proof: { data: "proof", output: ["0x5"], proofFacts: ["0x6"] },
+    },
+  });
+
+  it("parses only the relay's explicit bounded submission outcome", () => {
+    expect(fundingRelaySubmissionOutcome('{"submission_outcome":"not_submitted"}')).toBe("not_submitted");
+    expect(fundingRelaySubmissionOutcome('{"submission_outcome":"unknown"}')).toBe("unknown");
+    expect(fundingRelaySubmissionOutcome('{"submission_outcome":"failed"}')).toBeNull();
+    expect(fundingRelaySubmissionOutcome("not json")).toBeNull();
+  });
+
+  it("marks an explicit pre-submission rejection as replay-safe", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+      error: "request rejected",
+      submission_outcome: "not_submitted",
+    }), { status: 403 }));
+
+    const error = await submission().then(() => null, (caught) => caught);
+    expect(proofSubmissionRejected(error)).toBe(true);
+    expect(proofSubmissionStarted(error)).toBe(false);
+  });
+
+  it.each([
+    ["explicit unknown", JSON.stringify({ error: "pending reconciliation", submission_outcome: "unknown" })],
+    ["legacy response", JSON.stringify({ error: "service failed" })],
+  ])("marks a %s relay response as unsafe to replay", async (_label, body) => {
+    vi.stubGlobal("fetch", async () => new Response(body, { status: 503 }));
+
+    const error = await submission().then(() => null, (caught) => caught);
+    expect(proofSubmissionStarted(error)).toBe(true);
+    expect(proofSubmissionRejected(error)).toBe(false);
+  });
+
+  it("marks a lost relay acknowledgement as unsafe to replay", async () => {
+    vi.stubGlobal("fetch", async () => { throw new TypeError("fetch failed"); });
+
+    const error = await submission().then(() => null, (caught) => caught);
+    expect(proofSubmissionStarted(error)).toBe(true);
+    expect(proofSubmissionRejected(error)).toBe(false);
+  });
 });
 
 describe("proof signer v2 supplied material", () => {

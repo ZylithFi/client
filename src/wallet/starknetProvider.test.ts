@@ -3,9 +3,11 @@ import {
   buildZylithWalletAuthTypedData,
   connectedProviderAddress,
   ensureWalletChain,
+  preflightWalletAction,
   fetchTransactionReceiptStatus,
   walletErrorMessage,
   walletAuthDeploymentId,
+  WalletNetworkSwitchUnsupportedError,
 } from "./starknetProvider";
 import * as runtimeHttp from "../domain/runtimeHttp";
 import exampleDeployment from "../../public/deployment.example.json";
@@ -50,6 +52,113 @@ describe("starknet provider safety", () => {
     await expect(ensureWalletChain(provider, deployment)).rejects.toThrow(
       /did not report its network/i,
     );
+  });
+
+  it("deduplicates concurrent network-switch prompts and reports that a switch occurred", async () => {
+    let chainId = "0x1";
+    let releaseSwitch!: () => void;
+    const switchPending = new Promise<void>((resolve) => { releaseSwitch = resolve; });
+    const provider = {
+      request: vi.fn(async ({ type }: { type?: string }) => {
+        if (type === "wallet_requestChainId") return chainId;
+        if (type === "wallet_switchStarknetChain") {
+          await switchPending;
+          chainId = deployment.chain_id;
+          return true;
+        }
+        return null;
+      }),
+    };
+
+    const first = ensureWalletChain(provider, deployment);
+    const second = ensureWalletChain(provider, deployment);
+    await vi.waitFor(() => {
+      expect(provider.request.mock.calls.filter(([request]) => request.type === "wallet_switchStarknetChain"))
+        .toHaveLength(1);
+    });
+    releaseSwitch();
+
+    await expect(first).resolves.toBe("switched");
+    await expect(second).resolves.toBe("switched");
+  });
+
+  it("distinguishes an unsupported programmatic switch from a rejected switch", async () => {
+    const unsupported = {
+      request: vi.fn(async ({ type }: { type?: string }) => {
+        if (type === "wallet_requestChainId") return "0x1";
+        throw new Error("method not found");
+      }),
+    };
+    await expect(ensureWalletChain(unsupported, deployment)).rejects.toBeInstanceOf(
+      WalletNetworkSwitchUnsupportedError,
+    );
+
+    const rejected = {
+      request: vi.fn(async ({ type }: { type?: string }) => {
+        if (type === "wallet_requestChainId") return "0x1";
+        throw new Error("user rejected");
+      }),
+    };
+    await expect(ensureWalletChain(rejected, deployment)).rejects.toThrow(/user rejected/i);
+  });
+
+  it("rechecks wallet identity after a user-initiated network switch", async () => {
+    const account = { address: "0xabc" };
+    let chainId = "0x1";
+    const provider = {
+      account,
+      request: vi.fn(async ({ type }: { type?: string }) => {
+        if (type === "wallet_requestChainId") return chainId;
+        if (type === "wallet_switchStarknetChain") {
+          chainId = deployment.chain_id;
+          account.address = "0xdef";
+          return true;
+        }
+        return null;
+      }),
+    };
+
+    await expect(preflightWalletAction(provider, deployment, "0xabc"))
+      .rejects.toThrow(/wallet changed/i);
+  });
+
+  it("falls back to Xverse's wallet-owned network switch method", async () => {
+    let chainId = "0x1";
+    const provider = {
+      account: { address: "0xabc" },
+      request: vi.fn(async (request: { type?: string; method?: string; params?: unknown }) => {
+        if (request.type === "wallet_requestChainId") return chainId;
+        if (request.type === "wallet_switchStarknetChain") throw new Error("method not found");
+        if (request.method === "wallet_switchStarknetChain") throw new Error("method not found");
+        if (request.method === "wallet_changeNetwork") {
+          expect(request.params).toEqual({ name: "Testnet" });
+          chainId = deployment.chain_id;
+          return null;
+        }
+        return null;
+      }),
+    };
+
+    await expect(preflightWalletAction(provider, deployment, "0xabc"))
+      .resolves.toBe("switched");
+    expect(provider.request).toHaveBeenCalledWith({
+      method: "wallet_changeNetwork",
+      params: { name: "Testnet" },
+    });
+  });
+
+  it("does not accept an Xverse error response as a successful switch", async () => {
+    const provider = {
+      request: vi.fn(async (request: { type?: string; method?: string }) => {
+        if (request.type === "wallet_requestChainId") return "0x1";
+        if (request.method === "wallet_changeNetwork") {
+          return { status: "error", error: { message: "User rejected the request" } };
+        }
+        throw new Error("method not found");
+      }),
+    };
+
+    await expect(ensureWalletChain(provider, deployment)).rejects.toThrow(/user rejected/i);
   });
 
   it("shows the real origin and an explicit anti-phishing action in wallet auth", async () => {

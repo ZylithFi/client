@@ -357,12 +357,13 @@ async function postFundingRelayJson<T>(
     );
   } catch (error) {
     if (errorMessage(error) === "Runtime request timed out") {
-      throw new Error(timeoutMessage);
+      throw markProofSubmissionStarted(new Error(timeoutMessage, { cause: error }));
     }
     if (isFundingRelayNetworkError(error)) {
-      throw new Error(
-        "Private relay request failed. Check your connection and retry."
-      );
+      throw markProofSubmissionStarted(new Error(
+        "Private relay acknowledgement was not received.",
+        { cause: error },
+      ));
     }
     throw error;
   }
@@ -373,14 +374,36 @@ async function postFundingRelayJson<T>(
       label: "Private relay error response",
     }).catch(() => "");
     const detail = sanitizeFundingRelayErrorBody(text);
-    throw markProofSubmissionRejected(new Error(
+    const relayError = new Error(
       detail || `Private relay request failed with HTTP ${response.status}`
-    ));
+    );
+    if (fundingRelaySubmissionOutcome(text) === "not_submitted") {
+      throw markProofSubmissionRejected(relayError);
+    }
+    // A legacy relay, proxy-generated response, or an explicit `unknown` result cannot prove
+    // that the Starknet submission did not land. Treat it as started until reconciliation.
+    throw markProofSubmissionStarted(relayError);
   }
   return (await readSdkJsonResponse(response, {
     timeoutMs: Math.max(1, deadline - Date.now()),
     label: "Private relay response",
   })) as T;
+}
+
+export function fundingRelaySubmissionOutcome(
+  text: string,
+): "not_submitted" | "unknown" | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > DEFAULT_SDK_ERROR_RESPONSE_MAX_BYTES) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as { submission_outcome?: unknown };
+    return parsed.submission_outcome === "not_submitted"
+      || parsed.submission_outcome === "unknown"
+      ? parsed.submission_outcome
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function sanitizeFundingRelayErrorBody(text: string) {

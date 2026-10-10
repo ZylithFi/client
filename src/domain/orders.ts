@@ -2,6 +2,7 @@ import type { OrderState, WalletOrder } from "@zylith/sdk";
 import { formatPrice, fromAtomicStr } from "./assets";
 import type { PairConfig } from "./deployment";
 import { orderQuoteValue } from "./tradeIntent";
+import { failureFromCode, failureText, type NormalizedFailure } from "./userFacingErrors";
 
 /** an order as the tables show it, in human units. */
 export type OrderRow = {
@@ -29,6 +30,19 @@ export function isOpenOrder(row: { state: OrderState }) {
 
 export function hasPositiveAmount(value: string) {
   return /^\d+(?:\.\d+)?$/.test(value) && /[1-9]/.test(value);
+}
+
+export function orderOperationIsReconciling(
+  failure: NormalizedFailure,
+  rows: Array<Pick<OrderRow, "id" | "state">>,
+) {
+  if (!["unknown", "submitted"].includes(failure.outcome)) return false;
+  const candidates = failure.operationId
+    ? rows.filter((row) => row.id === failure.operationId)
+    : rows;
+  return failure.stage === "order-cancellation"
+    ? candidates.some((row) => row.state === "cancelling")
+    : candidates.some((row) => row.state === "submitting" || row.state === "pending");
 }
 
 export function orderStatusLabel(row: OrderRow) {
@@ -87,7 +101,12 @@ export function orderRows(orders: WalletOrder[], pairs: PairConfig[], assetUnitP
           fees: order.fees === "0" ? "None" : `${fromAtomicStr(order.fees, proceedsAsset)} ${proceedsAsset}`,
           submittedAt: Number.isSafeInteger(order.submitted_at_ms) ? order.submitted_at_ms : 0,
           recoveryAvailable: order.residual_recovery_available === true,
-          error: order.last_error,
+          error: order.last_error
+            ? failureText(failureFromCode("ORDER_FAILED", {
+                stage: "order-history",
+                outcome: "failed",
+              }))
+            : undefined,
         },
       ];
     } catch {

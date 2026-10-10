@@ -21,6 +21,17 @@ import {
 
 const WALLET_SIGNATURE_REQUEST_TIMEOUT_MS = 90_000;
 const STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS = 10_000;
+const NETWORK_SWITCH_IN_FLIGHT = new WeakMap<object, Promise<boolean>>();
+
+export class WalletNetworkSwitchUnsupportedError extends Error {
+  readonly networkName: string;
+
+  constructor(networkName: string) {
+    super(`Switch network in your wallet to ${networkName}.`);
+    this.name = "WalletNetworkSwitchUnsupportedError";
+    this.networkName = networkName;
+  }
+}
 
 export type TransactionReceiptStatus = {
   failed: boolean;
@@ -367,7 +378,9 @@ export async function selectInjectedStarknetProvider(
   ) {
     throw new Error("Selected Starknet wallet cannot submit this transaction");
   }
-  await ensureWalletChain(provider as never, deployment, assertCurrent);
+  const chainId = await requestWalletChainId(provider as never);
+  assertCurrent();
+  validateWalletChainMatch(deployment.chain_id, chainId, deployment.network);
   assertCurrent();
   return provider;
 }
@@ -384,14 +397,74 @@ export async function ensureWalletChain(
   assertCurrent();
   const current = await requestWalletChainId(provider);
   assertCurrent();
-  if (normalizeRuntimeChainId(current) === expected) return;
+  if (normalizeRuntimeChainId(current) === expected) return "already-correct" as const;
   assertCurrent();
-  await requestWalletChainSwitch(provider, expected);
+  const switchedProgrammatically = await requestWalletChainSwitchDeduplicated(
+    provider,
+    expected,
+    deployment.network,
+  );
+  if (!switchedProgrammatically) {
+    throw new WalletNetworkSwitchUnsupportedError(
+      configuredNetworkName(deployment.network),
+    );
+  }
   assertCurrent();
   const switched = await requestWalletChainId(provider);
   assertCurrent();
-  if (normalizeRuntimeChainId(switched) === expected) return;
+  if (normalizeRuntimeChainId(switched) === expected) return "switched" as const;
   validateWalletChainMatch(deployment.chain_id, switched, deployment.network);
+  return "switched" as const;
+}
+
+export async function preflightWalletAction(
+  provider: StarknetInjectedProvider,
+  deployment: Pick<DeploymentConfig, "chain_id" | "network" | "rpc_url">,
+  expectedAddress: string,
+) {
+  assertWalletIdentity(provider, expectedAddress);
+  const readiness = await ensureWalletChain(provider, deployment);
+  assertWalletIdentity(provider, expectedAddress);
+  return readiness;
+}
+
+function assertWalletIdentity(
+  provider: StarknetInjectedProvider,
+  expectedAddress: string,
+) {
+  const address = connectedProviderAddress(provider);
+  if (
+    !address
+    || normalizeFeltForComparison(address)
+      !== normalizeFeltForComparison(expectedAddress)
+  ) {
+    throw new Error("Connected Starknet wallet changed during the operation.");
+  }
+}
+
+function configuredNetworkName(network: string) {
+  return network === "sepolia"
+    ? "Starknet Sepolia"
+    : network === "mainnet"
+      ? "Starknet Mainnet"
+      : network || "the configured Starknet network";
+}
+
+function requestWalletChainSwitchDeduplicated(
+  provider: StarknetInjectedProvider,
+  chainId: string,
+  network: string,
+) {
+  const key = provider as object;
+  const existing = NETWORK_SWITCH_IN_FLIGHT.get(key);
+  if (existing) return existing;
+  const pending = requestWalletChainSwitch(provider, chainId, network).finally(() => {
+    if (NETWORK_SWITCH_IN_FLIGHT.get(key) === pending) {
+      NETWORK_SWITCH_IN_FLIGHT.delete(key);
+    }
+  });
+  NETWORK_SWITCH_IN_FLIGHT.set(key, pending);
+  return pending;
 }
 
 /** reads the connected wallet network without requesting a network change. */
@@ -415,12 +488,7 @@ export function validateWalletChainMatch(
     throw new Error("Connected Starknet wallet did not report its network.");
   }
   if (actual === expected) return;
-  const networkName =
-    deploymentNetwork === "sepolia"
-      ? "Starknet Sepolia"
-      : deploymentNetwork === "mainnet"
-        ? "Starknet Mainnet"
-      : deploymentNetwork || "the configured Starknet network";
+  const networkName = configuredNetworkName(deploymentNetwork ?? "");
   throw new Error(
     `Wrong Starknet network. Switch to ${networkName} in your wallet and retry.`
   );
@@ -428,20 +496,28 @@ export function validateWalletChainMatch(
 
 async function requestWalletChainSwitch(
   provider: StarknetInjectedProvider,
-  chainId: string
+  chainId: string,
+  network: string,
 ): Promise<boolean> {
   const providerRequest = safeWalletValue(provider, "request");
   if (typeof providerRequest !== "function") return false;
   const requests = [
     { type: "wallet_switchStarknetChain", params: { chainId } },
     { method: "wallet_switchStarknetChain", params: { chainId } },
+    {
+      method: "wallet_changeNetwork",
+      params: { name: network === "mainnet" ? "Mainnet" : "Testnet" },
+    },
   ];
   for (const request of requests) {
     try {
-      await withStarknetWalletRequestTimeout(
+      const result = await withStarknetWalletRequestTimeout(
         providerRequest.call(provider, request),
         STARKNET_WALLET_CHAIN_REQUEST_TIMEOUT_MS
       );
+      if (safeWalletValue(result, "status") === "error") {
+        throw new Error(walletErrorMessage(result) || "Wallet network switch was rejected");
+      }
       return true;
     } catch (error) {
       if (isUserRejectedWalletError(error)) throw error;

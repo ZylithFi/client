@@ -23,6 +23,8 @@ type FundZylithInput = WalletPrivacyOptions & {
   bridgeCalldata: string[];
   onStage?: (stage: string) => void;
   onPrivateDepositSubmissionStarted?: () => void;
+  onWalletTransactionSubmissionStarted?: () => void;
+  onWalletTransactionResolved?: () => void;
   transactionStatus?: (
     transactionHash: string,
   ) => Promise<"pending" | "confirmed" | "failed">;
@@ -154,15 +156,23 @@ export async function fundZylithFromWallet(
     const balanceBeforeShield = privateBalance;
     const transactionHash = await invokePrivateActions(input.provider, [
       { type: "deposit", token: depositToken, amount: feltHex(shieldAmount) },
-    ]);
+    ], input.onWalletTransactionSubmissionStarted);
     shieldTransactionHash ??= transactionHash;
     input.onStage?.("Waiting for shielded balance");
-    privateBalance = await waitForShieldTransaction(
-      input,
-      depositToken,
-      balanceBeforeShield,
-      transactionHash,
-    );
+    try {
+      privateBalance = await waitForShieldTransaction(
+        input,
+        depositToken,
+        balanceBeforeShield,
+        transactionHash,
+      );
+      input.onWalletTransactionResolved?.();
+    } catch (error) {
+      if (/shielding transaction failed/i.test(errorMessage(error))) {
+        input.onWalletTransactionResolved?.();
+      }
+      throw error;
+    }
     const expectedBalance = balanceBeforeShield + shieldAmount;
     estimatedFee = expectedBalance > privateBalance
       ? expectedBalance - privateBalance
@@ -171,8 +181,10 @@ export async function fundZylithFromWallet(
 
   input.onStage?.("Funding Zylith");
   input.assertWalletContext?.();
-  input.onPrivateDepositSubmissionStarted?.();
-  const transactionHash = await invokePrivateActions(input.provider, fundingActions);
+  const transactionHash = await invokePrivateActions(input.provider, fundingActions, () => {
+    input.onWalletTransactionSubmissionStarted?.();
+    input.onPrivateDepositSubmissionStarted?.();
+  });
   input.onStage?.("Deposit submitted");
   return { transactionHash, shieldTransactionHash };
 }
@@ -462,7 +474,7 @@ function parsePreparedPrivateCall(
 
 export function walletPrivateSubmissionMayHaveLanded(error: unknown) {
   const message = errorMessage(error);
-  return !/user[_ ]refused|user[_ ]rejected|user denied|cancelled|canceled|not[_ ]registered|insufficient[_ ]private[_ ]balance|privacy[_ ]leak|invalid[_ ]request[_ ]payload|api[_ ]version[_ ]not[_ ]supported|method not found|does not support|not supported|unsupported|unknown method/i.test(
+  return !/user[_ ]refused|user[_ ]rejected|user denied|cancelled|canceled|not[_ ]registered|insufficient[_ ]private[_ ]balance|privacy[_ ]leak|invalid[_ ]request[_ ]payload|api[_ ]version[_ ]not[_ ]supported|method not found|does not support|not supported|unsupported|unknown method|shielding transaction failed/i.test(
     message,
   );
 }
@@ -507,8 +519,12 @@ async function waitForShieldTransaction(
 async function invokePrivateActions(
   provider: WalletPrivacyProvider,
   actions: Array<Record<string, unknown>>,
+  onSubmissionStarted?: () => void,
 ) {
   const apiVersion = await requirePrivateStrk20Support(provider);
+  // Capability negotiation is read-only. Cross the financial execution boundary only
+  // immediately before invoking the wallet's state-changing request.
+  onSubmissionStarted?.();
   const result = await walletRequest(
     provider,
     "wallet_strk20InvokeTransaction",

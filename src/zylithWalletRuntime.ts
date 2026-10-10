@@ -57,7 +57,13 @@ import { browserSafeServiceUrl, normalizeUrl } from "./domain/serviceUrls";
 import type { PendingDeposit, WalletBalance } from "./domain/shieldedBalances";
 import { padRecoverySnapshotPayload } from "./domain/sizeClassPadding";
 import { orderQuoteValue } from "./domain/tradeIntent";
-import { userFacingErrorMessage } from "./domain/userFacingErrors";
+import {
+  failureText,
+  markOperationSubmissionNotStarted,
+  markOperationSubmissionRejected,
+  markOperationSubmissionStarted,
+  normalizeFailure,
+} from "./domain/userFacingErrors";
 import {
   WALLET_DEVICE_SESSION_DEFAULT_TTL_MS,
   createWalletDeviceRecordStore,
@@ -90,13 +96,13 @@ import {
   type TransactionReceiptStatus,
   buildZylithWalletAuthTypedData,
   connectedProviderAddress,
-  ensureWalletChain,
   executeStarknetWalletCall,
   fetchTransactionReceiptStatus,
   readStarknetWalletChainId,
   requestStarknetWalletTypedSignature,
   selectInjectedStarknetProvider,
   starknetCall,
+  validateWalletChainMatch,
   walletAuthDeploymentId,
 } from "./wallet/starknetProvider";
 
@@ -269,6 +275,7 @@ export type WalletNote = {
     request_id: string;
     requested_at_ms: number;
     transaction_hash?: string;
+    public_transaction_confirmed?: boolean;
     confirmed: boolean;
     failed?: boolean;
     failure_reason?: string;
@@ -512,9 +519,6 @@ const REFRESH_JITTER_MS = 1_000;
 const RECOVERY_SNAPSHOT_MIN_INTERVAL_MS = 60_000;
 const DEFAULT_ORDER_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_FUNDING_NOTES = 4;
-const PENDING_DEPOSIT_FAILURE_GRACE_MS = 10 * 60 * 1000;
-const CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS = 10 * 60 * 1000;
-const RECOVERY_TRANSACTION_MISSING_GRACE_MS = 10 * 60 * 1000;
 const DEPOSIT_CONFIRMATION_STALE_MS = 2 * 60 * 1000;
 const DEFAULT_MIN_PROVING_DELAY_BLOCKS = 10;
 const UNKNOWN_WITHDRAWAL_GRACE_MS = 2 * 60 * 1000;
@@ -584,19 +588,23 @@ function claimRetryState(
     stage: "finalized",
     claim_attempts: attempts,
     claim_retry_at_ms: nowMs + claimRetryDelay(attempts),
-    failure: userFacingErrorMessage(error).slice(0, 512),
+    failure: failureText(normalizeFailure(error, {
+      domain: "withdrawal",
+      operation: "claim",
+      stage: "withdrawal-claim",
+      outcome: "failed",
+    })).slice(0, 512),
   };
 }
 
 export function recoveryTransactionDisposition(
   status: TransactionReceiptStatus | null,
-  submittedAtMs: number,
-  nowMs: number,
-  missingGraceMs: number,
 ): "confirmed" | "pending" | "retry" {
   if (status?.failed) return "retry";
   if (status?.confirmed) return "confirmed";
-  if (status?.notFound && nowMs - submittedAtMs >= missingGraceMs) return "retry";
+  // A missing receipt is not an authoritative negative acknowledgement: the transaction can
+  // still be queued, indexed late, or hidden behind an unavailable RPC. Only an on-chain failed
+  // receipt proves that replacing the attempt is safe.
   return "pending";
 }
 const NULLIFIER_UNUSED = 0n;
@@ -1008,6 +1016,8 @@ function isStoredNote(value: unknown): value is WalletNote {
       || !isSafeNonNegativeInteger(value.deposit.requested_at_ms)
       || typeof value.deposit.confirmed !== "boolean"
       || (value.deposit.transaction_hash !== undefined && !isNonZeroFelt(value.deposit.transaction_hash))
+      || (value.deposit.public_transaction_confirmed !== undefined
+        && typeof value.deposit.public_transaction_confirmed !== "boolean")
       || (value.deposit.failed !== undefined && typeof value.deposit.failed !== "boolean")
       || (value.deposit.failure_reason !== undefined && !isBoundedString(value.deposit.failure_reason))
     ) return false;
@@ -1029,6 +1039,7 @@ function isStoredNote(value: unknown): value is WalletNote {
     if (
       value.exit.stage === "claiming"
       && !value.exit.claim_transaction_hash
+      && value.exit.claim_submitted_at_ms === undefined
     ) return false;
   }
   if (value.output !== undefined && (
@@ -1287,7 +1298,12 @@ export async function installConfiguredZylithWalletRuntime() {
     if (typeof module.default === "function") await module.default();
     setWalletRuntime(createZylithWalletRuntime(module));
   } catch (error) {
-    setWalletRuntime(null, userFacingErrorMessage(error, "Failed to load private trading runtime."));
+    setWalletRuntime(null, failureText(normalizeFailure(error, {
+      domain: "application",
+      operation: "load",
+      stage: "private-runtime-load",
+      presentation: "inline",
+    })));
   }
 }
 
@@ -1380,7 +1396,6 @@ export function createZylithWalletRuntime(
   let recoveryHeadSequence = 0;
   let stateRevision = 0;
   let stateWritesBlocked = false;
-  let depositInFlight: string | null = null;
   let depositOperationInFlight = false;
   let orderSubmissionInFlight = false;
   const cancellationsInFlight = new Set<string>();
@@ -1669,7 +1684,6 @@ async function awaitOwnedClient<T>(
     state = emptyState();
     registryCache = null;
     registryLoadInFlight = null;
-    depositInFlight = null;
     depositOperationInFlight = false;
     orderSubmissionInFlight = false;
     cancellationsInFlight.clear();
@@ -1790,10 +1804,12 @@ async function awaitOwnedClient<T>(
       throw new Error("Connected Starknet wallet changed during private trading authorization");
     }
     const manifest = await awaitCurrent(sessionGeneration, loadDeployment());
-    await awaitCurrent(
+    const connectedChainId = await awaitCurrent(
       sessionGeneration,
-      ensureWalletChain(provider as never, manifest, () => ensureCurrent(sessionGeneration)),
+      readStarknetWalletChainId(provider as never),
     );
+    ensureCurrent(sessionGeneration);
+    validateWalletChainMatch(manifest.chain_id, connectedChainId, manifest.network);
     const chainId = requiredNonZeroFelt(manifest.chain_id, "chain_id");
     const resolvedDeploymentId = deploymentId
       ?? (await awaitCurrent(sessionGeneration, walletAuthDeploymentId(manifest, messageVersion)));
@@ -2470,6 +2486,7 @@ async function awaitOwnedClient<T>(
         asset: note.asset,
         amount: note.fields.amount,
         transaction_hash: note.deposit!.transaction_hash,
+        public_transaction_confirmed: note.deposit!.public_transaction_confirmed,
         request_id: note.deposit!.request_id,
         requested_at_unix_ms: note.deposit!.requested_at_ms,
         confirmed: note.deposit!.confirmed,
@@ -2591,9 +2608,9 @@ async function awaitOwnedClient<T>(
       await saveState();
       throw error;
     }
-    depositInFlight = requestId;
     let submitted = false;
     let walletSubmissionStarted = false;
+    let walletTransactionOutstanding = false;
     let walletSubmissionMayHaveLanded = (_error: unknown) => true;
     try {
       const [
@@ -2651,6 +2668,14 @@ async function awaitOwnedClient<T>(
           ensureCurrent(sessionGeneration);
           walletSubmissionStarted = true;
         },
+        onWalletTransactionSubmissionStarted: () => {
+          ensureCurrent(sessionGeneration);
+          walletTransactionOutstanding = true;
+        },
+        onWalletTransactionResolved: () => {
+          ensureCurrent(sessionGeneration);
+          walletTransactionOutstanding = false;
+        },
       }));
       note.deposit!.transaction_hash = result.transactionHash;
       submitted = true;
@@ -2662,13 +2687,13 @@ async function awaitOwnedClient<T>(
       // once the wallet submission begins, a missing or malformed acknowledgement cannot prove the
       // transaction did not land. keep the deterministic note until chain recovery resolves it.
       const ambiguous = submitted
-        || (walletSubmissionStarted && walletSubmissionMayHaveLanded(error));
+        || ((walletSubmissionStarted || walletTransactionOutstanding)
+          && walletSubmissionMayHaveLanded(error));
       if (!ambiguous) state.notes = state.notes.filter((candidate) => candidate !== note);
       await saveState();
-      throw error;
+      throw ambiguous ? markOperationSubmissionStarted(error) : error;
     } finally {
       if (generation === sessionGeneration) {
-        if (depositInFlight === requestId) depositInFlight = null;
         void pushRecoverySnapshot(true).catch(() => false);
         kick();
       }
@@ -2706,6 +2731,8 @@ async function awaitOwnedClient<T>(
           ? await receipt(note.deposit!.transaction_hash, sessionGeneration)
           : null;
         if (status?.confirmed) {
+          note.deposit = { ...note.deposit!, public_transaction_confirmed: true };
+          changed = true;
           const registered = await fundingCommitmentRegistration(
             note.deposit!.funding_commitment,
             sessionGeneration,
@@ -2718,6 +2745,7 @@ async function awaitOwnedClient<T>(
             note.deposit = {
               ...note.deposit!,
               confirmed: true,
+              public_transaction_confirmed: undefined,
               failed: undefined,
               failure_reason: undefined,
               transaction_hash: undefined,
@@ -2730,17 +2758,20 @@ async function awaitOwnedClient<T>(
         const reason = pendingDepositFailureReason({
           record,
           status,
-          nowUnixMs: Date.now(),
-          inFlightRequestId: depositInFlight,
-          failureGraceMs: PENDING_DEPOSIT_FAILURE_GRACE_MS,
-          confirmedRegistrationGraceMs: CONFIRMED_DEPOSIT_REGISTRATION_GRACE_MS,
         });
         if (!reason) continue;
         markDepositRecordFailed(record, reason);
       } else {
         continue;
       }
-      note.deposit = { ...note.deposit!, confirmed: record.deposit_confirmed === true, failed: record.deposit_failed, failure_reason: record.deposit_failure_reason, transaction_hash: record.pending_deposit_tx };
+      note.deposit = {
+        ...note.deposit!,
+        confirmed: record.deposit_confirmed === true,
+        failed: record.deposit_failed,
+        failure_reason: record.deposit_failure_reason,
+        transaction_hash: record.pending_deposit_tx,
+        public_transaction_confirmed: record.public_transaction_confirmed,
+      };
       changed = true;
     }
     return changed;
@@ -2765,6 +2796,7 @@ async function awaitOwnedClient<T>(
       deposit_failure_reason: note.deposit!.failure_reason,
       funding_commitment: note.deposit!.funding_commitment,
       pending_deposit_tx: note.deposit!.transaction_hash,
+      public_transaction_confirmed: note.deposit!.public_transaction_confirmed,
       deposit_request_id: note.deposit!.request_id,
       deposit_requested_at_unix_ms: note.deposit!.requested_at_ms,
     };
@@ -2788,14 +2820,11 @@ async function awaitOwnedClient<T>(
 
   async function recoveryTransactionState(
     transactionHash: string,
-    submittedAtMs: number,
+    _submittedAtMs: number,
     sessionGeneration: number,
   ) {
     return recoveryTransactionDisposition(
       await receipt(transactionHash, sessionGeneration),
-      submittedAtMs,
-      Date.now(),
-      RECOVERY_TRANSACTION_MISSING_GRACE_MS,
     );
   }
 
@@ -3018,11 +3047,19 @@ async function awaitOwnedClient<T>(
       if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
       ensureCurrent(sessionGeneration);
       if (definitiveRejection(error)) {
+        const markedError = markDefinitiveSubmissionFailure(error);
         releaseFunding(persistedOrder);
-        setOrder(persistedOrder, { state: "failed", last_error: userFacingErrorMessage(error) });
+        setOrder(persistedOrder, {
+          state: "failed",
+          last_error: failureText(normalizeFailure(markedError, {
+            domain: "order",
+            operation: "order",
+            stage: "order-submission",
+          })),
+        });
         await saveState();
         await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
-        throw error;
+        throw markedError;
       }
       // the operator may have accepted it; the next refresh settles which.
     }
@@ -3072,6 +3109,7 @@ async function awaitOwnedClient<T>(
       if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
       ensureCurrent(sessionGeneration);
       if (definitiveRejection(error)) {
+        const markedError = markDefinitiveSubmissionFailure(error);
         const current = orderById(order.order_id);
         if (
           current?.state === "cancelling"
@@ -3082,7 +3120,7 @@ async function awaitOwnedClient<T>(
           await saveState();
           await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
         }
-        throw error;
+        throw markedError;
       }
       // an interrupted acknowledgement cannot prove the operator did not accept the
       // cancellation. private status reconciles the durable intent on the next refresh.
@@ -3720,17 +3758,13 @@ async function awaitOwnedClient<T>(
       persisted.request_submitted_at_ms = undefined;
       await saveState();
     }
-    if (
-      persisted.request_submitted_at_ms
-      && Date.now() - persisted.request_submitted_at_ms < RECOVERY_TRANSACTION_MISSING_GRACE_MS
-    ) {
+    if (persisted.request_submitted_at_ms) {
       return {
         nullifier: prepared.nullifier,
         transaction_hash: null,
         already_requested: true,
       };
     }
-    persisted.request_submitted_at_ms = undefined;
     const rail = selectedResidualRecoveryFundingRail(manifest);
     const chainId = proofSignerContextFelt(manifest.chain_id, "chain_id");
     const recoveryWalletAddress = requiredNonZeroFelt(
@@ -4382,9 +4416,19 @@ async function awaitOwnedClient<T>(
       if (error instanceof WalletMigrationRequiredError || error instanceof WalletSessionChangedError) throw error;
       ensureCurrent(sessionGeneration);
       if (definitiveRejection(error)) {
-        note.exit = { ...note.exit, stage: "failed", failure: userFacingErrorMessage(error) };
+        const markedError = markDefinitiveSubmissionFailure(error);
+        note.exit = {
+          ...note.exit,
+          stage: "failed",
+          failure: failureText(normalizeFailure(markedError, {
+            domain: "withdrawal",
+            operation: "withdrawal",
+            stage: "withdrawal-submission",
+          })),
+        };
         await saveState();
         await pushRecoverySnapshot(true).catch(bestEffortSnapshotFailure);
+        throw markedError;
       }
       throw error;
     }
@@ -4485,7 +4529,23 @@ async function awaitOwnedClient<T>(
         || error instanceof WalletSessionChangedError;
       if (!failedBeforeProofSubmission && sessionGeneration === generation) {
         const current = noteByCommitment(note.commitment);
-        if (current?.exit?.stage === "finalized") {
+        if (current?.exit?.stage === "finalized" && proofSubmissionStarted(error)) {
+          current.exit = {
+            ...current.exit,
+            stage: "claiming",
+            claim_transaction_hash: undefined,
+            claim_submitted_at_ms: Date.now(),
+            claim_retry_at_ms: undefined,
+            failure: failureText(normalizeFailure(error, {
+              domain: "withdrawal",
+              operation: "claim",
+              stage: "withdrawal-claim",
+              outcome: "unknown",
+            })).slice(0, 512),
+          };
+          await saveState();
+          void pushRecoverySnapshot(true).catch(() => false);
+        } else if (current?.exit?.stage === "finalized") {
           current.exit = claimRetryState(current.exit, error, Date.now());
           await saveState();
         }
@@ -4655,26 +4715,24 @@ async function awaitOwnedClient<T>(
       };
       return true;
     }
+    if (!note.exit!.claim_transaction_hash) {
+      // The relay accepted the request boundary but no transaction hash was acknowledged. Keep
+      // the claim durably blocked while the on-chain exit-claim index is reconciled.
+      return false;
+    }
     const status = await receipt(note.exit!.claim_transaction_hash!, sessionGeneration);
     if (status?.confirmed && !status.failed) {
       note.spent = true;
       return true;
     }
-    if (
-      status?.failed
-      || (status?.notFound
-        && Date.now() - (note.exit!.claim_submitted_at_ms ?? note.exit!.requested_at_ms)
-          >= RECOVERY_TRANSACTION_MISSING_GRACE_MS)
-    ) {
+    if (status?.failed) {
       note.exit = claimRetryState({
         ...note.exit!,
         stage: "finalized",
         claim_transaction_hash: undefined,
         claim_submitted_at_ms: undefined,
         open_note_id: undefined,
-      }, status?.failed
-        ? "The private withdrawal transaction failed on-chain."
-        : "The private withdrawal transaction was not found on-chain.", Date.now());
+      }, "The private withdrawal transaction failed on-chain.", Date.now());
       return true;
     }
     return false;
@@ -4971,6 +5029,9 @@ function mergeDepositState(local: WalletNote["deposit"], remote: WalletNote["dep
     requested_at_ms: Math.min(local.requested_at_ms, remote.requested_at_ms),
     transaction_hash: local.transaction_hash ?? remote.transaction_hash,
     confirmed,
+    public_transaction_confirmed: confirmed
+      ? undefined
+      : local.public_transaction_confirmed || remote.public_transaction_confirmed || undefined,
     failed: confirmed ? undefined : local.failed || remote.failed || undefined,
     failure_reason: confirmed
       ? undefined
@@ -5246,10 +5307,19 @@ function definitiveRejection(error: unknown) {
     return error instanceof ExchangeHttpError
       && error.status >= 400
       && error.status < 500
-      && error.status !== 408
-      && error.status !== 429;
+      && error.status !== 408;
   } catch {
     return false;
+  }
+}
+
+function markDefinitiveSubmissionFailure(error: unknown) {
+  try {
+    return error instanceof ExchangeHttpError
+      ? markOperationSubmissionNotStarted(error)
+      : markOperationSubmissionRejected(error);
+  } catch {
+    return markOperationSubmissionRejected(error);
   }
 }
 

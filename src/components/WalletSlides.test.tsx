@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import exampleDeployment from "../../public/deployment.example.json";
 import {
   DepositSlide,
   WalletSlide,
@@ -12,6 +13,11 @@ import {
   connectStarknetProvider,
   setWalletRuntime,
 } from "../domain/browserWallet";
+
+vi.mock("../domain/deployment", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../domain/deployment")>()),
+  loadDeployment: vi.fn().mockResolvedValue(exampleDeployment),
+}));
 
 function DepositHarness() {
   const [asset, setAsset] = useState("STRK");
@@ -28,6 +34,21 @@ function DepositHarness() {
     />
   );
 }
+
+beforeEach(async () => {
+  const provider = {
+    account: { address: "0xabc" },
+    request: vi.fn(async ({ type, method }: { type?: string; method?: string }) => {
+      if (type === "wallet_requestAccounts") return [{ address: "0xabc" }];
+      if (type === "wallet_requestChainId" || method === "wallet_requestChainId") {
+        return "0x534e5f5345504f4c4941";
+      }
+      if (type === "wallet_supportedWalletApi") return ["0.10.4"];
+      return null;
+    }),
+  };
+  await connectStarknetProvider(provider as never, "test-wallet");
+});
 
 afterEach(() => {
   (window as typeof window & { starknet_ready?: unknown }).starknet_ready =
@@ -46,6 +67,32 @@ describe("DepositSlide", () => {
     ).toBeInTheDocument();
   });
 
+  it("blocks a new deposit while an earlier deposit is unresolved", async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    setWalletRuntime({
+      refresh,
+      getPendingDeposits: () => [{
+        note_commitment: "0xpending",
+        asset: "STRK",
+        amount: "1000000000000000000",
+        requested_at_unix_ms: Date.now(),
+        confirmed: false,
+        failed: false,
+      }],
+    } as never);
+
+    render(<DepositHarness />);
+
+    expect(screen.getByRole("status")).toHaveAttribute(
+      "data-error-code",
+      "DEPOSIT_PENDING"
+    );
+    expect(screen.getByRole("button", { name: "Checking deposit status" }))
+      .toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  });
+
   it("checks private-wallet support without blocking ordinary wallet connection", async () => {
     const request = vi.fn(async ({ type }: { type: string }) => {
       if (type === "wallet_requestAccounts") return [{ address: "0xabc" }];
@@ -57,7 +104,7 @@ describe("DepositSlide", () => {
     render(<DepositHarness />);
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent(/does not support private strk20/i);
+      expect(screen.getByRole("alert")).toHaveTextContent(/unsupported wallet/i);
       expect(screen.getByRole("button", { name: "Deposit STRK" })).toBeDisabled();
     });
     expect(request).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -134,7 +181,7 @@ describe("DepositSlide", () => {
     });
   });
 
-  it("renders deposit failures with the application error color", async () => {
+  it("renders ambiguous deposit failures as non-retryable status checks", async () => {
     setWalletRuntime({
       isReady: () => true,
       submitDepositViaWallet: vi.fn().mockRejectedValue(new Error("deposit failed")),
@@ -147,7 +194,204 @@ describe("DepositSlide", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveStyle({ color: "var(--negative)" });
+    expect(alert).toHaveAttribute("data-error-code", "DEPOSIT_STATUS_UNKNOWN");
+    expect(alert).toHaveAttribute("data-recovery", "check-status");
+    expect(alert).toHaveAttribute("data-retry-safe", "false");
+  });
+
+  it("clears an ambiguous deposit blocker only after durable status reconciles", async () => {
+    let pending = false;
+    const runtime = {
+      isReady: () => true,
+      getPendingDeposits: () => pending ? [{
+        note_commitment: "0xpending",
+        asset: "STRK",
+        amount: "2000000000000000000",
+        requested_at_unix_ms: Date.now(),
+        confirmed: false,
+        failed: false,
+      }] : [],
+      submitDepositViaWallet: vi.fn(async () => {
+        pending = true;
+        throw new Error("deposit acknowledgement was lost");
+      }),
+    };
+    setWalletRuntime(runtime as never);
+    const props = {
+      onClose: vi.fn(),
+      defaultAsset: "STRK",
+      allAssets: ["STRK"],
+      starknetAddress: "0xabc",
+      walletReady: true,
+      onOpenWallet: vi.fn(),
+      setSlideAsset: vi.fn(),
+    };
+    const { rerender } = render(<DepositSlide open {...props} />);
+    fireEvent.change(screen.getByPlaceholderText("0"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    expect(await screen.findByRole("alert")).toHaveAttribute(
+      "data-error-code",
+      "DEPOSIT_STATUS_UNKNOWN"
+    );
+    expect(screen.getByRole("button", { name: "Checking deposit status" })).toBeDisabled();
+
+    pending = false;
+    rerender(<DepositSlide open {...props} />);
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Deposit STRK" })).toBeEnabled();
+  });
+
+  it("keeps a confirmed public transfer blocked until private credit arrives", () => {
+    setWalletRuntime({
+      isReady: () => true,
+      getPendingDeposits: () => [{
+        note_commitment: "0xpending",
+        asset: "STRK",
+        amount: "2000000000000000000",
+        transaction_hash: "0x123",
+        public_transaction_confirmed: true,
+        requested_at_unix_ms: Date.now() - 60_000,
+        confirmed: false,
+        failed: false,
+      }],
+    } as never);
+
+    render(<DepositHarness />);
+
+    expect(screen.getByRole("status")).toHaveAttribute(
+      "data-error-code",
+      "DEPOSIT_CREDIT_PENDING",
+    );
+    expect(screen.getByText(/public funding is confirmed/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Checking deposit status" })).toBeDisabled();
+  });
+
+  it("fails closed and disables deposits for incompatible proof configuration", async () => {
+    setWalletRuntime({
+      isReady: () => true,
+      getPendingDeposits: () => [],
+      submitDepositViaWallet: vi.fn().mockRejectedValue(
+        new Error("PROOF_VERSION_NOT_ALLOWED")
+      ),
+    } as never);
+    render(<DepositHarness />);
+
+    fireEvent.change(screen.getByPlaceholderText("0"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveAttribute("data-error-code", "PROOF_VERSION_INCOMPATIBLE");
+    expect(screen.getByRole("button", { name: "Deposit unavailable" }))
+      .toBeDisabled();
+  });
+
+  it("requires changing a privacy-blocked amount before it can be submitted again", async () => {
+    const submitDepositViaWallet = vi.fn().mockRejectedValue(
+      new Error("Private deposit privacy warning: USER_LINKAGE"),
+    );
+    setWalletRuntime({
+      isReady: () => true,
+      getPendingDeposits: () => [],
+      submitDepositViaWallet,
+    } as never);
+    render(<DepositHarness />);
+
+    const amount = screen.getByPlaceholderText("0");
+    fireEvent.change(amount, { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    expect(await screen.findByRole("alertdialog")).toHaveAttribute(
+      "data-error-code",
+      "PRIVACY_SAFETY_BLOCK",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit amount" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Deposit STRK" })).toBeDisabled();
+
+    fireEvent.change(amount, { target: { value: "3" } });
+    expect(screen.getByRole("button", { name: "Deposit STRK" })).toBeEnabled();
+  });
+
+  it("does not offer retry while deposit infrastructure is unavailable", async () => {
+    setWalletRuntime({
+      isReady: () => true,
+      getPendingDeposits: () => [],
+      submitDepositViaWallet: vi.fn().mockRejectedValue(
+        new Error("Private deposit service is unavailable")
+      ),
+    } as never);
+    render(<DepositHarness />);
+
+    fireEvent.change(screen.getByPlaceholderText("0"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    expect(await screen.findByRole("alert")).toHaveAttribute(
+      "data-error-code",
+      "DEPOSIT_UNAVAILABLE"
+    );
+    expect(screen.getByRole("button", { name: "Deposit unavailable" })).toBeDisabled();
+  });
+
+  it("treats wallet rejection as cancellation and allows a later fresh attempt", async () => {
+    setWalletRuntime({
+      isReady: () => true,
+      getPendingDeposits: () => [],
+      submitDepositViaWallet: vi.fn().mockRejectedValue(
+        new Error("User rejected the request")
+      ),
+    } as never);
+    render(<DepositHarness />);
+
+    fireEvent.change(screen.getByPlaceholderText("0"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    expect(await screen.findByRole("status")).toHaveAttribute(
+      "data-error-code",
+      "WALLET_REQUEST_CANCELLED"
+    );
+    expect(screen.getByRole("button", { name: "Deposit STRK" })).toBeEnabled();
+  });
+
+  it("switches networks on explicit deposit intent without submitting on the same click", async () => {
+    let chainId = "0x1";
+    const request = vi.fn(async ({ type, method }: { type?: string; method?: string }) => {
+      if (type === "wallet_requestAccounts") return [{ address: "0xabc" }];
+      if (type === "wallet_supportedWalletApi") return ["0.10.4"];
+      if (type === "wallet_requestChainId" || method === "wallet_requestChainId") return chainId;
+      if (type === "wallet_switchStarknetChain") {
+        chainId = exampleDeployment.chain_id;
+        return true;
+      }
+      return null;
+    });
+    await connectStarknetProvider({ account: { address: "0xabc" }, request } as never, "switching-wallet");
+    const submitDepositViaWallet = vi.fn().mockResolvedValue(undefined);
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    setWalletRuntime({
+      isReady: () => true,
+      getPendingDeposits: () => [],
+      submitDepositViaWallet,
+      refresh,
+    } as never);
+    render(<DepositHarness />);
+
+    const amount = screen.getByPlaceholderText("0");
+    fireEvent.change(amount, { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+
+    await waitFor(() => expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      type: "wallet_switchStarknetChain",
+    })));
+    expect(submitDepositViaWallet).not.toHaveBeenCalled();
+    expect(amount).toHaveValue("2");
+
+    fireEvent.click(screen.getByRole("button", { name: "Deposit STRK" }));
+    await waitFor(() => expect(submitDepositViaWallet).toHaveBeenCalledTimes(1));
   });
 
   it("authorizes trading inline before deposit submission", async () => {
@@ -396,6 +640,58 @@ describe("DepositSlide", () => {
 });
 
 describe("WithdrawSlide", () => {
+  it("clears an ambiguous withdrawal blocker only after durable status reconciles", async () => {
+    const note = {
+      note_commitment: "0xnote",
+      source: "output" as const,
+      asset: "STRK",
+      amount: "1000000000000000000",
+      locked: false,
+      spent: false,
+      exit_stage: undefined as "requested" | "finalized" | undefined,
+    };
+    const unrelated = {
+      ...note,
+      note_commitment: "0xunrelated",
+      amount: "2000000000000000000",
+      locked: true,
+      exit_stage: "requested" as const,
+    };
+    const withdraw = vi.fn(async () => {
+      note.locked = true;
+      note.exit_stage = "requested";
+      throw new Error("withdrawal acknowledgement was lost");
+    });
+    setWalletRuntime({
+      isReady: () => true,
+      withdrawalAvailable: () => true,
+      getWithdrawableNotes: () => [note, unrelated],
+      withdraw,
+    } as never);
+    const props = {
+      onClose: vi.fn(),
+      defaultAsset: "STRK",
+      allAssets: ["STRK"],
+      starknetAddress: "0xabc",
+      walletReady: true,
+      onOpenWallet: vi.fn(),
+      setSlideAsset: vi.fn(),
+    };
+    const { rerender } = render(<WithdrawSlide open {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Withdraw 1 STRK" }));
+
+    expect(await screen.findByRole("alert")).toHaveAttribute(
+      "data-error-code",
+      "WITHDRAWAL_STATUS_UNKNOWN"
+    );
+    expect(screen.getByRole("button", { name: "Withdrawal unavailable" })).toBeDisabled();
+
+    note.exit_stage = "finalized";
+    rerender(<WithdrawSlide open {...props} />);
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Receive privately" })).toBeEnabled();
+  });
+
   it("requires an explicit action before receiving a matured exit privately", async () => {
     const claimWithdrawal = vi.fn().mockResolvedValue({ transaction_hash: "0x1" });
     setWalletRuntime({
@@ -466,8 +762,8 @@ describe("WithdrawSlide", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Withdraw 1 STRK" }));
     notes = [{ ...notes[0], note_commitment: "0xsecond", amount: "2000000000000000000" }];
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/selected withdrawal note is no longer available/i));
-    expect(screen.getByRole("alert")).toHaveStyle({ color: "var(--negative)" });
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/balance changed/i));
+    expect(screen.getByRole("alert")).toHaveAttribute("data-recovery", "refresh-state");
     expect(withdraw).not.toHaveBeenCalled();
   });
 
@@ -685,6 +981,7 @@ describe("WalletSlide", () => {
       onStarknetDisconnected: vi.fn(),
     };
     const { rerender } = render(<WalletSlide open {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Unlock private balance" }));
     await waitFor(() => expect(unlockWithWalletSignature).toHaveBeenCalled());
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -696,14 +993,15 @@ describe("WalletSlide", () => {
   });
 
   it("does not expose recovery controls before Starknet connection", () => {
-    render(
+    const onStarknetConnected = vi.fn();
+    const { rerender } = render(
       <WalletSlide
         open
         onClose={vi.fn()}
         runtimeStatus="ready"
         hasVault
         starknetAddress={null}
-        onStarknetConnected={vi.fn()}
+        onStarknetConnected={onStarknetConnected}
         onStarknetDisconnected={vi.fn()}
       />
     );
@@ -738,7 +1036,7 @@ describe("WalletSlide", () => {
     expect(screen.queryByText("Recover with phrase")).not.toBeInTheDocument();
   });
 
-  it("auto-unlocks signature vaults without showing a passphrase field", async () => {
+  it("unlocks signature vaults only after an explicit action", async () => {
     let ready = false;
     const unlockWithWalletSignature = vi.fn(async () => {
       ready = true;
@@ -765,6 +1063,8 @@ describe("WalletSlide", () => {
     expect(
       screen.queryByPlaceholderText("Enter your passphrase")
     ).not.toBeInTheDocument();
+    expect(unlockWithWalletSignature).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Unlock private balance" }));
 
     await waitFor(() => {
       expect(unlockWithWalletSignature).toHaveBeenCalledWith("0xabc");
@@ -789,29 +1089,47 @@ describe("WalletSlide", () => {
     (window as typeof window & { starknet_ready?: unknown }).starknet_ready = {
       id: "ready",
       name: "Ready",
-      request: vi.fn(async ({ type }: { type?: string }) =>
+      request: vi.fn(async ({ type, method }: { type?: string; method?: string }) =>
         type === "wallet_supportedWalletApi"
           ? ["0.10.4"]
           : type === "wallet_requestAccounts"
             ? [{ address: "0xabc" }]
+            : type === "wallet_requestChainId" || method === "wallet_requestChainId"
+              ? "0x534e5f5345504f4c4941"
             : null
       ),
       account: { address: "0xabc" },
     };
     const onClose = vi.fn();
-    render(
+    const onStarknetConnected = vi.fn();
+    const { rerender } = render(
       <WalletSlide
         open
         onClose={onClose}
         runtimeStatus="ready"
         hasVault={false}
         starknetAddress={null}
-        onStarknetConnected={vi.fn()}
+        onStarknetConnected={onStarknetConnected}
         onStarknetDisconnected={vi.fn()}
       />
     );
 
     fireEvent.click(await screen.findByRole("button", { name: /Ready/i }));
+    await waitFor(() => expect(onStarknetConnected).toHaveBeenCalledWith("0xabc"));
+    rerender(
+      <WalletSlide
+        open
+        onClose={onClose}
+        runtimeStatus="ready"
+        hasVault={false}
+        starknetAddress="0xabc"
+        onStarknetConnected={onStarknetConnected}
+        onStarknetDisconnected={vi.fn()}
+      />
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Unlock private balance" })).toBeEnabled());
+    expect(unlockWithWalletSignature).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Unlock private balance" }));
 
     await waitFor(() => {
       expect(unlockWithWalletSignature).toHaveBeenCalledWith("0xabc");
@@ -840,9 +1158,8 @@ describe("WalletSlide", () => {
       />
     );
 
-    await waitFor(() => {
-      expect(unlockWithWalletSignature).toHaveBeenCalledTimes(1);
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock private balance" }));
+    await waitFor(() => expect(unlockWithWalletSignature).toHaveBeenCalledTimes(1));
 
     rerender(
       <WalletSlide
@@ -867,9 +1184,8 @@ describe("WalletSlide", () => {
       />
     );
 
-    await waitFor(() => {
-      expect(unlockWithWalletSignature).toHaveBeenCalledTimes(2);
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock private balance" }));
+    await waitFor(() => expect(unlockWithWalletSignature).toHaveBeenCalledTimes(2));
   });
 
   it("does not replace an existing private account when vault unlock misses", async () => {
@@ -894,12 +1210,11 @@ describe("WalletSlide", () => {
       />
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Unlock private balance" }));
     await waitFor(() => {
       expect(unlockWithWalletSignature).toHaveBeenCalledTimes(1);
       expect(createWalletWithWalletSignature).not.toHaveBeenCalled();
-      expect(
-        screen.getByText("Trading authorization failed. Retry in your wallet.")
-      ).toBeInTheDocument();
+      expect(screen.getAllByText("Reconnect wallet")).toHaveLength(2);
     });
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -923,10 +1238,9 @@ describe("WalletSlide", () => {
       />
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Enable private trading" }));
     await waitFor(() => {
-      expect(
-        screen.getByText("Trading authorization failed. Retry in your wallet.")
-      ).toBeInTheDocument();
+      expect(screen.getAllByText("Reconnect wallet")).toHaveLength(2);
     });
     expect(onClose).not.toHaveBeenCalled();
   });

@@ -112,6 +112,38 @@ describe("starknet wallet privacy", () => {
     });
   });
 
+  it("marks submission only at the state-changing wallet request boundary", async () => {
+    let submissionStarted = false;
+    const observations: Array<{ type: string; submissionStarted: boolean }> = [];
+    const responses: unknown[] = [
+      ["0.10.4"],
+      [
+        { token: "0x1", balance: "0x64" },
+        { token: "0xfee", balance: "0xa" },
+      ],
+      { transaction_hash: "0xabc" },
+    ];
+    const request = vi.fn(async (request: { type: string; params: unknown }) => {
+      observations.push({ type: request.type, submissionStarted });
+      return responses.shift();
+    });
+
+    await expect(fundZylithFromWallet({
+      provider: { request },
+      tokenAddress: "0x1",
+      amount: 50n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["1", "0x3"],
+      onWalletTransactionSubmissionStarted: () => { submissionStarted = true; },
+    })).resolves.toEqual({ transactionHash: "0xabc", shieldTransactionHash: null });
+
+    expect(observations).toEqual([
+      { type: "wallet_supportedWalletApi", submissionStarted: false },
+      { type: "wallet_strk20Balances", submissionStarted: false },
+      { type: "wallet_strk20InvokeTransaction", submissionStarted: true },
+    ]);
+  });
+
   it("shields only the selected asset before funding in a separate private transaction", async () => {
     const { provider, request } = providerWithResponses([
       [{ token: "0x1", balance: "0x14" }],
@@ -120,6 +152,8 @@ describe("starknet wallet privacy", () => {
       { transaction_hash: "0xbbb" },
     ]);
 
+    const onWalletTransactionSubmissionStarted = vi.fn();
+    const onWalletTransactionResolved = vi.fn();
     await expect(fundZylithFromWallet({
       provider,
       tokenAddress: "0x1",
@@ -129,7 +163,12 @@ describe("starknet wallet privacy", () => {
       transactionStatus: async () => "confirmed",
       pollDelayMs: 0,
       maxBalancePolls: 1,
+      onWalletTransactionSubmissionStarted,
+      onWalletTransactionResolved,
     })).resolves.toEqual({ transactionHash: "0xbbb", shieldTransactionHash: "0xaaa" });
+
+    expect(onWalletTransactionSubmissionStarted).toHaveBeenCalledTimes(2);
+    expect(onWalletTransactionResolved).toHaveBeenCalledTimes(1);
 
     expect(request).toHaveBeenNthCalledWith(3, {
       type: "wallet_strk20InvokeTransaction",
@@ -192,6 +231,8 @@ describe("starknet wallet privacy", () => {
     ]);
     const transactionStatus = vi.fn(async () => "failed" as const);
 
+    const onWalletTransactionSubmissionStarted = vi.fn();
+    const onWalletTransactionResolved = vi.fn();
     await expect(fundZylithFromWallet({
       provider,
       tokenAddress: "0x1",
@@ -201,9 +242,38 @@ describe("starknet wallet privacy", () => {
       transactionStatus,
       pollDelayMs: 0,
       maxBalancePolls: 10,
+      onWalletTransactionSubmissionStarted,
+      onWalletTransactionResolved,
     })).rejects.toThrow(/shielding transaction failed/i);
     expect(transactionStatus).toHaveBeenCalledWith("0xaaa");
+    expect(onWalletTransactionSubmissionStarted).toHaveBeenCalledTimes(1);
+    expect(onWalletTransactionResolved).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it("leaves an unconfirmed shielding submission unresolved", async () => {
+    const { provider } = providerWithResponses([
+      [{ token: "0x1", balance: "0x0" }],
+      { transaction_hash: "0xaaa" },
+    ]);
+    const onWalletTransactionSubmissionStarted = vi.fn();
+    const onWalletTransactionResolved = vi.fn();
+
+    await expect(fundZylithFromWallet({
+      provider,
+      tokenAddress: "0x1",
+      amount: 100n,
+      bridgeAddress: "0x2",
+      bridgeCalldata: ["0x3"],
+      transactionStatus: async () => "pending",
+      pollDelayMs: 0,
+      maxBalancePolls: 1,
+      onWalletTransactionSubmissionStarted,
+      onWalletTransactionResolved,
+    })).rejects.toThrow(/shielded balance is not ready/i);
+
+    expect(onWalletTransactionSubmissionStarted).toHaveBeenCalledTimes(1);
+    expect(onWalletTransactionResolved).not.toHaveBeenCalled();
   });
 
   it("registers the canonical deposit token before reading private balances", async () => {

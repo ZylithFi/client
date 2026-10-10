@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { readFileSync } from "node:fs";
 import { legacyWalletWasm as walletWasm } from "./test/legacyWalletWasm";
 import { hash } from "starknet";
+import { ExchangeHttpError } from "@zylith/sdk";
 import exampleDeployment from "../public/deployment.example.json";
 import {
   type StoredOrder,
@@ -43,6 +44,11 @@ import { encryptLocalStore, encryptSeedWithWalletSignature } from "./test/legacy
 import { createWalletSignatureVaultWorkerService } from "./domain/walletLocalCrypto";
 import { createWalletCryptoClient, type WalletCryptoWorkerLike } from "./domain/walletCryptoClient";
 import { createWalletSignatureVaultStore } from "./domain/walletSignatureVaultStore";
+import { normalizeFailure } from "./domain/userFacingErrors";
+import {
+  markProofSubmissionRejected,
+  markProofSubmissionStarted,
+} from "./integrations/starknetPrivacyErrors";
 import {
   createWalletDeviceRecordStore,
   createWalletDeviceWorkerService,
@@ -1073,6 +1079,47 @@ describe("wallet v2 browser restore compatibility", () => {
     });
   }
 
+  it.each(["order", "cancel", "withdraw"] as const)(
+    "treats the operator's pre-open 429 for %s as proved not submitted",
+    async (operation) => {
+      const submit = await readySealedSubmission(operation);
+      vi.spyOn(exchange(), "submit").mockRejectedValue(
+        new ExchangeHttpError("/api/private/requests", 429, "rate limited"),
+      );
+
+      const failure = await submit().then(() => null, (error: unknown) =>
+        normalizeFailure(error, {
+          operation: operation === "withdraw" ? "withdrawal" : operation,
+          domain: operation === "withdraw" ? "withdrawal" : "order",
+        })
+      );
+
+      expect(failure).toMatchObject({
+        outcome: "not-submitted",
+        retrySafe: true,
+        recovery: "retry",
+      });
+    },
+  );
+
+  it("keeps an operator 503 during withdrawal submission non-retryable", async () => {
+    const submit = await readySealedSubmission("withdraw");
+    vi.spyOn(exchange(), "submit").mockRejectedValue(
+      new ExchangeHttpError("/api/private/requests", 503, "service unavailable"),
+    );
+
+    const error = await submit().then(() => null, (failure: unknown) => failure);
+    expect(normalizeFailure(error, {
+      operation: "withdrawal",
+      domain: "withdrawal",
+    })).toMatchObject({
+      code: "WITHDRAWAL_STATUS_UNKNOWN",
+      outcome: "unknown",
+      retrySafe: false,
+      recovery: "check-status",
+    });
+  });
+
   it.each(["order", "cancel", "withdraw", "status"] as const)(
     "passes the trusted post-registry chain and exchange context to the %s builder",
     async (operation) => {
@@ -1720,6 +1767,75 @@ describe("wallet v2 browser restore compatibility", () => {
     expect(runtime.getPendingDeposits()).toEqual([]);
   });
 
+  it("preserves a lost-acknowledgement deposit blocker across an application restart", async () => {
+    const pending = note("0x77");
+    pending.source = "deposit";
+    pending.deposit = {
+      funding_commitment: "0x88",
+      request_id: "0x89",
+      requested_at_ms: Date.now() - 24 * 60 * 60 * 1_000,
+      confirmed: false,
+    };
+    localStorage.setItem(stateKey, JSON.stringify(await encryptLocalStore({
+      ...state(),
+      notes: [pending],
+    }, seedHex, walletWasm)));
+
+    await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(true);
+    expect(runtime.getPendingDeposits()).toEqual([
+      expect.objectContaining({
+        note_commitment: pending.commitment,
+        transaction_hash: undefined,
+        confirmed: false,
+        failed: false,
+      }),
+    ]);
+
+    runtime.suspend();
+    runtime = createRuntime();
+    await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(true);
+    expect(runtime.getPendingDeposits()).toEqual([
+      expect.objectContaining({
+        note_commitment: pending.commitment,
+        transaction_hash: undefined,
+        confirmed: false,
+        failed: false,
+      }),
+    ]);
+  });
+
+  it("preserves a confirmed public transfer without private credit across restart", async () => {
+    const pending = note("0x78");
+    pending.source = "deposit";
+    pending.deposit = {
+      funding_commitment: "0x88",
+      request_id: "0x89",
+      requested_at_ms: Date.now() - 24 * 60 * 60 * 1_000,
+      transaction_hash: "0x90",
+      public_transaction_confirmed: true,
+      confirmed: false,
+    };
+    localStorage.setItem(stateKey, JSON.stringify(await encryptLocalStore({
+      ...state(),
+      notes: [pending],
+    }, seedHex, walletWasm)));
+
+    for (let restart = 0; restart < 2; restart += 1) {
+      await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(true);
+      expect(runtime.getPendingDeposits()).toEqual([
+        expect.objectContaining({
+          note_commitment: pending.commitment,
+          transaction_hash: "0x90",
+          public_transaction_confirmed: true,
+          confirmed: false,
+          failed: false,
+        }),
+      ]);
+      runtime.suspend();
+      runtime = createRuntime();
+    }
+  });
+
   it("preserves the current session and error when refresh has an ordinary network failure", async () => {
     localStorage.setItem(stateKey, JSON.stringify(await encryptLocalStore({
       ...state(), orders: [order("0x4", 1, "expired")],
@@ -2211,6 +2327,88 @@ describe("wallet v2 browser restore compatibility", () => {
     expect(fundingSubmissionBoundary.imported).toBe(false);
     },
   );
+
+  it("keeps a lost withdrawal-claim acknowledgement blocked across restart", async () => {
+    const exiting = note("0x67");
+    exiting.exit = {
+      exit_commitment: "0x68",
+      stage: "finalized",
+      requested_at_ms: 1,
+    };
+    localStorage.setItem(stateKey, JSON.stringify(await encryptLocalStore({
+      ...state(), notes: [exiting],
+    }, seedHex, walletWasm)));
+    rpcResponses[hash.getSelectorFromName("strk20_exit_claimed_open_note_id")] = ["0x0"];
+    rpcResponses[hash.getSelectorFromName("get_fee_amount")] = ["1"];
+    walletPrivacyBoundary.claim.mockRejectedValueOnce(
+      markProofSubmissionStarted(new Error("relay acknowledgement lost")),
+    );
+
+    await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(true);
+    await expect(runtime.claimWithdrawal(exiting.commitment)).rejects.toThrow(/acknowledgement lost/i);
+    expect(runtime.getWithdrawableNotes()).toEqual([
+      expect.objectContaining({
+        note_commitment: exiting.commitment,
+        locked: true,
+        exit_stage: "claiming",
+      }),
+    ]);
+    await expect(runtime.claimWithdrawal(exiting.commitment)).resolves.toEqual({
+      transaction_hash: null,
+    });
+    expect(walletPrivacyBoundary.claim).toHaveBeenCalledTimes(1);
+
+    runtime.suspend();
+    runtime = createRuntime();
+    await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(true);
+    expect(runtime.getWithdrawableNotes()).toEqual([
+      expect.objectContaining({
+        note_commitment: exiting.commitment,
+        locked: true,
+        exit_stage: "claiming",
+      }),
+    ]);
+    await expect(runtime.claimWithdrawal(exiting.commitment)).resolves.toEqual({
+      transaction_hash: null,
+    });
+    expect(walletPrivacyBoundary.claim).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows claim retry only after the relay proves submission never started", async () => {
+    const exiting = note("0x69");
+    exiting.exit = {
+      exit_commitment: "0x6a",
+      stage: "finalized",
+      requested_at_ms: 1,
+    };
+    localStorage.setItem(stateKey, JSON.stringify(await encryptLocalStore({
+      ...state(), notes: [exiting],
+    }, seedHex, walletWasm)));
+    rpcResponses[hash.getSelectorFromName("strk20_exit_claimed_open_note_id")] = ["0x0"];
+    rpcResponses[hash.getSelectorFromName("get_fee_amount")] = ["1"];
+    walletPrivacyBoundary.claim.mockRejectedValueOnce(
+      markProofSubmissionRejected(new Error("relay rejected before broadcast")),
+    );
+
+    await expect(runtime.unlockWithWalletSignature("0xabc")).resolves.toBe(true);
+    const error = await runtime.claimWithdrawal(exiting.commitment)
+      .then(() => null, (failure: unknown) => failure);
+    expect(normalizeFailure(error, {
+      operation: "claim",
+      domain: "withdrawal",
+    })).toMatchObject({
+      code: "WITHDRAWAL_NOT_SUBMITTED",
+      outcome: "not-submitted",
+      retrySafe: true,
+      recovery: "retry",
+    });
+    expect(runtime.getWithdrawableNotes()).toEqual([
+      expect.objectContaining({
+        note_commitment: exiting.commitment,
+        exit_stage: "finalized",
+      }),
+    ]);
+  });
 
   async function readyDeposit(invoke: () => Promise<unknown>) {
     const request = vi.fn(async (input: { type?: string; method?: string }) => {
@@ -3332,6 +3530,7 @@ describe("wallet state merge", () => {
       request_id: "request-1",
       requested_at_ms: 10,
       confirmed: false,
+      public_transaction_confirmed: true,
       failed: true,
       failure_reason: "temporary",
     };
@@ -3361,6 +3560,7 @@ describe("wallet state merge", () => {
       transaction_hash: "0x13",
     });
     expect(local.notes[0].deposit?.failed).toBeUndefined();
+    expect(local.notes[0].deposit?.public_transaction_confirmed).toBeUndefined();
     expect(local.notes[0].exit).toMatchObject({
       stage: "claiming",
       claim_transaction_hash: "0x14",
@@ -3803,13 +4003,12 @@ describe("residual exit storage", () => {
     ])).toThrow(/out of range/);
   });
 
-  it("retries only failed or sufficiently stale missing transactions", () => {
-    expect(recoveryTransactionDisposition(null, 1_000, 2_000, 5_000)).toBe("pending");
-    expect(recoveryTransactionDisposition({ failed: false, notFound: false, confirmed: false }, 1_000, 2_000, 5_000)).toBe("pending");
-    expect(recoveryTransactionDisposition({ failed: false, notFound: false, confirmed: true }, 1_000, 2_000, 5_000)).toBe("confirmed");
-    expect(recoveryTransactionDisposition({ failed: true, notFound: false }, 1_000, 2_000, 5_000)).toBe("retry");
-    expect(recoveryTransactionDisposition({ failed: false, notFound: true }, 1_000, 5_999, 5_000)).toBe("pending");
-    expect(recoveryTransactionDisposition({ failed: false, notFound: true }, 1_000, 6_000, 5_000)).toBe("retry");
+  it("retries only transactions with an authoritative failed receipt", () => {
+    expect(recoveryTransactionDisposition(null)).toBe("pending");
+    expect(recoveryTransactionDisposition({ failed: false, notFound: false, confirmed: false })).toBe("pending");
+    expect(recoveryTransactionDisposition({ failed: false, notFound: false, confirmed: true })).toBe("confirmed");
+    expect(recoveryTransactionDisposition({ failed: true, notFound: false })).toBe("retry");
+    expect(recoveryTransactionDisposition({ failed: false, notFound: true })).toBe("pending");
   });
 
   it("decodes the current nine-field pair ABI without confusing scale and fee", () => {

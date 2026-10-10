@@ -9,7 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { safeFromAtomicStr, toAtomicStr } from "../domain/assets";
+import { assetDecimals, safeFromAtomicStr, toAtomicStr } from "../domain/assets";
 import {
   type RuntimeStatus,
   type StarknetWalletOption,
@@ -30,9 +30,34 @@ import {
 } from "../domain/primaryEnter";
 import { getPrivacyFundingStage } from "../domain/privacyFundingStage";
 import type { WithdrawableNote } from "@zylith/sdk";
-import { userFacingErrorMessage } from "../domain/userFacingErrors";
+import {
+  failureFromCode,
+  normalizeFailure,
+  sanitizedDiagnosticReport,
+  type NormalizedFailure,
+} from "../domain/userFacingErrors";
+import { loadDeployment } from "../domain/deployment";
+import { ensureWalletChain, preflightWalletAction } from "../wallet/starknetProvider";
+import { FailureNotice } from "./FailureNotice";
 import { ChevronDownIcon } from "../finalui/components/Icons";
 import { TokenIcon } from "../finalui/components/TokenIcon";
+
+async function switchSelectedWalletNetwork() {
+  const provider = selectedStarknetProvider();
+  if (!provider) throw new Error("Connect a Starknet wallet first.");
+  return ensureWalletChain(provider, await loadDeployment());
+}
+
+async function preflightSelectedWalletAction(address: string) {
+  const provider = selectedStarknetProvider();
+  if (!provider) throw new Error("Connect a Starknet wallet first.");
+  return preflightWalletAction(provider, await loadDeployment(), address);
+}
+
+async function copySupportDetails(failure: NormalizedFailure) {
+  if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable");
+  await navigator.clipboard.writeText(sanitizedDiagnosticReport(failure));
+}
 
 export function privacyFundingStageLabel(stage: string) {
   const cleaned = stage
@@ -369,6 +394,17 @@ const EXIT_STAGE_LABELS: Record<NonNullable<WithdrawableNote["exit_stage"]>, str
   failed: "Failed",
 };
 
+function failureBlocksFinancialAction(failure: NormalizedFailure | null) {
+  if (!failure) return false;
+  if (failure.outcome === "unknown" || failure.outcome === "submitted" || failure.outcome === "failed") {
+    return true;
+  }
+  if (failure.recovery === "refresh-state" || failure.recovery === "check-status" || failure.recovery === "contact-support") {
+    return true;
+  }
+  return failure.recovery === "none" && failure.severity !== "informational";
+}
+
 export function WalletSlide({
   open,
   onClose,
@@ -386,7 +422,7 @@ export function WalletSlide({
   onStarknetConnected: (addr: string) => void;
   onStarknetDisconnected: () => void;
 }) {
-  const [error, setError] = useState("");
+  const [error, setError] = useState<NormalizedFailure | null>(null);
   const [working, setWorking] = useState(false);
   const [connectingWalletId, setConnectingWalletId] = useState<string | null>(
     null
@@ -410,6 +446,14 @@ export function WalletSlide({
   const connectedVaultAuthMode = w?.vaultAuthMode?.(starknetAddress) ??
     (starknetAddress && hasVault ? "wallet-signature" : "none");
   const connectedHasVault = connectedVaultAuthMode !== "none";
+  const runtimeFailure = !w && runtimeStatus !== "loading"
+    ? normalizeFailure(walletRuntimeLoadError(), {
+        domain: "application",
+        operation: "load",
+        stage: "private-runtime-load",
+        presentation: "inline",
+      })
+    : null;
   useSlideDialog(open, onClose, panelRef);
 
   async function refreshWalletOptions({
@@ -448,7 +492,7 @@ export function WalletSlide({
   useEffect(() => {
     if (!open) return undefined;
     walletScannerActiveRef.current = true;
-    setError("");
+    setError(null);
     setShowStarknetFirstHint(false);
     void refreshWalletOptions({ showLoading: true });
     const refresh = () => void refreshWalletOptions();
@@ -474,17 +518,10 @@ export function WalletSlide({
     }
   }, [open, starknetAddress]);
 
-  useEffect(() => {
-    if (!open || !starknetAddress || working || runtimeStatus !== "ready") {
-      return;
-    }
-    void enablePrivateTradingForAddress(starknetAddress);
-  }, [connectedHasVault, open, runtimeStatus, starknetAddress, working]);
-
   async function handleConnectStarknet(wallet: StarknetWalletOption) {
     const connectionGeneration = ++authorizationGenerationRef.current;
     setConnectingWalletId(wallet.id);
-    setError("");
+    setError(null);
     try {
       const addr = await connectStarknetProvider(wallet.provider, wallet.id);
       if (
@@ -495,11 +532,17 @@ export function WalletSlide({
         setShowStarknetFirstHint(false);
         onStarknetConnected(addr);
         setConnectingWalletId(null);
-        await enablePrivateTradingForAddress(addr);
-      } else setError("Wallet did not return an account. Unlock it and retry.");
+      } else setError(failureFromCode("WALLET_CONNECT_REQUIRED", {
+        stage: "wallet-connect",
+      }));
     } catch (e) {
       if (authorizationGenerationRef.current === connectionGeneration) {
-        setError(userFacingErrorMessage(e, "Wallet connection failed."));
+        setError(normalizeFailure(e, {
+          domain: "wallet",
+          operation: "connect",
+          stage: "wallet-connect",
+          presentation: "inline",
+        }));
       }
     } finally {
       if (authorizationGenerationRef.current === connectionGeneration) {
@@ -517,7 +560,7 @@ export function WalletSlide({
     clearSelectedStarknetProvider();
     onStarknetDisconnected();
     void refreshWalletOptions({ showLoading: true });
-    setError("");
+    setError(null);
   }
 
   function handleDisconnectStarknetWallet() {
@@ -529,7 +572,7 @@ export function WalletSlide({
     disconnectStarknetProvider();
     onStarknetDisconnected();
     void refreshWalletOptions({ showLoading: true });
-    setError("");
+    setError(null);
   }
 
   async function enablePrivateTradingForAddress(
@@ -537,7 +580,10 @@ export function WalletSlide({
     { forceRetry = false }: { forceRetry?: boolean } = {}
   ) {
     if (!w) {
-      setError("Private trading is still loading. Please retry later.");
+      setError(failureFromCode("TRADING_UNAVAILABLE", {
+        stage: "private-runtime-load",
+        presentation: "inline",
+      }));
       return;
     }
     if (w.isReady?.(address)) {
@@ -556,9 +602,14 @@ export function WalletSlide({
     autoPrivateSetupAttemptRef.current = attemptKey;
     const authorizationGeneration = ++authorizationGenerationRef.current;
     setWorking(true);
-    setError("");
+    setError(null);
     let completed = false;
     try {
+      const networkReadiness = await preflightSelectedWalletAction(address);
+      if (networkReadiness === "switched") {
+        if (w.isReady?.(address)) await w.refresh();
+        return;
+      }
       let authorized = false;
       if (addressVaultAuthMode === "device-session") {
         authorized = await w.unlockWithDeviceSession(address);
@@ -583,7 +634,12 @@ export function WalletSlide({
         autoPrivateSetupAttemptRef.current === attemptKey
         && authorizationGenerationRef.current === authorizationGeneration
       ) {
-        setError(userFacingErrorMessage(e));
+        setError(normalizeFailure(e, {
+          domain: "wallet",
+          operation: "authorize",
+          stage: "private-authorization",
+          presentation: "inline",
+        }));
       }
     } finally {
       if (
@@ -606,14 +662,51 @@ export function WalletSlide({
     });
   }
 
+  async function handleSwitchNetwork() {
+    try {
+      await switchSelectedWalletNetwork();
+      setError(null);
+      await refreshWalletStatus();
+    } catch (switchError) {
+      setError(normalizeFailure(switchError, {
+        domain: "network",
+        operation: "read",
+        stage: "wallet-network-switch",
+        presentation: "inline",
+      }));
+    }
+  }
+
+  async function refreshWalletStatus() {
+    const runtime = walletRuntime();
+    if (!runtime) {
+      setError(failureFromCode("TRADING_UNAVAILABLE", {
+        stage: "wallet-refresh",
+        presentation: "inline",
+      }));
+      return;
+    }
+    try {
+      await runtime.refresh();
+    } catch (refreshError) {
+      setError(normalizeFailure(refreshError, {
+        domain: "wallet",
+        operation: "read",
+        stage: "wallet-refresh",
+        presentation: "inline",
+      }));
+    }
+  }
+
   const divider = (
     <div
       style={{ margin: "16px 0", boxShadow: "inset 0 -1px 0 var(--z-border)" }}
     />
   );
   const hasStarknetAccount = Boolean(starknetAddress);
-  const createEnabled = hasStarknetAccount && !working;
-  const authorizeEnabled = hasStarknetAccount && !working;
+  const privateSetupBlocked = failureBlocksFinancialAction(error);
+  const createEnabled = hasStarknetAccount && !working && !privateSetupBlocked;
+  const authorizeEnabled = hasStarknetAccount && !working && !privateSetupBlocked;
   const handlePrimaryEnter = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!hasStarknetAccount && shouldRunPrimaryActionForEnter(event)) {
       event.preventDefault();
@@ -648,7 +741,7 @@ export function WalletSlide({
         </button>
       </div>
       <div className="slide-body" onKeyDown={handlePrimaryEnter}>
-        {!w && (
+        {!w && runtimeStatus === "loading" && (
           <div
             style={{
               fontSize: 13,
@@ -657,15 +750,15 @@ export function WalletSlide({
               lineHeight: 1.5,
             }}
           >
-            {runtimeStatus === "loading"
-              ? "Private trading loading…"
-              : walletRuntimeLoadError()
-              ? userFacingErrorMessage(
-                  walletRuntimeLoadError(),
-                  "Private trading failed to load."
-                )
-              : "Private trading failed to load."}
+            Private trading loading…
           </div>
+        )}
+        {runtimeFailure && (
+          <FailureNotice
+            failure={runtimeFailure}
+            className="slide-inline-notice"
+            actions={{ retry: () => window.location.reload() }}
+          />
         )}
 
         <div className="f-label" style={{ marginBottom: 10 }}>
@@ -723,7 +816,7 @@ export function WalletSlide({
             ) : (
               <div className="wallet-empty">
                 <strong>No Starknet wallet found</strong>
-                <span>Install or open Ready X or Xverse, then scan again.</span>
+                <span>Open Xverse or another compatible Starknet wallet, then scan again.</span>
                 <button
                   type="button"
                   className="wallet-recover-link compact"
@@ -746,7 +839,7 @@ export function WalletSlide({
           </div>
         )}
 
-        {hasStarknetAccount && (
+        {hasStarknetAccount && !error && (
           <button
             className="slide-submit"
             type="button"
@@ -758,24 +851,32 @@ export function WalletSlide({
           >
             {working
               ? "Connecting…"
-              : error
-              ? "Retry connection"
-              : "Connect wallet"}
+              : privateSetupBlocked
+              ? "Private trading unavailable"
+              : connectedHasVault
+                ? "Unlock private balance"
+                : "Enable private trading"}
           </button>
         )}
 
         {error && (
-          <div
-            role="alert"
-            style={{
-              fontSize: 13,
-              color: "var(--negative)",
-              marginTop: 10,
-              lineHeight: 1.5,
+          <FailureNotice
+            failure={error}
+            className="slide-inline-notice"
+            actions={{
+              retry: handleEnablePrivateTrading,
+              reconnect: error.code === "WALLET_PRIVATE_ACTION_UNSUPPORTED"
+                ? handleChangeStarknetWallet
+                : starknetAddress
+                  ? handleEnablePrivateTrading
+                  : () => refreshWalletOptions({ showLoading: true }),
+              switchNetwork: handleSwitchNetwork,
+              refreshState: refreshWalletStatus,
+              checkStatus: refreshWalletStatus,
+              contactSupport: () => copySupportDetails(error),
+              dismiss: error.presentation === "toast" ? () => setError(null) : undefined,
             }}
-          >
-            {error}
-          </div>
+          />
         )}
       </div>
     </div>
@@ -803,10 +904,13 @@ export function DepositSlide({
 }) {
   const [asset, setAsset] = useState(defaultAsset);
   const [amount, setAmount] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<NormalizedFailure | null>(null);
   const [working, setWorking] = useState(false);
   const [fundingStage, setFundingStage] = useState("");
   const [privateApiSupported, setPrivateApiSupported] = useState<boolean | null>(null);
+  const amountInputRef = useRef<HTMLInputElement | null>(null);
+  const blockedDepositInputRef = useRef<string | null>(null);
+  const depositReconciliationObservedRef = useRef(false);
   const wasOpenRef = useRef(false);
   const depositStartedAtRef = useRef(0);
   const operationInFlightRef = useRef(false);
@@ -839,13 +943,15 @@ export function DepositSlide({
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
+      depositReconciliationObservedRef.current = false;
+      blockedDepositInputRef.current = null;
       setAsset(
         allAssets.includes(defaultAsset)
           ? defaultAsset
           : allAssets[0] ?? defaultAsset
       );
       setAmount("");
-      setError("");
+      setError(null);
     }
     wasOpenRef.current = open;
   }, [open, defaultAsset, allAssets]);
@@ -861,7 +967,12 @@ export function DepositSlide({
     }).catch((capabilityError) => {
       if (!cancelled) {
         setPrivateApiSupported(false);
-        setError(userFacingErrorMessage(capabilityError));
+        setError(normalizeFailure(capabilityError, {
+          domain: "wallet",
+          operation: "deposit",
+          stage: "deposit-capability",
+          presentation: "inline",
+        }));
       }
     });
     return () => { cancelled = true; };
@@ -870,6 +981,7 @@ export function DepositSlide({
   function changeAsset(a: string) {
     setAsset(a);
     setSlideAsset(a);
+    if (error?.recovery === "edit-input") setError(null);
   }
 
   async function handleDeposit() {
@@ -877,41 +989,78 @@ export function DepositSlide({
     const openGeneration = openGenerationRef.current;
     const w = walletRuntime();
     if (!starknetAddress) {
-      setError("");
+      setError(null);
       onOpenWallet();
       return;
     }
     if (!amount.trim()) {
-      setError("Enter an amount");
+      setError(failureFromCode("INVALID_AMOUNT", {
+        domain: "deposit",
+        stage: "deposit-amount",
+        presentation: "field",
+      }));
+      return;
+    }
+    const fractionalDigits = amount.split(".")[1]?.length ?? 0;
+    let supportedDecimals: number | undefined;
+    try {
+      supportedDecimals = assetDecimals(asset);
+    } catch {
+      supportedDecimals = undefined;
+    }
+    if (supportedDecimals !== undefined && fractionalDigits > supportedDecimals) {
+      setError(failureFromCode("PRECISION_UNSUPPORTED", {
+        domain: "deposit",
+        stage: "deposit-amount",
+        presentation: "field",
+        asset,
+        precision: supportedDecimals,
+      }));
       return;
     }
     let atomicAmount: string;
     try {
       atomicAmount = toAtomicStr(amount, asset);
     } catch (parseError) {
-      setError(userFacingErrorMessage(parseError));
+      setError(failureFromCode("INVALID_AMOUNT", {
+        domain: "deposit",
+        stage: "deposit-amount",
+        presentation: "field",
+      }));
       return;
     }
     if (atomicAmount === "0") {
-      setError("Enter an amount greater than zero.");
+      setError(failureFromCode("INVALID_AMOUNT", {
+        domain: "deposit",
+        stage: "deposit-amount",
+        presentation: "field",
+      }));
       return;
     }
     operationInFlightRef.current = true;
     depositStartedAtRef.current = Date.now();
     setWorking(true);
-    setError("");
+    setError(null);
     setFundingStage(
       walletReady && w?.isReady(starknetAddress) ? "Preparing deposit" : "Connecting wallet"
     );
     const updateStage = (stage: string) => {
       if (openGenerationRef.current === openGeneration) setFundingStage(stage);
     };
+    let submissionAttempted = false;
     try {
+      const networkReadiness = await preflightSelectedWalletAction(starknetAddress);
+      if (networkReadiness === "switched") {
+        updateStage("");
+        if (w?.isReady(starknetAddress)) await w.refresh();
+        return;
+      }
       const authorizedRuntime = await ensureTradingAuthorized(
         starknetAddress,
         updateStage
       );
       updateStage("Preparing deposit");
+      submissionAttempted = true;
       await authorizedRuntime.submitDepositViaWallet(asset, atomicAmount);
       if (openGenerationRef.current === openGeneration) {
         setAmount("");
@@ -919,16 +1068,91 @@ export function DepositSlide({
       }
     } catch (e) {
       if (openGenerationRef.current === openGeneration) {
-        setError(userFacingErrorMessage(e));
+        const failure = normalizeFailure(e, {
+          domain: "deposit",
+          operation: "deposit",
+          outcome: submissionAttempted ? "unknown" : "not-submitted",
+          stage: "deposit-submission",
+          presentation: "status-screen",
+          asset,
+          requiredAmount: amount,
+        });
+        if (failure.code === "PRIVACY_SAFETY_BLOCK") {
+          blockedDepositInputRef.current = `${asset}:${amount}`;
+        }
+        setError(failure);
       }
     } finally {
       operationInFlightRef.current = false;
       setWorking(false);
     }
   }
-  const depositEnabled = Boolean(
-    !working && (!starknetAddress || (privateApiSupported !== false && amount.trim()))
+  const unresolvedDeposit = walletReady
+    ? walletRuntime()?.getPendingDeposits?.().find(
+        (deposit) => !deposit.confirmed && !deposit.failed
+      ) ?? null
+    : null;
+  const awaitingDepositStatus = Boolean(
+    unresolvedDeposit
+    || (error && !error.retrySafe && ["unknown", "submitted"].includes(error.outcome))
   );
+  useEffect(() => {
+    if (unresolvedDeposit) {
+      depositReconciliationObservedRef.current = true;
+    } else if (
+      !working
+      && depositReconciliationObservedRef.current
+      && error
+      && ["unknown", "submitted"].includes(error.outcome)
+    ) {
+      depositReconciliationObservedRef.current = false;
+      setError(null);
+    }
+  }, [error, unresolvedDeposit, working]);
+  const depositBlockedByFailure = failureBlocksFinancialAction(error);
+  const depositEnabled = Boolean(
+    !working
+      && !awaitingDepositStatus
+      && !depositBlockedByFailure
+      && blockedDepositInputRef.current !== `${asset}:${amount}`
+      && (!starknetAddress || (privateApiSupported !== false && amount.trim()))
+  );
+
+  async function refreshDepositStatus() {
+    const runtime = walletRuntime();
+    if (!runtime) {
+      setError(failureFromCode("DEPOSIT_UNAVAILABLE", {
+        stage: "deposit-reconciliation",
+        presentation: "banner",
+      }));
+      return;
+    }
+    try {
+      await runtime.refresh();
+    } catch (refreshError) {
+      setError(normalizeFailure(refreshError, {
+        domain: "deposit",
+        operation: "read",
+        stage: "deposit-reconciliation",
+        presentation: "inline",
+      }));
+    }
+  }
+
+  async function switchDepositNetwork() {
+    try {
+      await switchSelectedWalletNetwork();
+      setError(null);
+      await refreshDepositStatus();
+    } catch (switchError) {
+      setError(normalizeFailure(switchError, {
+        domain: "network",
+        operation: "read",
+        stage: "wallet-network-switch",
+        presentation: "inline",
+      }));
+    }
+  }
 
   return (
     <div
@@ -978,6 +1202,7 @@ export function DepositSlide({
           <label className="f-label" htmlFor="deposit-amount">Amount</label>
           <div className="f-input-box">
             <input
+              ref={amountInputRef}
               id="deposit-amount"
               className="f-input"
               type="text"
@@ -985,9 +1210,14 @@ export function DepositSlide({
               maxLength={64}
               placeholder="0"
               value={amount}
+              aria-invalid={error?.presentation === "field" || undefined}
+              aria-describedby={error?.presentation === "field" ? "deposit-amount-error" : undefined}
               onChange={(event) => {
                 const next = event.target.value;
-                if (next === "" || (next.length <= 64 && /^\d+(?:\.\d*)?$/.test(next))) setAmount(next);
+                if (next === "" || (next.length <= 64 && /^\d+(?:\.\d*)?$/.test(next))) {
+                  setAmount(next);
+                  if (error?.recovery === "edit-input") setError(null);
+                }
               }}
             />
             <AssetPicker
@@ -1003,16 +1233,43 @@ export function DepositSlide({
           Deposits stay private and are available after confirmation.
         </div>
         {error && (
-          <div
-            role="alert"
-            style={{
-              fontSize: 13,
-              color: "var(--negative)",
-              marginBottom: 8,
+          <FailureNotice
+            id={error.presentation === "field" ? "deposit-amount-error" : undefined}
+            failure={error}
+            className="slide-inline-notice"
+            actions={{
+              reconnect: onOpenWallet,
+              switchNetwork: switchDepositNetwork,
+              editInput: error.presentation === "modal" ? () => {
+                setError(null);
+                window.requestAnimationFrame(() => amountInputRef.current?.focus());
+              } : undefined,
+              refreshState: refreshDepositStatus,
+              checkStatus: refreshDepositStatus,
+              contactSupport: () => copySupportDetails(error),
+              dismiss: error.presentation === "toast" || error.code === "PRIVACY_SAFETY_BLOCK"
+                ? () => {
+                    setError(null);
+                    window.requestAnimationFrame(() => amountInputRef.current?.focus());
+                  }
+                : undefined,
             }}
-          >
-            {error}
-          </div>
+          />
+        )}
+        {!error && unresolvedDeposit && (
+          <FailureNotice
+            className="slide-inline-notice"
+            failure={failureFromCode(
+              unresolvedDeposit.public_transaction_confirmed
+                ? "DEPOSIT_CREDIT_PENDING"
+                : "DEPOSIT_PENDING",
+              {
+              stage: "deposit-reconciliation",
+              presentation: "status-screen",
+              },
+            )}
+            actions={{ checkStatus: refreshDepositStatus }}
+          />
         )}
         <button
           className="slide-submit"
@@ -1024,6 +1281,12 @@ export function DepositSlide({
         >
           {working
             ? "Depositing…"
+            : awaitingDepositStatus
+            ? "Checking deposit status"
+            : error?.retrySafe
+            ? "Try deposit again"
+            : depositBlockedByFailure
+            ? "Deposit unavailable"
             : starknetAddress
             ? `Deposit ${asset}`
             : "Connect wallet to deposit"}
@@ -1059,9 +1322,11 @@ export function WithdrawSlide({
 }) {
   const [asset, setAsset] = useState(defaultAsset);
   const [selectedNote, setSelectedNote] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<NormalizedFailure | null>(null);
   const [working, setWorking] = useState(false);
   const [privateApiSupported, setPrivateApiSupported] = useState<boolean | null>(null);
+  const withdrawalReconciliationObservedRef = useRef(false);
+  const withdrawalReconciliationNoteRef = useRef<string | null>(null);
   const operationInFlightRef = useRef(false);
   const openRef = useRef(open);
   const openGenerationRef = useRef(0);
@@ -1076,9 +1341,11 @@ export function WithdrawSlide({
 
   useEffect(() => {
     if (open) {
+      withdrawalReconciliationObservedRef.current = false;
+      withdrawalReconciliationNoteRef.current = null;
       setAsset(defaultAsset);
       setSelectedNote("");
-      setError("");
+      setError(null);
     }
   }, [open, defaultAsset]);
 
@@ -1093,7 +1360,12 @@ export function WithdrawSlide({
     }).catch((capabilityError) => {
       if (!cancelled) {
         setPrivateApiSupported(false);
-        setError(userFacingErrorMessage(capabilityError));
+        setError(normalizeFailure(capabilityError, {
+          domain: "wallet",
+          operation: "withdrawal",
+          stage: "withdrawal-capability",
+          presentation: "inline",
+        }));
       }
     });
     return () => { cancelled = true; };
@@ -1102,6 +1374,7 @@ export function WithdrawSlide({
   function changeAsset(a: string) {
     setAsset(a);
     setSlideAsset(a);
+    setError(null);
   }
 
   const w = walletRuntime();
@@ -1117,19 +1390,28 @@ export function WithdrawSlide({
     const requestedNoteCommitment = selectedWithdrawNote?.note_commitment ?? null;
     const wasAuthorized = Boolean(w?.isReady(starknetAddress));
     if (!starknetAddress) {
-      setError("");
+      setError(null);
       onOpenWallet();
       return;
     }
     operationInFlightRef.current = true;
     setWorking(true);
-    setError("");
+    setError(null);
+    let submissionAttempted = false;
     try {
+      const networkReadiness = await preflightSelectedWalletAction(starknetAddress);
+      if (networkReadiness === "switched") {
+        if (w?.isReady(starknetAddress)) await w.refresh();
+        return;
+      }
       const authorizedRuntime = await ensureTradingAuthorized(starknetAddress);
       if (!wasAuthorized) return;
       if (!authorizedRuntime.withdrawalAvailable()) {
         if (openGenerationRef.current === openGeneration) {
-          setError("Withdrawals are not configured for this deployment.");
+          setError(failureFromCode("WITHDRAWAL_UNAVAILABLE", {
+            stage: "withdrawal-availability",
+            presentation: "inline",
+          }));
         }
         return;
       }
@@ -1139,17 +1421,34 @@ export function WithdrawSlide({
         : available[0] ?? null;
       if (!note) {
         if (openGenerationRef.current === openGeneration) {
-          setError(requestedNoteCommitment
-            ? "The selected withdrawal note is no longer available. Review the updated balance and retry."
-            : `No available ${asset} notes.`);
+          setError(failureFromCode(
+            requestedNoteCommitment
+              ? "WITHDRAWAL_BALANCE_CHANGED"
+              : "NO_WITHDRAWABLE_FUNDS",
+            {
+              stage: "withdrawal-note-selection",
+              presentation: "inline",
+            }
+          ));
         }
         return;
       }
+      submissionAttempted = true;
       await authorizedRuntime.withdraw(note.note_commitment);
       if (openRef.current && openGenerationRef.current === openGeneration) onClose();
     } catch (e) {
       if (openGenerationRef.current === openGeneration) {
-        setError(userFacingErrorMessage(e));
+        const failure = normalizeFailure(e, {
+          domain: "withdrawal",
+          operation: "withdrawal",
+          outcome: submissionAttempted ? "unknown" : "not-submitted",
+          stage: "withdrawal-submission",
+          presentation: "status-screen",
+        });
+        if (["unknown", "submitted"].includes(failure.outcome)) {
+          withdrawalReconciliationNoteRef.current = requestedNoteCommitment;
+        }
+        setError(failure);
       }
     } finally {
       operationInFlightRef.current = false;
@@ -1161,24 +1460,107 @@ export function WithdrawSlide({
     if (operationInFlightRef.current || !starknetAddress) return;
     operationInFlightRef.current = true;
     setWorking(true);
-    setError("");
+    setError(null);
+    let submissionAttempted = false;
     try {
+      const networkReadiness = await preflightSelectedWalletAction(starknetAddress);
+      if (networkReadiness === "switched") {
+        if (w?.isReady(starknetAddress)) await w.refresh();
+        return;
+      }
       const authorizedRuntime = await ensureTradingAuthorized(starknetAddress);
+      submissionAttempted = true;
       await authorizedRuntime.claimWithdrawal(note.note_commitment);
     } catch (e) {
-      setError(userFacingErrorMessage(e));
+      const failure = normalizeFailure(e, {
+        domain: "withdrawal",
+        operation: "claim",
+        outcome: submissionAttempted ? "unknown" : "not-submitted",
+        stage: "withdrawal-claim",
+        presentation: "status-screen",
+      });
+      if (["unknown", "submitted"].includes(failure.outcome)) {
+        withdrawalReconciliationNoteRef.current = note.note_commitment;
+      }
+      setError(failure);
     } finally {
       operationInFlightRef.current = false;
       setWorking(false);
     }
   }
   const privateSessionReady = Boolean(starknetAddress && walletReady);
+  const reconciliationNote = withdrawalReconciliationNoteRef.current;
+  const withdrawalReconciliationPending = Boolean(
+    reconciliationNote
+    && notes.some((note) =>
+      note.note_commitment === reconciliationNote
+      && !note.spent
+      && (
+        note.exit_stage === "requested"
+        || note.exit_stage === "proving"
+        || note.exit_stage === "maturing"
+        || note.exit_stage === "claiming"
+      )
+    )
+  );
+  useEffect(() => {
+    if (withdrawalReconciliationPending) {
+      withdrawalReconciliationObservedRef.current = true;
+    } else if (
+      !working
+      && withdrawalReconciliationObservedRef.current
+      && error
+      && ["unknown", "submitted"].includes(error.outcome)
+    ) {
+      withdrawalReconciliationObservedRef.current = false;
+      withdrawalReconciliationNoteRef.current = null;
+      setError(null);
+    }
+  }, [error, withdrawalReconciliationPending, working]);
+  const withdrawalBlockedByFailure = failureBlocksFinancialAction(error);
   const withdrawEnabled = Boolean(
     !working
+      && !withdrawalBlockedByFailure
       && (!starknetAddress
         || !privateSessionReady
         || (privateApiSupported !== false && withdrawalAvailable && selectedWithdrawNote))
   );
+
+  async function refreshWithdrawalStatus() {
+    const runtime = walletRuntime();
+    if (!runtime) {
+      setError(failureFromCode("WITHDRAWAL_UNAVAILABLE", {
+        stage: "withdrawal-reconciliation",
+        presentation: "banner",
+      }));
+      return;
+    }
+    try {
+      await runtime.refresh();
+    } catch (refreshError) {
+      setError(normalizeFailure(refreshError, {
+        domain: "withdrawal",
+        operation: "read",
+        stage: "withdrawal-reconciliation",
+        presentation: "inline",
+      }));
+    }
+  }
+
+  async function switchWithdrawalNetwork() {
+    try {
+      await switchSelectedWalletNetwork();
+      setError(null);
+      await refreshWithdrawalStatus();
+    } catch (switchError) {
+      setError(normalizeFailure(switchError, {
+        domain: "network",
+        operation: "read",
+        stage: "wallet-network-switch",
+        presentation: "inline",
+      }));
+    }
+  }
 
   return (
     <div
@@ -1218,7 +1600,15 @@ export function WithdrawSlide({
           </div>
         )}
         <TransferRoute from="Zylith balance" to="Private Starknet balance" />
-        {privateSessionReady && !withdrawalAvailable && <div className="slide-note warn">Withdrawals are not configured for this deployment.</div>}
+        {privateSessionReady && !withdrawalAvailable && (
+          <FailureNotice
+            className="slide-note warn"
+            failure={failureFromCode("WITHDRAWAL_UNAVAILABLE", {
+              stage: "withdrawal-availability",
+              presentation: "inline",
+            })}
+          />
+        )}
         <div className="f-row">
           <div className="funding-field-head">
             <label className="f-label">Choose amount</label>
@@ -1238,7 +1628,12 @@ export function WithdrawSlide({
                   type="button"
                   className={`note-select-row ${selectedWithdrawNote?.note_commitment === note.note_commitment ? "on" : ""}`}
                   aria-pressed={selectedWithdrawNote?.note_commitment === note.note_commitment}
-                  onClick={() => setSelectedNote(note.note_commitment)}
+                  onClick={() => {
+                    setSelectedNote(note.note_commitment);
+                    if (error?.recovery === "edit-input" || error?.recovery === "refresh-state") {
+                      setError(null);
+                    }
+                  }}
                 >
                   <strong>
                     {safeFromAtomicStr(note.amount, asset)} {asset}
@@ -1248,17 +1643,42 @@ export function WithdrawSlide({
               ))}
             </div>
           )}
-          {privateSessionReady && assetNotes.length === 0 && <div className="funding-empty">No {asset} available to withdraw.</div>}
+          {privateSessionReady && assetNotes.length === 0 && (
+            <FailureNotice
+              className="funding-empty"
+              failure={failureFromCode("NO_WITHDRAWABLE_FUNDS", {
+                stage: "withdrawal-note-selection",
+                presentation: "inline",
+              })}
+            />
+          )}
         </div>
         <div className="funding-helper">
           Withdrawals stay private and typically complete within a few minutes.
         </div>
-        {error && <div role="alert" style={{ fontSize: 13, color: "var(--negative)", marginBottom: 8 }}>{error}</div>}
+        {error && (
+          <FailureNotice
+            failure={error}
+            className="slide-inline-notice"
+            actions={{
+              reconnect: onOpenWallet,
+              switchNetwork: switchWithdrawalNetwork,
+              refreshState: refreshWithdrawalStatus,
+              checkStatus: refreshWithdrawalStatus,
+              contactSupport: () => copySupportDetails(error),
+              dismiss: error.presentation === "toast" ? () => setError(null) : undefined,
+            }}
+          />
+        )}
         <button type="button" className="slide-submit" disabled={!withdrawEnabled} onClick={() => void handleWithdraw()}>
           {working
             ? privateSessionReady
               ? "Submitting…"
               : "Authorizing…"
+            : withdrawalBlockedByFailure
+              ? "Withdrawal unavailable"
+            : error?.retrySafe
+              ? "Try withdrawal again"
             : !starknetAddress
               ? "Connect wallet to withdraw"
               : privateSessionReady && selectedWithdrawNote
@@ -1278,7 +1698,7 @@ export function WithdrawSlide({
                   <button
                     type="button"
                     className="slide-inline-action"
-                    disabled={working}
+                    disabled={working || withdrawalBlockedByFailure}
                     onClick={() => void handleReceive(note)}
                   >
                     Receive privately

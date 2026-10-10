@@ -24,4 +24,34 @@ describe("AssetsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Deposit" }));
     expect(onDeposit).toHaveBeenCalledWith("STRK");
   });
+
+  it("offers a real recovery path for failed transfers", () => {
+    const onDeposit = vi.fn();
+    const onWithdraw = vi.fn();
+    render(
+      <AssetsPage
+        allAssets={["STRK"]}
+        defaultDepositAsset="STRK"
+        balances={[]}
+        pendingDeposits={[{
+          note_commitment: "0xdeposit",
+          asset: "STRK",
+          amount: "1000000000000000000",
+          confirmed: false,
+          failed: true,
+        }]}
+        withdrawals={[]}
+        walletConnected
+        walletReady
+        assetUnitPrices={{}}
+        onConnectWallet={vi.fn()}
+        onDeposit={onDeposit}
+        onWithdraw={onWithdraw}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    expect(onDeposit).toHaveBeenCalledWith("STRK");
+    expect(onWithdraw).not.toHaveBeenCalled();
+  });
 });

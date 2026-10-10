@@ -5,11 +5,13 @@ import {
   type ReferencePriceSnapshot,
   type TicketSubmitIntent,
 } from "../../domain/tradeIntent";
-import { safeFromAtomicStr, toAtomicStr } from "../../domain/assets";
+import { assetDecimals, safeFromAtomicStr, toAtomicStr } from "../../domain/assets";
 import type { WalletBalance } from "../../domain/shieldedBalances";
 import { ShieldIcon, SwapIcon } from "./Icons";
 import { TokenIcon } from "./TokenIcon";
 import { defaultTradeAmount, formatQuotedPrice } from "../lib/marketFormat";
+import { failureFromCode, type NormalizedFailure } from "../../domain/userFacingErrors";
+import { FailureNotice } from "../../components/FailureNotice";
 
 type IntentSide = "buy" | "sell";
 
@@ -46,6 +48,10 @@ export function IntentPanel({
   onOpenWallet,
   onDeposit,
   onSubmit,
+  onRefreshStatus,
+  onSwitchNetwork,
+  onContactSupport,
+  onDismissError,
 }: {
   pair: PairConfig | null;
   balances: WalletBalance[];
@@ -53,10 +59,14 @@ export function IntentPanel({
   online: boolean;
   walletReady: boolean;
   submitting: boolean;
-  submitError: string | null;
+  submitError: NormalizedFailure | null;
   onOpenWallet: () => void;
   onDeposit: (asset: string) => void;
   onSubmit: (intent: TicketSubmitIntent) => Promise<boolean | void>;
+  onRefreshStatus?: () => void | Promise<void>;
+  onSwitchNetwork?: () => void | Promise<void>;
+  onContactSupport?: () => void | Promise<void>;
+  onDismissError?: () => void | Promise<void>;
 }) {
   const [side, setSide] = useState<IntentSide>("buy");
   const [externalMatching, setExternalMatching] = useState(false);
@@ -64,6 +74,7 @@ export function IntentPanel({
     defaultTradeAmount(pair?.quote_asset_id ?? "")
   );
   const submitInFlight = useRef(false);
+  const amountInputRef = useRef<HTMLInputElement | null>(null);
   const signedMidpoint = positiveNumber(referencePrice?.displayPrice);
   const midpoint = signedMidpoint;
   const baseAsset = pair?.base_asset_id ?? "";
@@ -123,6 +134,68 @@ export function IntentPanel({
       orderBaseAtoms !== null &&
       !meetsMinimum
   );
+  const availableDisplay = fundingBalance
+    ? safeFromAtomicStr(fundingBalance.available, payAsset, "0")
+    : "0";
+  const reservedDisplay = fundingBalance
+    ? safeFromAtomicStr(fundingBalance.locked, payAsset, "0")
+    : "0";
+  let payAssetPrecision: number | undefined;
+  try {
+    payAssetPrecision = payAsset ? assetDecimals(payAsset) : undefined;
+  } catch {
+    payAssetPrecision = undefined;
+  }
+  let minimumDisplay: string | undefined;
+  if (pair && payAsset) {
+    try {
+      const minimumAtoms = side === "sell"
+        ? BigInt(pair.min_order_amount)
+        : /^\d+$/.test(referencePrice?.midpointPrice ?? "")
+          ? [
+              BigInt(pair.min_order_quote_amount),
+              BigInt(orderQuoteValue(pair.min_order_amount, referencePrice!.midpointPrice, pair)),
+            ].reduce((largest, current) => current > largest ? current : largest)
+          : BigInt(pair.min_order_quote_amount);
+      minimumDisplay = safeFromAtomicStr(minimumAtoms, payAsset, "0");
+    } catch {
+      minimumDisplay = undefined;
+    }
+  }
+  const submissionRequiresReconciliation = Boolean(
+    submitError
+      && !submitError.retrySafe
+      && ["unknown", "submitted"].includes(submitError.outcome)
+  );
+  const fieldFailure = pair && amountAtoms !== null && amountAtoms > availableAtoms && walletReady
+    ? failureFromCode("INSUFFICIENT_AVAILABLE_BALANCE", {
+        stage: "order-amount",
+        presentation: "field",
+        asset: payAsset,
+        availableAmount: availableDisplay,
+        requiredAmount: amount,
+        reservedAmount: reservedDisplay,
+      })
+    : amount && amountAtoms === 0n
+    ? failureFromCode("INVALID_AMOUNT", {
+        stage: "order-amount",
+        presentation: "field",
+      })
+    : amount && amountAtoms === null
+    ? failureFromCode("PRECISION_UNSUPPORTED", {
+        stage: "order-amount",
+        presentation: "field",
+        asset: payAsset,
+        precision: payAssetPrecision,
+      })
+    : belowMinimum
+    ? failureFromCode("BELOW_MINIMUM", {
+        stage: "order-minimum",
+        presentation: "field",
+        asset: payAsset,
+        minimumAmount: minimumDisplay,
+      })
+    : null;
   const available =
     walletReady && fundingBalance
       ? positiveNumber(
@@ -136,6 +209,7 @@ export function IntentPanel({
       hasSpendableBalance &&
       online &&
       !submitting &&
+      !submissionRequiresReconciliation &&
       amountAtoms !== null &&
       amountAtoms > 0n &&
       amountAtoms <= availableAtoms &&
@@ -197,6 +271,10 @@ export function IntentPanel({
 
   const actionLabel = submitting
     ? "Submitting..."
+    : submissionRequiresReconciliation
+    ? "Checking order status"
+    : submitError?.retrySafe
+    ? "Try order again"
     : !walletReady
     ? "Connect wallet"
     : !hasSpendableBalance
@@ -243,9 +321,12 @@ export function IntentPanel({
         </div>
         <div className="asset-input-row">
           <input
+            ref={amountInputRef}
             aria-label="Trade amount"
             inputMode="decimal"
             maxLength={64}
+            aria-invalid={Boolean(fieldFailure) || undefined}
+            aria-describedby={fieldFailure ? "order-amount-error" : undefined}
             placeholder="0"
             value={amount}
             onChange={(event: ChangeEvent<HTMLInputElement>) => {
@@ -375,21 +456,27 @@ export function IntentPanel({
         </div>
       </div>
 
-      {pair && amountAtoms !== null && amountAtoms > availableAtoms && walletReady && (
-        <p className="field-error">
-          Amount exceeds your available {payAsset} balance.
-        </p>
-      )}
-      {amount && (amountAtoms === null || amountAtoms === 0n) && (
-        <p className="field-error">Enter an amount supported by {payAsset} precision.</p>
-      )}
-      {belowMinimum && (
-        <p className="field-error">Order is below the {pair!.pair_id} minimum.</p>
+      {fieldFailure && (
+        <FailureNotice
+          id="order-amount-error"
+          failure={fieldFailure}
+          className="field-error"
+        />
       )}
       {submitError && (
-        <p className="field-error" role="alert">
-          {submitError}
-        </p>
+        <FailureNotice
+          failure={submitError}
+          className="slide-inline-notice"
+          actions={{
+            reconnect: onOpenWallet,
+            switchNetwork: onSwitchNetwork,
+            editInput: () => amountInputRef.current?.focus(),
+            refreshState: onRefreshStatus,
+            checkStatus: onRefreshStatus,
+            contactSupport: onContactSupport,
+            dismiss: submitError.presentation === "toast" ? onDismissError : undefined,
+          }}
+        />
       )}
       <button
         className="primary-cta"

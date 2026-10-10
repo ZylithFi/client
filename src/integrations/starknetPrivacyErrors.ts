@@ -248,7 +248,7 @@ export function markProofSubmissionRejected(error: unknown): Error {
   return marked;
 }
 
-function proofSubmissionRejected(
+export function proofSubmissionRejected(
   error: unknown,
   seen = new Set<unknown>(),
   depth = 0,

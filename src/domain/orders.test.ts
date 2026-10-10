@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { WalletOrder } from "@zylith/sdk";
 import type { PairConfig } from "./deployment";
-import { isOpenOrder, orderRows, orderStatusLabel } from "./orders";
+import { isOpenOrder, orderOperationIsReconciling, orderRows, orderStatusLabel } from "./orders";
+import { failureFromCode } from "./userFacingErrors";
 
 const pair: PairConfig = {
   pair_id: "STRK/USDC",
@@ -55,5 +56,36 @@ describe("order rows", () => {
     expect(orderStatusLabel({ ...row, state: "pending", filled: "0" })).toBe("Submitting");
     expect(orderStatusLabel({ ...row, state: "live", filled: "0" })).toBe("Open");
     expect(orderStatusLabel({ ...row, state: "live", filled: "1" })).toBe("Partially filled");
+  });
+});
+
+describe("order operation reconciliation", () => {
+  it("tracks submission and cancellation through their distinct durable states", () => {
+    const submission = failureFromCode("TRANSACTION_STATUS_UNKNOWN", {
+      stage: "order-submission",
+      outcome: "unknown",
+    });
+    const cancellation = failureFromCode("CANCELLATION_PENDING", {
+      stage: "order-cancellation",
+      outcome: "submitted",
+    });
+
+    expect(orderOperationIsReconciling(submission, [{ id: "0x1", state: "submitting" }])).toBe(true);
+    expect(orderOperationIsReconciling(submission, [{ id: "0x1", state: "live" }])).toBe(false);
+    expect(orderOperationIsReconciling(cancellation, [{ id: "0x1", state: "cancelling" }])).toBe(true);
+    expect(orderOperationIsReconciling(cancellation, [{ id: "0x1", state: "filled" }])).toBe(false);
+  });
+
+  it("does not clear or sustain a cancellation from another order", () => {
+    const cancellation = failureFromCode("CANCELLATION_PENDING", {
+      stage: "order-cancellation",
+      outcome: "submitted",
+      operationId: "0xwanted",
+    });
+
+    expect(orderOperationIsReconciling(cancellation, [
+      { id: "0xother", state: "cancelling" },
+      { id: "0xwanted", state: "filled" },
+    ])).toBe(false);
   });
 });

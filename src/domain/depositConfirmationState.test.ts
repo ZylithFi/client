@@ -39,12 +39,14 @@ describe("depositConfirmationState", () => {
     const record: DepositConfirmationRecord = {
       source: "deposit",
       pending_deposit_tx: "0xtx",
+      public_transaction_confirmed: true,
       deposit_failed: true,
       deposit_failure_reason: "previous failure",
     };
     markDepositRecordConfirmed(record);
     expect(record.deposit_confirmed).toBe(true);
     expect(record.pending_deposit_tx).toBeUndefined();
+    expect(record.public_transaction_confirmed).toBeUndefined();
     expect(record.deposit_failed).toBeUndefined();
     expect(record.deposit_failure_reason).toBeUndefined();
   });
@@ -71,7 +73,7 @@ describe("depositConfirmationState", () => {
     ).toBe(true);
   });
 
-  it("does not fail the currently in-flight deposit request", () => {
+  it("does not infer non-submission from a missing acknowledgement", () => {
     expect(
       pendingDepositFailureReason({
         record: {
@@ -80,35 +82,23 @@ describe("depositConfirmationState", () => {
           deposit_requested_at_unix_ms: 0,
         },
         status: null,
-        nowUnixMs: 60_000,
-        inFlightRequestId: "request-1",
-        failureGraceMs: 1,
-        confirmedRegistrationGraceMs: 1,
       }),
     ).toBeNull();
   });
 
-  it("returns failure reasons only after the relevant grace windows", () => {
+  it("keeps missing, unpropagated, and credited-late transactions unresolved", () => {
     expect(
       pendingDepositFailureReason({
         record: { source: "deposit", deposit_requested_at_unix_ms: 0 },
         status: null,
-        nowUnixMs: 10,
-        inFlightRequestId: null,
-        failureGraceMs: 11,
-        confirmedRegistrationGraceMs: 20,
       }),
     ).toBeNull();
     expect(
       pendingDepositFailureReason({
         record: { source: "deposit", deposit_requested_at_unix_ms: 0 },
         status: null,
-        nowUnixMs: 11,
-        inFlightRequestId: null,
-        failureGraceMs: 11,
-        confirmedRegistrationGraceMs: 20,
       }),
-    ).toBe("Deposit transaction was not submitted. Please retry the deposit.");
+    ).toBeNull();
     expect(
       pendingDepositFailureReason({
         record: {
@@ -117,12 +107,8 @@ describe("depositConfirmationState", () => {
           deposit_requested_at_unix_ms: 0,
         },
         status: { failed: false, notFound: true },
-        nowUnixMs: 11,
-        inFlightRequestId: null,
-        failureGraceMs: 11,
-        confirmedRegistrationGraceMs: 20,
       }),
-    ).toBe("Deposit transaction was not found on Starknet.");
+    ).toBeNull();
     expect(
       pendingDepositFailureReason({
         record: {
@@ -131,11 +117,16 @@ describe("depositConfirmationState", () => {
           deposit_requested_at_unix_ms: 0,
         },
         status: { failed: false, notFound: false, confirmed: true },
-        nowUnixMs: 20,
-        inFlightRequestId: null,
-        failureGraceMs: 11,
-        confirmedRegistrationGraceMs: 20,
       }),
-    ).toBe("Deposit transaction confirmed, but no Zylith note was registered.");
+    ).toBeNull();
+  });
+
+  it("fails only from an authoritative reverted receipt", () => {
+    expect(
+      pendingDepositFailureReason({
+        record: { source: "deposit", pending_deposit_tx: "0xtx" },
+        status: { failed: true, notFound: false, reason: "reverted" },
+      }),
+    ).toBe("reverted");
   });
 });

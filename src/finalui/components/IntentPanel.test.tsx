@@ -4,6 +4,7 @@ import type { PairConfig } from "../../domain/tradeIntent";
 import { configureAssetDecimals } from "../../domain/assets";
 import type { DeploymentConfig } from "../../domain/deployment";
 import { IntentPanel } from "./IntentPanel";
+import { failureFromCode } from "../../domain/userFacingErrors";
 
 const pair: PairConfig = {
   pair_id: "STRK/USDC",
@@ -218,6 +219,86 @@ describe("IntentPanel", () => {
     await act(async () => finish?.(true));
   });
 
+  it("does not resubmit while an earlier order outcome is unknown", async () => {
+    const onSubmit = vi.fn();
+    const onRefreshStatus = vi.fn();
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
+        walletReady
+        onSubmit={onSubmit}
+        onRefreshStatus={onRefreshStatus}
+        submitError={failureFromCode("TRANSACTION_STATUS_UNKNOWN", {
+          domain: "order",
+          stage: "order-submission",
+        })}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Trade amount"), {
+      target: { value: "100" },
+    });
+
+    const button = screen.getByRole("button", { name: "Checking order status" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check status" }));
+    });
+    expect(onRefreshStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows exact available, required, and reserved balance context", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "25000000", locked: "10000000" }]}
+        walletReady
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Trade amount"), { target: { value: "40" } });
+    expect(screen.getByRole("alert")).toHaveTextContent("Insufficient USDC");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Available: 25 USDC. Required: 40 USDC. 10 USDC is reserved in open orders.",
+    );
+  });
+
+  it("shows the exact asset precision limit", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
+        walletReady
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Trade amount"), {
+      target: { value: "1.0000001" },
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "USDC supports up to 6 decimal places.",
+    );
+  });
+
+  it("treats zero as an invalid amount instead of a precision error", () => {
+    render(
+      <IntentPanel
+        {...commonProps}
+        balances={[{ asset: "USDC", available: "1000000000", locked: "0" }]}
+        walletReady
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Trade amount"), {
+      target: { value: "0" },
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Enter an amount");
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/decimal/i);
+  });
+
   it("fails closed while the signed-price service is offline", () => {
     render(
       <IntentPanel
@@ -241,7 +322,11 @@ describe("IntentPanel", () => {
       />,
     );
     fireEvent.change(screen.getByLabelText("Trade amount"), { target: { value: "1" } });
-    expect(screen.getByText(/below the STRK\/USDC minimum/i)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveAttribute(
+      "data-error-code",
+      "BELOW_MINIMUM"
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("Minimum: 50 USDC");
     expect(screen.getByRole("button", { name: "Submit order" })).toBeDisabled();
   });
 });

@@ -3,6 +3,8 @@ import { type OrderRow, hasPositiveAmount, isOpenOrder, orderStatusLabel, orderS
 import { SlidersIcon } from "../components/Icons";
 import { FilterDropdown } from "../components/FilterDropdown";
 import { FilledProgress, type OrderSortDirection, type OrderSortKey, SortableTableHeader, sortOrderRows } from "../components/OrderTableCells";
+import { FailureNotice } from "../../components/FailureNotice";
+import type { NormalizedFailure } from "../../domain/userFacingErrors";
 
 type Tab = "Open" | "Fills" | "History";
 type SideFilter = "All" | "Buy" | "Sell";
@@ -20,13 +22,21 @@ export function OrdersPage({
   error,
   onCancel,
   onConnectWallet,
+  onRefreshStatus,
+  onSwitchNetwork,
+  onContactSupport,
+  onDismissError,
 }: {
   orders: OrderRow[];
   walletConnected: boolean;
   walletReady: boolean;
-  error?: string | null;
+  error?: NormalizedFailure | null;
   onCancel: (order: OrderRow) => Promise<void>;
   onConnectWallet: () => void;
+  onRefreshStatus?: () => void | Promise<void>;
+  onSwitchNetwork?: () => void | Promise<void>;
+  onContactSupport?: () => void | Promise<void>;
+  onDismissError?: () => void | Promise<void>;
 }) {
   const [activeTab, setActiveTab] = useState<Tab>("Open");
   const [sideFilter, setSideFilter] = useState<SideFilter>("All");
@@ -132,7 +142,20 @@ export function OrdersPage({
       </section>
 
       <section className="orders-workspace" aria-label="Order activity">
-        {error && <div className="slide-inline-notice" role="alert">{error}</div>}
+        {error && (
+          <FailureNotice
+            failure={error}
+            className="slide-inline-notice"
+            actions={{
+              reconnect: onConnectWallet,
+              switchNetwork: onSwitchNetwork,
+              refreshState: onRefreshStatus,
+              checkStatus: onRefreshStatus,
+              contactSupport: onContactSupport,
+              dismiss: error.presentation === "toast" ? onDismissError : undefined,
+            }}
+          />
+        )}
         <div className="orders-page-toolbar">
           <div className="page-tabs" role="tablist" aria-label="Order lifecycle">
             {tabs.map((tab) => {
