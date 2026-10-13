@@ -2523,7 +2523,12 @@ async function awaitOwnedClient<T>(
       if (amount <= 0n) throw new Error("Deposit amount must be greater than zero");
       const rail = selectedDepositFundingRail(manifest);
       const bridgeAddress = requiredNonZeroFelt(rail.bridgeAdapter, "privacy_deposit_bridge_address");
+      const privacyPoolAddress = requiredNonZeroFelt(rail.privacyPool, "privacy_pool_address");
       const tokenAddress = fundingRailTokenAddress(manifest, asset);
+      const feeTokenAddress = fundingRailTokenAddress(
+        manifest,
+        manifest.market_registry.gas_fee_asset_id,
+      );
       const plan = parseWalletJson(await awaitOwnedClient(
         sessionGeneration,
         client,
@@ -2625,9 +2630,16 @@ async function awaitOwnedClient<T>(
         (candidate) => candidate.asset_id === asset,
       );
       if (!depositAsset) throw new Error(`${asset} is not configured for deposits.`);
+      const feeResult = await awaitCurrent(
+        sessionGeneration,
+        starknetCall(manifest.rpc_url, privacyPoolAddress, "get_fee_amount", []),
+      );
+      const feeAmount = BigInt(requiredNonZeroFelt(feeResult[0], "privacy_pool_fee"));
       const result = await awaitCurrent(sessionGeneration, walletPrivacy.fundZylithFromWallet({
         provider: provider as never,
         tokenAddress,
+        feeTokenAddress,
+        feeAmount,
         tokenMetadata: {
           name: asset,
           symbol: asset,

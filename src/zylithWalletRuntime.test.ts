@@ -459,7 +459,9 @@ describe("wallet v2 browser restore compatibility", () => {
     recoveryBody = null;
     remoteVault = null;
     requests = [];
-    rpcResponses = {};
+    rpcResponses = {
+      [hash.getSelectorFromName("get_fee_amount")]: ["1"],
+    };
     manifest.funding.starknet_privacy!.ingress_key_registry_fingerprint = "ab".repeat(32);
     fundingSubmissionBoundary.submit.mockClear();
     walletPrivacyBoundary.claim.mockClear();

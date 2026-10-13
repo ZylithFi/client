@@ -329,7 +329,7 @@ export function assertBrowserNetworkPolicy(
 }
 
 function validProofVersion(value: unknown): boolean {
-  return value === "PROOF2";
+  return value === "PROOF1" || value === "PROOF2";
 }
 
 function validHttpsUrl(value: unknown): boolean {

@@ -12,6 +12,8 @@ type WalletPrivacyOptions = {
 type FundZylithInput = WalletPrivacyOptions & {
   provider: WalletPrivacyProvider;
   tokenAddress: string;
+  feeTokenAddress: string;
+  feeAmount: bigint;
   tokenMetadata?: {
     name: string;
     symbol: string;
@@ -118,10 +120,18 @@ export async function fundZylithFromWallet(
   requirePositiveAmount(input.amount);
   input.onStage?.("Preparing private balance");
   const depositToken = requiredFelt(input.tokenAddress, "deposit token");
+  const feeToken = requiredFelt(input.feeTokenAddress, "fee token");
   if (input.tokenMetadata) {
     await ensureWalletAsset(input.provider, depositToken, input.tokenMetadata);
   }
-  let privateBalance = await walletPrivateBalance(input.provider, depositToken);
+  let currentBalances = await walletPrivateBalances(
+    input.provider,
+    [depositToken, feeToken],
+  );
+  const principalBalances = new Map<string, bigint>([[depositToken, input.amount]]);
+  let feeBalances = new Map<string, bigint>([[feeToken, input.feeAmount]]);
+  let requiredBalances = addBalances(principalBalances, feeBalances);
+  let shieldAmounts = shieldingAmounts(currentBalances, requiredBalances, feeBalances);
   const fundingActions = [
     {
       type: "withdraw",
@@ -136,34 +146,37 @@ export async function fundZylithFromWallet(
         requiredFelt(value, "deposit calldata")),
     },
   ];
-  let estimatedFee = 0n;
   let shieldTransactionHash: string | null = null;
-  for (let round = 0; privateBalance < input.amount + estimatedFee; round += 1) {
+  for (let round = 0; shieldAmounts.size > 0; round += 1) {
     if (round >= MAX_SHIELDING_ROUNDS) {
       throw new Error(
         "The wallet fee changed while preparing the private balance. Retry the deposit.",
       );
     }
-    const requiredBalance = input.amount + estimatedFee;
-    const shieldAmount = requiredBalance - privateBalance + estimatedFee;
-    requireSupportedAmount(shieldAmount);
     input.assertWalletContext?.();
     input.onStage?.(
       input.amountLabel
         ? `Shielding ${input.amountLabel}`
         : "Shielding funds in your wallet",
     );
-    const balanceBeforeShield = privateBalance;
-    const transactionHash = await invokePrivateActions(input.provider, [
-      { type: "deposit", token: depositToken, amount: feltHex(shieldAmount) },
-    ], input.onWalletTransactionSubmissionStarted);
+    const transactionHash = await invokePrivateActions(
+      input.provider,
+      [...shieldAmounts].map(([token, amount]) => ({
+        type: "deposit",
+        token,
+        amount: feltHex(amount),
+      })),
+      input.onWalletTransactionSubmissionStarted,
+    );
     shieldTransactionHash ??= transactionHash;
     input.onStage?.("Waiting for shielded balance");
+    const balancesBeforeShield = currentBalances;
     try {
-      privateBalance = await waitForShieldTransaction(
+      currentBalances = await waitForShieldTransaction(
         input,
-        depositToken,
-        balanceBeforeShield,
+        requiredBalances,
+        balancesBeforeShield,
+        shieldAmounts,
         transactionHash,
       );
       input.onWalletTransactionResolved?.();
@@ -173,10 +186,14 @@ export async function fundZylithFromWallet(
       }
       throw error;
     }
-    const expectedBalance = balanceBeforeShield + shieldAmount;
-    estimatedFee = expectedBalance > privateBalance
-      ? expectedBalance - privateBalance
-      : 0n;
+    const observedFees = observedBalanceDeductions(
+      balancesBeforeShield,
+      shieldAmounts,
+      currentBalances,
+    );
+    if (observedFees.size > 0) feeBalances = observedFees;
+    requiredBalances = addBalances(principalBalances, feeBalances);
+    shieldAmounts = shieldingAmounts(currentBalances, requiredBalances, feeBalances);
   }
 
   input.onStage?.("Funding Zylith");
@@ -481,8 +498,9 @@ export function walletPrivateSubmissionMayHaveLanded(error: unknown) {
 
 async function waitForShieldTransaction(
   input: FundZylithInput,
-  token: string,
-  balanceBeforeShield: bigint,
+  requiredBalances: Map<string, bigint>,
+  balancesBeforeShield: Map<string, bigint>,
+  shieldAmounts: Map<string, bigint>,
   shieldTransactionHash: string,
 ) {
   const polls = input.maxBalancePolls ?? DEFAULT_PRIVATE_BALANCE_POLLS;
@@ -493,19 +511,31 @@ async function waitForShieldTransaction(
   if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs > 60_000) {
     throw new Error("Private balance polling delay is invalid.");
   }
-  let confirmedReads = 0;
+  const tokens = [...new Set([
+    ...requiredBalances.keys(),
+    ...balancesBeforeShield.keys(),
+    ...shieldAmounts.keys(),
+  ])];
   for (let attempt = 0; attempt < polls; attempt += 1) {
     const transactionStatus = await input.transactionStatus?.(shieldTransactionHash)
-      .catch(() => "pending" as const);
+      .catch(() => "pending" as const) ?? "pending";
     if (transactionStatus === "failed") {
       throw new Error(
         "The shielding transaction failed. No funds were deposited. Retry the deposit.",
       );
     }
-    if (!input.transactionStatus || transactionStatus === "confirmed") {
-      const balance = await walletPrivateBalance(input.provider, token);
-      if (balance !== balanceBeforeShield) return balance;
-      if (transactionStatus === "confirmed" && ++confirmedReads >= 3) return balance;
+    const balances = await walletPrivateBalances(input.provider, tokens);
+    if ([...requiredBalances].every(
+      ([token, required]) => (balances.get(token) ?? 0n) >= required,
+    )) {
+      return balances;
+    }
+    if (
+      transactionStatus === "confirmed"
+      && tokens.some((token) =>
+        (balances.get(token) ?? 0n) > (balancesBeforeShield.get(token) ?? 0n))
+    ) {
+      return balances;
     }
     if (attempt + 1 < polls && delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -514,6 +544,55 @@ async function waitForShieldTransaction(
   throw new Error(
     "The shielded balance is not ready yet. Keep the wallet open and retry.",
   );
+}
+
+function addBalances(
+  left: Map<string, bigint>,
+  right: Map<string, bigint>,
+) {
+  const result = new Map(left);
+  for (const [token, amount] of right) {
+    result.set(token, (result.get(token) ?? 0n) + amount);
+  }
+  for (const amount of result.values()) requireSupportedAmount(amount);
+  return result;
+}
+
+function shieldingAmounts(
+  balances: Map<string, bigint>,
+  requiredBalances: Map<string, bigint>,
+  expectedFees: Map<string, bigint>,
+) {
+  const result = new Map<string, bigint>();
+  for (const [token, required] of requiredBalances) {
+    const balance = balances.get(token) ?? 0n;
+    if (balance < required) result.set(token, required - balance);
+  }
+  if (result.size === 0) return result;
+  for (const [token, fee] of expectedFees) {
+    result.set(token, (result.get(token) ?? 0n) + fee);
+  }
+  for (const amount of result.values()) requireSupportedAmount(amount);
+  return result;
+}
+
+function observedBalanceDeductions(
+  balancesBeforeShield: Map<string, bigint>,
+  shieldAmounts: Map<string, bigint>,
+  balancesAfterShield: Map<string, bigint>,
+) {
+  const deductions = new Map<string, bigint>();
+  for (const token of new Set([
+    ...balancesBeforeShield.keys(),
+    ...shieldAmounts.keys(),
+    ...balancesAfterShield.keys(),
+  ])) {
+    const expected = (balancesBeforeShield.get(token) ?? 0n)
+      + (shieldAmounts.get(token) ?? 0n);
+    const actual = balancesAfterShield.get(token) ?? 0n;
+    if (actual < expected) deductions.set(token, expected - actual);
+  }
+  return deductions;
 }
 
 async function invokePrivateActions(

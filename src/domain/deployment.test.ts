@@ -101,7 +101,7 @@ describe("deployment manifest", () => {
     expect(() => assertDeploymentManifest(manifest)).toThrow(/funding configuration/i);
   });
 
-  it("rejects incomplete or unpinned proof identities", () => {
+  it("accepts supported proof families and rejects incomplete or unknown proof identities", () => {
     const manifest = finalized(JSON.parse(JSON.stringify(example)));
     manifest.proof.scheme = "legacy";
     expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
@@ -112,8 +112,14 @@ describe("deployment manifest", () => {
     manifest.proof.prover_build_id = "";
     expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
     manifest.proof.prover_build_id = "stwo-production-v1";
-    manifest.proof.proof_version = "PROOF1";
-    expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
+    for (const version of ["PROOF1", "PROOF2"]) {
+      manifest.proof.proof_version = version;
+      expect(() => assertDeploymentManifest(manifest)).not.toThrow();
+    }
+    for (const version of ["PROOF3", "0x50524f4f4632", "", "proof1"]) {
+      manifest.proof.proof_version = version;
+      expect(() => assertDeploymentManifest(manifest)).toThrow(/proof configuration/i);
+    }
   });
 
   it("rejects oversized registry collections and arithmetic outside u128", () => {

@@ -72,7 +72,7 @@ export function pendingDepositFailureReason(input: {
   status: DepositReceiptState | null;
 }): string | null {
   // Missing acknowledgements, missing receipts, and confirmed public transfers without
-  // private credit are all unresolved—not proof that replay is safe. Only an authoritative
+  // private credit are all unresolved - not proof that replay is safe. Only an authoritative
   // failed receipt establishes that this particular transaction cannot later credit a note.
   if (!input.record.pending_deposit_tx) return null;
   if (input.status?.failed) {
