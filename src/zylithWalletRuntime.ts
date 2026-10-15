@@ -2899,7 +2899,7 @@ async function awaitOwnedClient<T>(
     return draft.side === "Sell" ? amount : orderQuoteValue(draft.amount, draft.limitPrice, pair);
   }
 
-  /** the fewest spendable notes covering `required`, largest first. */
+  /** the fewest spendable notes covering `required`, preferring an exact single-note match. */
   function selectFunding(asset: string, required: bigint) {
     const candidates = state.notes
       .filter((note) => note.asset === asset && spendable(note))
@@ -2911,6 +2911,8 @@ async function awaitOwnedClient<T>(
           normalizeFeltForComparison(right.commitment),
         );
       });
+    const exact = candidates.find((note) => BigInt(note.fields.amount) === required);
+    if (exact) return [exact];
     const selected: WalletNote[] = [];
     let total = 0n;
     for (const note of candidates) {

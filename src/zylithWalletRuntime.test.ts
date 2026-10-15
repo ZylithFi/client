@@ -1039,7 +1039,9 @@ describe("wallet v2 browser restore compatibility", () => {
     return { key, raw: JSON.stringify({ ...current, version: kind === "local" ? 1 : 2 }) };
   }
 
-  async function readySealedSubmission(operation: "order" | "cancel" | "withdraw", cancellationOrderIds = ["0x4"]) {
+  async function readySealedSubmission(
+    operation: "order" | "cancel" | "withdraw", cancellationOrderIds = ["0x4"], amounts: string[] = [],
+  ) {
     const registry = executionRegistry();
     manifest.funding.starknet_privacy!.ingress_key_registry_fingerprint = walletWasm.zylith_wallet_registry_fingerprint(JSON.stringify(registry));
     delete manifest.funding.starknet_privacy!.ingress_key_registry_next_fingerprint;
@@ -1059,7 +1061,7 @@ describe("wallet v2 browser restore compatibility", () => {
       const plan = JSON.parse(walletWasm.zylith_wallet_build_deposit_submission_plan(JSON.stringify({
         seed_hex: seedHex, chain_id: manifest.chain_id,
         bridge_address: manifest.funding.starknet_privacy!.bridge_adapter,
-        asset_id: "STRK", amount: "1000000000000000000", deposit_nonce: String(index + 1),
+        asset_id: "STRK", amount: amounts[index] ?? "1000000000000000000", deposit_nonce: String(index + 1),
       })));
       const summary = JSON.parse(walletWasm.zylith_wallet_note_summary(JSON.stringify(plan.note_fields)));
       const funding: WalletNote = { ...summary, fields: plan.note_fields, asset: "STRK", source: "output" };
@@ -1080,6 +1082,36 @@ describe("wallet v2 browser restore compatibility", () => {
       limitPrice: "1000000", expiresAtMs: Date.now() + 60_000,
     });
   }
+
+  it.each([
+    ["1000000000000000000", "1000000000000000000"],
+    ["1500000000000000000", "2000000000000000000"],
+  ])("funds %s with %s without increasing note count", async (required, expected) => {
+    const build = vi.fn((input: string) => walletWasm.zylith_wallet_build_order_request(input));
+    runtime.suspend();
+    runtime = createRuntime({ ...walletWasm, zylith_wallet_build_order_request: build });
+    await readySealedSubmission("order", ["0x4", "0x5"], ["2000000000000000000", "1000000000000000000"]);
+    vi.spyOn(exchange(), "submit").mockResolvedValue({ order_id: "0x4" });
+    await runtime.submitOrder({
+      pair: "STRK/USDC", side: "Sell", external: false, amount: required,
+      limitPrice: "1000000", expiresAtMs: Date.now() + 60_000,
+    });
+    const request = JSON.parse(build.mock.calls[0][0]);
+    expect(request.funding).toHaveLength(1);
+    expect(request.funding[0].amount).toBe(expected);
+  });
+
+  it("does not select a reserved exact-match note", async () => {
+    const build = vi.fn((input: string) => walletWasm.zylith_wallet_build_order_request(input));
+    runtime.suspend();
+    runtime = createRuntime({ ...walletWasm, zylith_wallet_build_order_request: build });
+    await readySealedSubmission("cancel");
+    await expect(runtime.submitOrder({
+      pair: "STRK/USDC", side: "Sell", external: false, amount: "1000000000000000000",
+      limitPrice: "1000000", expiresAtMs: Date.now() + 60_000,
+    })).rejects.toThrow("Insufficient STRK balance");
+    expect(build).not.toHaveBeenCalled();
+  });
 
   it.each(["order", "cancel", "withdraw"] as const)(
     "treats the operator's pre-open 429 for %s as proved not submitted",
